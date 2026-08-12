@@ -49,7 +49,7 @@ A mapping of execution-parameter overrides. Supported keys:
 | `max_connections` | int | Maps to `--max-connections` (concurrent API calls within an eval) |
 | `runs_per_condition` | int | Number of full-run repetitions per condition-model pair |
 
-Unrecognised keys are ignored with a note in **Additional Notes**. The Executor may apply other defaults (e.g., `--retry-on-error 3`, `--no-fail-on-error`, `--display none`) without them being in overrides — these are policy, not configuration.
+Unrecognised keys are ignored with a note in **Additional Notes**. The Executor may apply other defaults (e.g., `--retry-on-error 3`, `--no-fail-on-error`, `--display plain`) without them being in overrides — these are policy, not configuration.
 
 ---
 
@@ -78,7 +78,7 @@ For each excluded pair:
   - **Final exit code** (for structural): integer
   - **Command**: the exact `uv run inspect eval ...` invocation attempted
   - **Evidence**:
-    - *structural*: stderr tail (up to ~50 lines) from the final attempt
+    - *structural*: output tail (up to ~50 lines) from the final attempt, combining stderr **and stdout** — Inspect reports prerequisite failures (missing API key, unresolvable model) on stdout
     - *all-samples-deterministic-sample-error*: all 3 sample error traces from the `--limit 3` retest
 
 This section is a gate on the Execution Matrix: pairs appearing here are absent from the matrix below.
@@ -184,7 +184,7 @@ Failures are classified by **observable criteria**, not by judgement about cause
 | **Sample-level** | Eval process exited successfully; ≥1 sample errored in the log | Proceed to Analyst; retry-distribution-shift caveat applies |
 | **Structural** | All process-level retries exhausted; no usable log produced | Must investigate before proceeding; re-running will not help |
 
-Every **structural** failure record includes: final exit code, exact command, and stderr tail (~50 lines). These three pieces are sufficient for the orchestrator to distinguish experiment-setup bugs (ImportError, missing task file) from infrastructure issues (missing API key, Docker unavailable).
+Every **structural** failure record includes: final exit code, exact command, and output tail (~50 lines, stderr and stdout combined). These three pieces are sufficient for the orchestrator to distinguish experiment-setup bugs (ImportError, missing task file) from infrastructure issues (missing API key, Docker unavailable). Both streams are required: Inspect writes provider-initialisation and missing-key errors to stdout, so a stderr-only tail would report the most common structural failures with no evidence at all.
 
 Edge-case handling:
 - **Subprocess exited 0 but no usable log produced** → Structural.
@@ -236,7 +236,7 @@ The Executor's report **must** satisfy these commitments. They are non-negotiabl
 
 - **Full accountability.** Every condition-model pair submitted by the orchestrator must appear somewhere in the report — in the Execution Matrix, in Preflight Exclusions, or (if the pair was malformed) in Additional Notes. Silently discarding a pair is a silent failure.
 
-- **Evidence with every structural failure.** Structural failures must include exit code, exact command, and stderr tail. Reporting a structural failure without evidence robs the orchestrator of the material needed to diagnose root cause, forcing re-runs instead of fixes.
+- **Evidence with every structural failure.** Structural failures must include exit code, exact command, and the combined stdout+stderr tail. Reporting a structural failure without evidence robs the orchestrator of the material needed to diagnose root cause, forcing re-runs instead of fixes. If a command exits non-zero with genuinely no output on either stream, say so explicitly rather than omitting the evidence line.
 
 - **Correct category assignment.** The three-category taxonomy is observable and rule-bound. Mis-classifying a structural failure as transient would lead the orchestrator to re-run instead of investigate; mis-classifying transient as structural would lead to unnecessary diagnostic work. The Executor applies the criteria literally, not by judgement.
 

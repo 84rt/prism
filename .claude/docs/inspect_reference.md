@@ -32,7 +32,7 @@ Patterns A and B can combine with Pattern C: every condition runs against every 
 
 These flags are policy, not configuration. They are not in the request's `overrides` — the Executor sets them unconditionally. Check the current spelling of each via `--help`:
 
-- `--display none` — headless operation (no TTY output)
+- `--display plain` — headless operation (no TTY control sequences). **Not `--display none`**: `none` suppresses Inspect's startup errors entirely, so a missing API key or an unresolvable model exits non-zero with zero bytes on both streams and the orchestrator gets no evidence at all. `plain` is equally headless and still reports. Note that Inspect writes these errors to *stdout*, which is why `execute_evals.py` classifies on both streams
 - `--log-dir <experiment_dir>/logs/<condition_name>/` — per-condition log organisation
 - `--tags "exp:<experiment_name>,cond:<condition_name>"` — namespaced tags avoid substring ambiguity
 - `--metadata condition=<condition_name> --metadata model=<model_string>` — embeds condition label in the log file itself (load-bearing: provides redundancy against later file reorganisation)

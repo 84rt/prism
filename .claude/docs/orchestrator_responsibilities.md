@@ -224,7 +224,7 @@ The report structure is defined in `executor_interface_contract.md §Report Form
 
 1. **Read Preflight Exclusions before the Execution Matrix.** Excluded pairs never reached full execution, so their absence from the Matrix is not a bug but a gate. For each exclusion:
    - *Reason*: `structural` means the eval could not run at all; `all-samples-deterministic-sample-error` means the `--limit 3` retest found persistent sample failures and proceeding would waste compute.
-   - *Evidence*: structural exclusions ship exit code, command, and stderr tail. Read the stderr to diagnose whether the cause is (i) a bug in the modifications applied in Step 2c, (ii) a missing infrastructure prerequisite (API key, Docker daemon, task file), or (iii) an Inspect-side issue.
+   - *Evidence*: structural exclusions ship exit code, command, and the combined stdout+stderr tail. Read that output to diagnose whether the cause is (i) a bug in the modifications applied in Step 2c, (ii) a missing infrastructure prerequisite (API key, Docker daemon, task file), or (iii) an Inspect-side issue.
    - *Asymmetric exclusions*: if all excluded pairs are in the same condition (e.g., every `treatment` pair excluded while every `control` pair runs), this is a strong signal that Step 2c broke the eval for that condition. Re-apply the Explorer's diffs, verify them against the Pipeline Model, and re-run.
 
 2. **Read the Execution Matrix for the pairs that ran.** Scan the `Status` column for anything other than `success`. The `Sample-Level Retries` column flags pairs where `--retry-on-error` fired; non-zero retries introduce distribution-shift concerns (see item 7 below).
@@ -232,9 +232,9 @@ The report structure is defined in `executor_interface_contract.md §Report Form
 3. **Interpret the Error Summary by category.** Each category gates a different action:
    - **Transient (recovered)**: informational. The eval completed; proceed.
    - **Sample-level**: the eval completed but some samples errored. The Analyst will quantify per-condition attrition. Proceed, but record the attrition for the Analyst's delegation brief.
-   - **Structural**: the eval did not run to completion. Do not proceed without investigation. Read the evidence (exit code, command, stderr) to diagnose. Common signatures:
+   - **Structural**: the eval did not run to completion. Do not proceed without investigation. Read the evidence (exit code, command, combined stdout+stderr tail) to diagnose. Common signatures:
      - `ImportError` referencing a file you created in Step 2c → your modification introduced a bug; re-check the diff rather than re-running.
-     - `Authentication` / `401` / `API key` in stderr → verify `.env`; do not print key values.
+     - `Authentication` / `401` / `API key` / `No <PROVIDER>_API_KEY defined in the environment` → verify the required key is in `.env`; do not print key values. Note this arrives on stdout, not stderr.
      - `Docker` / `sandbox` errors → sandbox infrastructure; may need `inspect sandbox cleanup docker`.
      - `No such file` referencing a task file → Step 2d path was wrong.
 
@@ -609,7 +609,7 @@ Each iteration gets its own directory. Previous iterations are never modified �
 
 The Edge Cases below concern sub-agents that *return a report* you don't like — no viable sites, no successful pairs, no patterns. This section concerns a different problem: a sub-agent that **fails to return a usable report at all** — the CLI invocation crashes, times out, exits non-zero with empty output, or the agent hits an API refusal (`stop_reason='refusal'`). These are infrastructure events, not experimental findings, and they have their own recovery discipline.
 
-**Triage before you react.** A failed invocation is a diagnostic problem, not a trigger for a fixed procedure. Capture the evidence first — exit code, stderr tail, any `stop_reason` — then work out *why* it failed before deciding what to do. The decisive distinction is transient vs. deterministic:
+**Triage before you react.** A failed invocation is a diagnostic problem, not a trigger for a fixed procedure. Capture the evidence first — exit code, combined output tail, any `stop_reason` — then work out *why* it failed before deciding what to do. The decisive distinction is transient vs. deterministic:
 
 - *Transient* (timeout, rate limit, one-off network/API error): re-invoking will likely succeed. Retry once or twice, noting it in the log.
 - *Deterministic* (API refusal on the content, SDK crash, misconfiguration, exhausted API credits): re-invoking unchanged fails the same way. Stop and diagnose; do not retry blindly.
@@ -640,7 +640,7 @@ Some workarounds change the *experiment* rather than the harness — e.g. switch
 The Explorer has read the environment and concluded there is no site where the hypothesis could be tested given the environment's structure, or that every candidate site carries a Blocker. Report to user with the Explorer's reasoning (drawn from the Summary, Global Risk Assessment, and Uncertainty & Open Questions sections). Ask the user to revise the hypothesis or choose a different eval environment.
 
 ### Executor reports no successful condition-model pairs
-Do not launch the Analyst. Read the Preflight Exclusions and Error Summary sections for evidence (exit codes, commands, stderr tails) and diagnose from there. Common causes: API key issues, sandbox misconfiguration, task file errors introduced by the orchestrator's modifications in Step 2c. Fix and re-run, or escalate to user. See Step 2e for full interpretation guidance.
+Do not launch the Analyst. Read the Preflight Exclusions and Error Summary sections for evidence (exit codes, commands, combined output tails) and diagnose from there. Common causes: API key issues, sandbox misconfiguration, task file errors introduced by the orchestrator's modifications in Step 2c. Fix and re-run, or escalate to user. See Step 2e for full interpretation guidance.
 
 ### Executor reports asymmetric failure rates
 Asymmetry across conditions — either at preflight (every `treatment` pair excluded while every `control` pair runs) or in full execution (e.g., 80% of control samples succeeded but only 30% of treatment samples) — is a confound. Do not treat this as a valid comparison. Re-run the failed condition, or investigate whether the treatment modifications broke the eval. Asymmetric Preflight Exclusions in particular almost always mean Step 2c broke something for a specific condition — re-applying the Explorer's diffs is usually the fix.

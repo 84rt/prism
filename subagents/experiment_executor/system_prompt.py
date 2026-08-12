@@ -67,7 +67,7 @@ Create `<experiment_dir>/logs/<condition_name>/` for each condition. Use `mkdir 
 
 For each `(condition, model)` pair, build the `inspect eval` invocation using the task file and `-T` arguments from the `conditions` mapping, plus fixed policy flags. Policy flags applied to every invocation (confirm current spellings via `--help`):
 
-- `--display none` — headless operation
+- `--display plain` — headless operation (**not** `--display none`, which suppresses Inspect's startup errors and would leave a failure with no diagnostic evidence)
 - `--log-dir <experiment_dir>/logs/<condition_name>/`
 - `--tags "exp:<experiment_name>,cond:<condition_name>"` (namespaced prefixes)
 - `--metadata condition=<condition_name> --metadata model=<model_string>`

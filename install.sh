@@ -163,6 +163,7 @@ echo "Creating symlinks..."
 
 # scripts
 link_file "scripts/execute_evals.py"
+link_file "scripts/openrouter_endpoints.py"
 
 # subagents
 link_file "subagents/__init__.py"
@@ -215,6 +216,7 @@ GITIGNORE_ENTRIES=(
     "# $SCAFFOLD_NAME scaffold (symlinks managed by $SCAFFOLD_NAME/install.sh)"
     "subagents/"
     "scripts/execute_evals.py"
+    "scripts/openrouter_endpoints.py"
     ".claude/docs/analyst_delegation_guide.md"
     ".claude/docs/analyst_interface_contract.md"
     ".claude/docs/eval_science_principles.md"
@@ -341,7 +343,8 @@ else
     step=$((step + 1))
 fi
 echo "  $step. Add your API keys to a .env file in the target repo: ANTHROPIC_API_KEY"
-echo "      is required; OPENAI_API_KEY only if your eval or grader uses OpenAI"
+echo "      is required; OPENAI_API_KEY if your eval or grader uses OpenAI; and/or"
+echo "      OPENROUTER_API_KEY to reach any provider's models through OpenRouter"
 step=$((step + 1))
 echo "  $step. (Optional) create .claude/settings.local.json for local overrides"
 step=$((step + 1))

@@ -108,6 +108,7 @@ echo "Removing symlinks..."
 
 # scripts
 unlink_file "scripts/execute_evals.py"
+unlink_file "scripts/openrouter_endpoints.py"
 
 # subagents
 unlink_file "subagents/__init__.py"

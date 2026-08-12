@@ -143,6 +143,14 @@ _STRUCTURAL_PATTERNS = [
     "invalid model",
     "AuthenticationError",
     "API key",
+    # Provider prerequisite failures. Inspect names the env var directly
+    # ("No OPENROUTER_API_KEY defined in the environment"), which the spaced
+    # "API key" pattern above does not match — without these, a missing key
+    # classifies as unknown and gets pointlessly retried.
+    "API_KEY",
+    "defined in the environment",
+    "Unable to initialise",
+    "Unable to initialize",
     "No such file",
     "PermissionError",
     "dataset",
@@ -177,9 +185,46 @@ _TRANSIENT_PATTERNS = [
 ]
 
 
-def classify_error(returncode: int, stderr: str, log_status: str | None) -> str:
-    """Classify an error as structural, transient, resource_contention, or unknown."""
-    combined = stderr.lower()
+def combine_output(stdout: str, stderr: str, max_lines: int = 50) -> str:
+    """Merge a failed command's output streams into a diagnostic tail.
+
+    Inspect writes startup failures (missing API key, unresolvable model,
+    provider initialisation errors) to **stdout**, not stderr — so classifying
+    or reporting on stderr alone silently discards the only evidence of the most
+    common structural failures. Both streams are combined here.
+
+    The tail is taken rather than the head because progress output precedes the
+    error: with a per-sample display mode, the first lines of a failing run are
+    routine progress and the actual cause is last.
+
+    Parameters
+    ----------
+    stdout : str
+        Captured standard output.
+    stderr : str
+        Captured standard error.
+    max_lines : int
+        Number of trailing lines to retain, matching the contract's ~50-line
+        stderr-tail requirement for structural-failure evidence.
+
+    Returns
+    -------
+    str
+        The trailing lines of the combined output, stripped.
+    """
+    parts = [part.strip() for part in (stderr, stdout) if part.strip()]
+    combined = "\n".join(parts)
+    lines = combined.splitlines()
+    return "\n".join(lines[-max_lines:]).strip()
+
+
+def classify_error(returncode: int, output: str, log_status: str | None) -> str:
+    """Classify an error as structural, transient, resource_contention, or unknown.
+
+    `output` should be the combined stdout+stderr from `combine_output`, since
+    Inspect reports prerequisite failures on stdout.
+    """
+    combined = output.lower()
 
     for pattern in _RESOURCE_CONTENTION_PATTERNS:
         if pattern.lower() in combined:
@@ -413,23 +458,32 @@ def execute(commands: list[CommandSpec], config: ExecutionConfig) -> ExecutionRe
             if returncode == 0 and log_info.get("status") == "success":
                 completed_results[cmd.id] = result
             else:
+                # Both streams: Inspect reports prerequisite failures on stdout.
+                diagnostic = combine_output(stdout, stderr)
                 error_class = classify_error(
-                    returncode, stderr, log_info.get("status")
+                    returncode, diagnostic, log_info.get("status")
                 )
 
                 if error_class == "resource_contention":
                     resource_contention_count += 1
 
+                if diagnostic:
+                    result.errors.append(f"[{error_class}] {diagnostic[:2000]}")
+                else:
+                    # A non-zero exit with no output at all leaves the
+                    # orchestrator nothing to diagnose from, so say so
+                    # explicitly rather than reporting an empty error list.
+                    result.errors.append(
+                        f"[{error_class}] Command exited {returncode} with no output "
+                        "on stdout or stderr and produced no log."
+                    )
+
                 if should_retry(error_class, retry_counts[cmd.id], config.max_retries):
                     retry_counts[cmd.id] += 1
                     failed_in_batch.append((cmd, error_class))
-                    if stderr.strip():
-                        result.errors.append(f"[{error_class}] {stderr.strip()[:500]}")
                 else:
                     # Exhausted retries or structural failure
                     result.process_retries = retry_counts[cmd.id]
-                    if stderr.strip():
-                        result.errors.append(f"[{error_class}] {stderr.strip()[:500]}")
                     completed_results[cmd.id] = result
 
         # Cascading failure detection
