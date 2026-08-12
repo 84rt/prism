@@ -159,7 +159,17 @@ Scout computes four metrics against labels: **balanced accuracy**, **precision**
 
 The contract (`analyst_interface_contract.md §Validation Metrics`) requires reporting **Cohen's κ (chance-adjusted agreement)** alongside Scout's native outputs, since balanced accuracy can be inflated when two labellers share priors on a fuzzy construct. Scout does not compute κ natively — compute it in Python from the validation result columns, e.g. via `sklearn.metrics.cohen_kappa_score(validation_target, validation_result)`. The contract also requires 95% Wilson confidence intervals on precision and recall; compute these from the TP/FP/FN counts. Treat balanced accuracy as a secondary diagnostic rather than the headline statistic.
 
-**Validator-model independence is contract-mandated.** The validator model must be from a different *provider family* than the scanning model (e.g. scan with Anthropic, validate with OpenAI), not just a different model from the same family. Same-family validation inflates agreement because the two models share priors on the construct. When this is infeasible, justify in the report and apply wider uncertainty bounds — see the contract for the same-family-agreement sanity flag (κ ≥ 0.95 with n_val < 100 and AI labels triggers a provisional downgrade).
+**Pinning an OpenRouter scanning or validator model.** `scout scan` accepts `--model` and `-M` with the same semantics as `inspect eval`, so an `openrouter/…` scanner is pinned the same way:
+
+```bash
+scout scan ... --model openrouter/meta-llama/llama-3.3-70b-instruct \
+  -M provider='{"order": ["crusoe"], "allow_fallbacks": false, "require_parameters": true}' \
+  -M default_headers='{"X-OpenRouter-Metadata": "enabled"}'
+```
+
+This is not optional polish. The scanner is the measurement instrument behind every per-condition detection rate, so if OpenRouter serves condition A's scan and condition B's scan from different upstream providers, the resulting rate difference is indistinguishable from a real effect. Confirm the current flag spelling with `scout scan --help` as usual.
+
+**Validator-model independence is contract-mandated.** The validator model must be from a different *provider family* than the scanning model (e.g. scan with Anthropic, validate with OpenAI), not just a different model from the same family. Family means the model's **author**, not the upstream provider serving it — under OpenRouter, two differently-served copies of the same open-weight model are the same family and do not satisfy the rule. Same-family validation inflates agreement because the two models share priors on the construct. When this is infeasible, justify in the report and apply wider uncertainty bounds — see the contract for the same-family-agreement sanity flag (κ ≥ 0.95 with n_val < 100 and AI labels triggers a provisional downgrade).
 
 Validation labels can be produced by a human (preferred), by an AI model from a different provider family, or by the analyst itself reading transcripts directly. State the labelling method in the report as required by the contract.
 

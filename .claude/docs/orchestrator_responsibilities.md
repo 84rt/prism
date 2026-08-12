@@ -60,30 +60,48 @@ The user presents a research question. The orchestrator helps articulate it as t
 
 3. **Determine models.** Agree with the user on which model(s) to evaluate. Record the exact `provider/model-name` strings.
 
-   **Methodological check** (see `eval_science_principles.md` §3, Q4 corollary): When proposing or accepting a single-provider model set, name the construct-validity implication explicitly to the user — findings about a *construct* obtained on one provider's models test one operationalisation, not the construct itself. If the research question is about the construct rather than about a specific provider or model, surface a multi-provider option, alongside its practical preconditions: commercial alternatives (e.g. OpenAI, Google) require additional API keys in the project's `.env` file before step 4; open-weight models (e.g. from HuggingFace) can be run locally given GPU resources, removing the API-key dependency but adding setup overhead. The user's choice stands either way — single-provider, and indeed single-model, is a legitimate scope decision when the question is about that specific provider or model (e.g. *"how does Opus 4.7 behave under condition X?"*), when compute or refusal-rate constraints rule out alternatives (as in dangerous-capability evals), or when the user explicitly accepts the construct-validity limitation for a construct-level claim. The discipline is in raising the question, not in forcing the answer.
+   **Methodological check** (see `eval_science_principles.md` §3, Q4 corollary): When proposing or accepting a single-provider model set, name the construct-validity implication explicitly to the user — findings about a *construct* obtained on one provider's models test one operationalisation, not the construct itself. If the research question is about the construct rather than about a specific provider or model, surface a multi-provider option, alongside its practical preconditions: commercial alternatives (e.g. OpenAI, Google) require either their own API keys or a single `OPENROUTER_API_KEY` in the project's `.env` file before step 5 — OpenRouter reaches every family on one key, so a second provider family is usually cheap to add and the multi-provider option should be offered rather than assumed away; open-weight models (e.g. from HuggingFace) can be run locally given GPU resources, removing the API-key dependency but adding setup overhead. The user's choice stands either way — single-provider, and indeed single-model, is a legitimate scope decision when the question is about that specific provider or model (e.g. *"how does Opus 4.7 behave under condition X?"*), when compute or refusal-rate constraints rule out alternatives (as in dangerous-capability evals), or when the user explicitly accepts the construct-validity limitation for a construct-level claim. The discipline is in raising the question, not in forcing the answer.
 
-4. **Verify API key availability.** Based on the chosen models, determine which API keys are needed (e.g., `ANTHROPIC_API_KEY` for Anthropic models, `OPENAI_API_KEY` for OpenAI models). Check that a `.env` file exists in the project root (`test -f .env`). If it does not exist, ask the user to create one with the required keys before proceeding. Do **not** attempt to verify key values, print environment variables, or export keys in the session — keys are loaded automatically by the subagent launcher and must never appear in transcripts.
+4. **Resolve routing for each model.** Every model needs a *route* — how the request physically reaches it — decided here, once, and recorded. Routing is not a detail: OpenRouter resolves a single model id to one of several upstream providers, and those providers are not interchangeable measurement instruments. For the same model id they differ in quantization, in which sampling parameters they honour, and in maximum context and completion length. If conditions land on different upstreams, **upstream provider becomes confounded with condition** — the same temporal confound described in `analyst_delegation_guide.md`, but invisible, because `--metadata model=` records what was *requested*, never what served it.
 
-5. **Set execution parameters.** Discuss with the user:
+   Resolve each model to the first applicable tier:
+
+   1. **Direct first-party.** The model's own provider key is present in `.env` (e.g. `anthropic/…` with `ANTHROPIC_API_KEY`). Fewest layers, no routing ambiguity, native prompt caching. Prefer this whenever it is available.
+   2. **OpenRouter, provider pinned.** Otherwise route via `openrouter/…` with a hard pin. Run `uv run --no-project python scripts/openrouter_endpoints.py <model-id>` to enumerate the live endpoints and get a recommended provider slug plus ready-to-use model args. Add `--prefer cost` if the user asked for a cost-first posture.
+   3. **OpenRouter, unpinned.** Last resort, when no endpoint can be pinned. Permitted only with router metadata enabled so routing is at least *recorded*, and it must appear as an explicit caveat in the final report.
+
+   **Never guess a provider slug.** `provider.order` takes slugs, the endpoints API reports display names, and the mapping is not mechanical. A wrong slug combined with `allow_fallbacks: false` does not degrade gracefully — it hard-fails every sample. Always enumerate.
+
+   **The pin holds for the whole investigation.** Record the resolved route in the log's Agreed Scope and reuse it in every iteration. Re-picking a provider at iteration 3 reintroduces the confound precisely between the iterations most likely to be compared. If a pinned provider becomes unavailable mid-investigation (the Executor reports this as its own error category), treat re-pinning as a decision with consequences: everything already run against that model becomes non-comparable, so either wait, restart that model's conditions, or drop the model — and record which.
+
+   **Announce, don't block.** Apply the rule, state the pick and the one-line rationale to the user, and proceed. The user may express a preference (cost-first, a named provider, a named precision) but silence means the default fires. As with the model-set question above, the discipline is in surfacing the choice, not in forcing an answer.
+
+5. **Verify API key availability.** Based on the chosen models and their resolved routes, determine which API keys are needed (e.g., `ANTHROPIC_API_KEY` for direct Anthropic models, `OPENAI_API_KEY` for direct OpenAI models, `OPENROUTER_API_KEY` for any `openrouter/…` route). Check that a `.env` file exists in the project root (`test -f .env`).
+
+   Tier (i) needs to know *which* keys are present, not merely that the file exists — so check for the presence of each required key **by name only** (e.g. `grep -c '^ANTHROPIC_API_KEY=' .env`). If a required key is missing, ask the user to add it before proceeding. Do **not** attempt to verify key values, print environment variables, or export keys in the session — keys are loaded automatically by the subagent launcher and must never appear in transcripts. Matching a key name never reveals its value; printing a whole `.env` line would, so never do that.
+
+6. **Set execution parameters.** Discuss with the user:
    - Sample limit (full dataset or a subset for rapid iteration?)
    - Number of epochs per sample
    - Whether to skip preflight validation
    - Parallelism preferences (`max_parallel` — how many eval runs to execute concurrently; if unset, the Executor decides based on environment assessment)
    - Any other Inspect CLI overrides
 
-6. **Agree on cost parameters.** Discuss with the user:
-   - *Total API budget*: What is the rough ceiling the user is comfortable spending on this investigation? This anchors all downstream cost decisions.
+7. **Agree on cost parameters.** Discuss with the user:
+   - *Total API budget*: What is the rough ceiling the user is comfortable spending on this investigation? This anchors all downstream cost decisions. For OpenRouter-routed models, price varies by upstream provider — sometimes severalfold for the same model id — so the routing decision from step 4 is also a cost decision. `scripts/openrouter_endpoints.py` reports per-endpoint pricing; if the budget is tight, raise `--prefer cost` here rather than silently choosing fidelity.
    - *Run strategy*: Does the user prefer fewer large-N runs (more statistical power per iteration, higher confidence) or more small-N exploratory runs (broader coverage of hypotheses, less confidence per result)? This choice shapes sample limits and iteration count.
    - *Baseline drift policy*: If control conditions produce substantially different results across iterations, should the orchestrator re-run controls to check reproducibility (costs an extra iteration's compute) or flag the inconsistency and continue? Small sample sizes make some drift expected — agree on how much warrants action.
    - *Iteration cap*: Maximum number of investigation loop cycles before stopping, regardless of whether findings are conclusive. This prevents runaway costs on ambiguous questions.
 
-7. **Initialize the investigation directory.** Create `investigations/<investigation_name>/` at the workspace root, where `<investigation_name>` is a snake_case identifier for the research question (e.g., `agentic_misalignment_blind_spots`). All Orchestrator outputs for this investigation live here. Inside it, create `INVESTIGATION-LOG.md` to track state across iterations (see State Management below). The final `FINDINGS-REPORT.md` will be written here as a sibling at the end of the investigation (see Phase 3). The log's `## Agreed Scope` section (filled in by the end of Phase 1) is the load-bearing reference for downstream tactical/strategic categorisation at Phase 2j — write it explicitly enough that out-of-scope decisions can be detected later by comparing a proposed action against it.
+8. **Initialize the investigation directory.** Create `investigations/<investigation_name>/` at the workspace root, where `<investigation_name>` is a snake_case identifier for the research question (e.g., `agentic_misalignment_blind_spots`). All Orchestrator outputs for this investigation live here. Inside it, create `INVESTIGATION-LOG.md` to track state across iterations (see State Management below). The final `FINDINGS-REPORT.md` will be written here as a sibling at the end of the investigation (see Phase 3). The log's `## Agreed Scope` section (filled in by the end of Phase 1) is the load-bearing reference for downstream tactical/strategic categorisation at Phase 2j — write it explicitly enough that out-of-scope decisions can be detected later by comparing a proposed action against it.
 
 ### What can go wrong
 
 - The user's hypothesis is too vague or tests multiple variables simultaneously. Push for specificity.
 - The eval environment path doesn't exist or is empty. Verify before proceeding.
 - The user wants to test a model the orchestrator doesn't have API access to. Verify model accessibility early (or let the Executor's preflight catch it).
+- A provider slug is guessed rather than enumerated. With `allow_fallbacks: false` this fails every sample, not gracefully — always run the enumeration script.
+- Routing is decided per-iteration instead of once. This silently reintroduces the confound the pin exists to remove; resolve routes in Phase 1 and reuse them.
 
 ---
 
@@ -237,6 +255,12 @@ The report structure is defined in `executor_interface_contract.md §Report Form
      - `Authentication` / `401` / `API key` / `No <PROVIDER>_API_KEY defined in the environment` → verify the required key is in `.env`; do not print key values. Note this arrives on stdout, not stderr.
      - `Docker` / `sandbox` errors → sandbox infrastructure; may need `inspect sandbox cleanup docker`.
      - `No such file` referencing a task file → Step 2d path was wrong.
+   - **Pinned provider unavailable**: the experiment is correctly configured but the pinned upstream provider could not serve it. This is *your* decision, not the Executor's — it will never re-pin on its own. Three options, and the choice must be recorded in the log:
+     - *Wait and re-run* the affected pairs on the same pin. Preferred: it preserves comparability at the cost of time.
+     - *Re-pin and restart that model's conditions from scratch*. Anything already run against that model was measured on a different upstream, so partial results cannot be mixed with post-re-pin results. Re-running only the failed pairs is exactly the mistake to avoid.
+     - *Drop the model* from the investigation, recording the reduced model set in the Agreed Scope.
+
+     Check `scripts/openrouter_endpoints.py` for the model to see whether the pinned provider is down or has disappeared from the endpoint list entirely; the latter means re-pinning is the only option.
 
 4. **Handle partial failures.** If some pairs failed but not all:
    - *Symmetric failures* (similar rates across conditions) — data may still be usable; note for the Analyst's delegation brief.
@@ -386,7 +410,9 @@ Run lightweight consistency checks before interpreting findings. See `analyst_de
 
 Before reviewing the options below, generate the candidate actions you are seriously considering for the next iteration. **Begin by reviewing prior iterations' *Runner-up candidates carried forward* lists** — these are the alternatives you previously deemed worth revisiting; consider each alongside fresh candidates suggested by this iteration's findings and *Surprises*. If a prior runner-up is no longer worth pursuing (e.g. already addressed by another iteration's findings), note why it's being retired in this iteration's *Decision* reasoning rather than silently dropping it. For each surviving candidate (whether carried-forward or fresh), perform two operations:
 
-1. **Classify** as in-scope (tactical) or out-of-scope (strategic) relative to the Phase 1 Agreed Scope. An action is in-scope if it lies within the Agreed Scope — investigates a hypothesis that addresses the agreed research question, uses agreed models on the agreed eval environment, stays within the iteration cap and cost budget. It is out-of-scope if it would require any of: changing the research question, investigating a hypothesis the research question does not cover, adding models outside the agreed set, changing the eval environment, exceeding the iteration cap or cost budget, or changing the object of study (eval-as-object ↔ behaviour-as-object).
+1. **Classify** as in-scope (tactical) or out-of-scope (strategic) relative to the Phase 1 Agreed Scope. An action is in-scope if it lies within the Agreed Scope — investigates a hypothesis that addresses the agreed research question, uses agreed models on the agreed eval environment, stays within the iteration cap and cost budget. It is out-of-scope if it would require any of: changing the research question, investigating a hypothesis the research question does not cover, adding models outside the agreed set, **changing the route by which an agreed model is reached**, changing the eval environment, exceeding the iteration cap or cost budget, or changing the object of study (eval-as-object ↔ behaviour-as-object).
+
+Route changes count as strategic even though the model set is unchanged, because a re-pinned model is a different measurement instrument: results gathered before and after cannot be compared, so the decision costs either the earlier iterations or the later ones. That is a trade-off for the user to make, not a tactical adjustment — see the *Pinned provider unavailable* handling in Step 2e.
 2. **Rank** all candidates by expected information value using the *Evaluate hypothesis quality* rubric below (information value, mechanism plausibility, marginal contribution, competing use of resources).
 
 Then apply the selection rule:
@@ -469,6 +495,12 @@ These questions don't have mechanical answers. They require judgement — the ki
 
 4. **Caveats and limitations.** What could undermine these findings? Include: sample size adequacy, baseline variance across iterations, scanner precision/recall, differential attrition, confounds not controlled for, **and provider-family coverage** — if the model set was single-provider *and* the headline finding is a construct-level claim (i.e. about a behaviour or eval property meant to generalise, not about a specific model's behaviour), the construct-validity is tested against one operationalisation; state that explicitly with a one-line provider-sensitivity caveat. When the headline is intentionally model-specific (e.g. *"Opus 4.7 exhibits behaviour X under condition Y"*), the multi-provider caveat does not apply — the claim is already scoped to that model. (See `eval_science_principles.md` §3, Q4 corollary.) Be specific — "more work is needed" is not a caveat.
 
+   **Serving-route caveats (required when applicable).** Routing is part of the measurement instrument, so it belongs in the caveats whenever it was not fully controlled or not fully faithful:
+   - *Unpinned routing* (tier iii): state that upstream provider varied freely across the run. If router metadata was recorded, say what the logs show about whether routing actually stayed stable — an uncontrolled variable that turned out constant is a much weaker caveat than one that varied, and you can tell the difference from the logs.
+   - *Below-native quantization*: if a pinned endpoint served the model below its native precision, the finding is about that quantized variant, not the reference model. Name the quantization.
+   - *Mixed routes across the model set*: if some models were reached directly and others via OpenRouter, say so. This is benign when model is the manipulated variable and worth flagging when it is not.
+   - *Re-pinning mid-investigation*: if a pinned provider became unavailable and the route changed, state which iterations ran on which provider and which comparisons are therefore not clean.
+
 5. **Artefacts.** Point the user to the investigation log, iteration directories, and analyst scan results for drill-down.
 
 6. **Suggested next steps** (if appropriate). 2-3 concrete options ranked by information value, not a laundry list.
@@ -495,6 +527,7 @@ The orchestrator maintains `INVESTIGATION-LOG.md` at the investigation root (`in
 ## Agreed Scope
 - Research question: <one-paragraph statement of what is being investigated>
 - Models: <list>
+- Model routes: <per model: direct | openrouter pinned to <slug> (<quantization>) | openrouter unpinned — with the one-line rationale. Resolved once in Phase 1 and reused for every iteration; note any mid-investigation change and which iterations it affected>
 - Eval environment: <path>
 - Execution parameters: <details>
 
@@ -519,6 +552,7 @@ Research scope unchanged since iteration 1.
 
 ### Executor Results
 - Condition-model pairs: <completed/total>
+- Routes used: <per model, as reported by the Executor — `same as Agreed Scope` if unchanged. Any deviation must be explicit here: it means this iteration's numbers were measured on a different instrument from earlier iterations'>
 - Key errors: <summary>
 - Retry flags: <any>
 - Log directory: <path>
@@ -640,7 +674,7 @@ Some workarounds change the *experiment* rather than the harness — e.g. switch
 The Explorer has read the environment and concluded there is no site where the hypothesis could be tested given the environment's structure, or that every candidate site carries a Blocker. Report to user with the Explorer's reasoning (drawn from the Summary, Global Risk Assessment, and Uncertainty & Open Questions sections). Ask the user to revise the hypothesis or choose a different eval environment.
 
 ### Executor reports no successful condition-model pairs
-Do not launch the Analyst. Read the Preflight Exclusions and Error Summary sections for evidence (exit codes, commands, combined output tails) and diagnose from there. Common causes: API key issues, sandbox misconfiguration, task file errors introduced by the orchestrator's modifications in Step 2c. Fix and re-run, or escalate to user. See Step 2e for full interpretation guidance.
+Do not launch the Analyst. Read the Preflight Exclusions and Error Summary sections for evidence (exit codes, commands, combined output tails) and diagnose from there. Common causes: API key issues (including a missing `OPENROUTER_API_KEY` for `openrouter/…` routes), an unavailable pinned provider, sandbox misconfiguration, task file errors introduced by the orchestrator's modifications in Step 2c. Fix and re-run, or escalate to user. See Step 2e for full interpretation guidance.
 
 ### Executor reports asymmetric failure rates
 Asymmetry across conditions — either at preflight (every `treatment` pair excluded while every `control` pair runs) or in full execution (e.g., 80% of control samples succeeded but only 30% of treatment samples) — is a confound. Do not treat this as a valid comparison. Re-run the failed condition, or investigate whether the treatment modifications broke the eval. Asymmetric Preflight Exclusions in particular almost always mean Step 2c broke something for a specific condition — re-applying the Explorer's diffs is usually the fix.
@@ -681,4 +715,6 @@ If Model A succeeded but Model B failed entirely, the orchestrator can still sen
 
 10. **Doing a sub-agent's job yourself.** Running `inspect eval` directly instead of through the Executor; reading the eval's source to pick perturbation sites instead of tasking the Explorer; grepping or reading transcripts to surface behavioural patterns instead of delegating to the Analyst. Each sub-agent owns its stage exclusively. Even when it seems faster, or the eval looks simple enough to handle directly, bypassing a sub-agent forfeits the scaffold's guarantees — most critically the analyst firewall — and is the most common way an investigation silently loses its integrity. The bypass is rarely a deliberate decision; it is usually an *omission* — you reach for `inspect eval` without ever pausing to ask "should the Executor do this?" Build the habit of that pause. The only legitimate bypass is a genuine sub-agent failure, handled per the Sub-Agent Failure Handling section.
 
-11. **Silently swapping the hypothesis between iterations, or within an iteration.** Each iteration tests exactly one hypothesis, named in its `### Hypothesis this iteration → Statement` field and locked for the duration of that iteration. *Between iterations:* if iteration N+1 tests something even subtly different from iteration N, the new hypothesis must be written into iteration N+1's Statement field as part of the Step 2j Option 2 decision, not retrofitted later. *Within an iteration:* follow-ups, alternative angles, or more exciting avenues that the Analyst's findings or the *Surprises* section surface mid-flight go into the *next* iteration's block — never appended to this iteration's Statement, and never quietly tested by tweaking conditions or scanner questions partway through. A change that goes unnamed cannot be audited, cannot be retracted, and cannot be re-tested. "No change" is a valid answer; "silently different" is not.
+11. **Silently changing how a model is reached.** A model's route is part of the measurement instrument, not a delivery detail. Re-pinning to a different upstream provider, dropping a pin to get a failing command through, or letting one condition run unpinned while another is pinned all mean the conditions were measured on different instruments — and unlike a changed model, nothing in the model string reveals it. If a route changes for any reason, everything already run against that model becomes non-comparable: say so in the log, decide explicitly whether to re-run or discard, and carry it into the report's limitations. The Executor will never re-pin on its own precisely so that this stays your decision.
+
+12. **Silently swapping the hypothesis between iterations, or within an iteration.** Each iteration tests exactly one hypothesis, named in its `### Hypothesis this iteration → Statement` field and locked for the duration of that iteration. *Between iterations:* if iteration N+1 tests something even subtly different from iteration N, the new hypothesis must be written into iteration N+1's Statement field as part of the Step 2j Option 2 decision, not retrofitted later. *Within an iteration:* follow-ups, alternative angles, or more exciting avenues that the Analyst's findings or the *Surprises* section surface mid-flight go into the *next* iteration's block — never appended to this iteration's Statement, and never quietly tested by tweaking conditions or scanner questions partway through. A change that goes unnamed cannot be audited, cannot be retracted, and cannot be re-tested. "No change" is a valid answer; "silently different" is not.

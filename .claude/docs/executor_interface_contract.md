@@ -36,6 +36,43 @@ Patterns A/B/C (parameter-based, separate task files, model variation only) are 
 
 A list of `provider/model-name` strings (e.g., `["anthropic/claude-sonnet-4-5-20250929"]`). The Executor runs every condition against every model; `len(conditions) × len(models)` is the number of condition-model pairs.
 
+### Model routing (optional)
+
+A mapping from model string to the routing directives for that model. The orchestrator resolves routing during Phase 1 and passes it fully specified; **the Executor renders it and reports it, but never chooses or changes it.** Route selection affects internal validity, which makes it a scientific judgement and therefore not the Executor's to make.
+
+```json
+"model_routing": {
+    "openrouter/meta-llama/llama-3.3-70b-instruct": {
+        "route": "openrouter",
+        "provider_slug": "crusoe",
+        "model_args": {
+            "provider": {
+                "order": ["crusoe"],
+                "allow_fallbacks": false,
+                "require_parameters": true
+            },
+            "default_headers": {"X-OpenRouter-Metadata": "enabled"}
+        }
+    }
+}
+```
+
+- `route`: `direct` | `openrouter`.
+- `provider_slug`: the pinned upstream provider, or `null` for an unpinned OpenRouter route.
+- `model_args`: rendered one-to-one as `-M key=value` arguments on that model's `inspect eval` invocations.
+
+**Rendering `model_args` correctly.** Object values must be **JSON** (double-quoted keys, lowercase `true`/`false`), wrapped in single quotes for the shell:
+
+```
+-M provider='{"order": ["crusoe"], "allow_fallbacks": false, "require_parameters": true}' -M default_headers='{"X-OpenRouter-Metadata": "enabled"}'
+```
+
+Do not emit Python-style dicts (`{'order': ...}`, `False`) — the single quotes collide with the shell quoting and `False` is not a valid boolean to the parser. A malformed `-M` value either errors out or, worse, parses to a string, which silently disables the pin.
+
+Models absent from the mapping are invoked with no `-M` arguments. When `model_routing` is omitted entirely, every model is invoked directly — the pre-existing behaviour.
+
+**Pinning is not advisory.** `allow_fallbacks: false` means the invocation fails rather than silently rerouting to a different upstream provider. That is the intended behaviour: a hard failure is recoverable, whereas a silent reroute corrupts the comparison between conditions without leaving a trace. The Executor must never relax a pin, drop `-M` arguments to make a failing command succeed, or substitute a provider.
+
 ### Overrides (optional)
 
 A mapping of execution-parameter overrides. Supported keys:
@@ -49,7 +86,7 @@ A mapping of execution-parameter overrides. Supported keys:
 | `max_connections` | int | Maps to `--max-connections` (concurrent API calls within an eval) |
 | `runs_per_condition` | int | Number of full-run repetitions per condition-model pair |
 
-Unrecognised keys are ignored with a note in **Additional Notes**. The Executor may apply other defaults (e.g., `--retry-on-error 3`, `--no-fail-on-error`, `--display plain`) without them being in overrides — these are policy, not configuration.
+Unrecognised keys are ignored with a note in **Additional Notes**. The Executor may apply other defaults (e.g., `--retry-on-error 3`, `--no-fail-on-error`, `--display plain`, and `--with "openai>=…"` on `openrouter/…` models) without them being in overrides — these are policy, not configuration.
 
 ---
 
@@ -91,6 +128,7 @@ A table of every condition-model pair that entered full execution (or `skipped` 
 |---|---|
 | Condition | `snake_case` identifier |
 | Model | `provider/model-name` |
+| Route | `direct`, `openrouter:<slug>` for a pinned route, or `openrouter:unpinned`. Records how the request actually reached the model, which `--metadata model=` alone cannot capture |
 | Log Path | Absolute path to the `.eval` log file produced by this pair |
 | Status | `success` \| `sample-level-errors` \| `failed` \| `excluded-at-preflight`* \| `skipped` |
 | Samples (done/total) | Completed / intended sample count |
@@ -105,7 +143,7 @@ A table of every condition-model pair that entered full execution (or `skipped` 
 
 ### Error Summary
 
-Failures observed during **full execution**. Organised into three categories with observable criteria:
+Failures observed during **full execution**. Organised into four categories with observable criteria:
 
 #### Structural (N condition-model pair(s))
 
@@ -132,6 +170,17 @@ Criterion: error occurred during execution, but a subsequent retry succeeded; ne
 
 For each:
 - **`<condition> / <model>`**: N process retries required; final attempt succeeded.
+
+#### Pinned provider unavailable (N condition-model pair(s))
+
+Criterion: `execute_evals.py` classified the failure as **`routing`** — its error entries are tagged with the class, so an entry beginning `[routing]` maps to this section. The script applies that class to OpenRouter failures that no retry can fix: no available providers for the selected model, or an account-credit failure. Displays `None.` if no pinned routes failed this way.
+
+For each:
+- **`<condition> / <model>`**: the pinned `provider_slug`, the OpenRouter error message, and the number of process retries attempted.
+
+This is reported separately from *structural* because the remedy is different and the choice is the orchestrator's, not the Executor's. A structural failure means the experiment is misconfigured; a pinned-provider failure means the experiment is correct but the chosen upstream is down. The orchestrator can then wait, re-pin and restart that model's conditions, or drop the model.
+
+**The Executor never re-pins.** Anything already run against that model was measured on a different upstream provider than a re-pinned run would use, so silently switching would split a condition across two instruments and destroy the comparison without leaving a trace in the report.
 
 ### Transcript Termination Metadata
 
@@ -205,6 +254,7 @@ Preflight (run via `--limit 1` unless `skip_preflight=true`) is a structural pro
 | Exit 0, single sample errored → `--limit 3` retest, 1–2 of 3 error | Sample-specific deterministic | Proceed; flag expected attrition rate |
 | Exit 0, single sample errored → `--limit 3` retest, 3 of 3 error | All-samples deterministic | **Exclude**; record in Preflight Exclusions with all 3 error traces |
 | All process-level retries exhausted, no usable log | Structural | **Exclude**; record in Preflight Exclusions with structural evidence |
+| Pinned OpenRouter provider unavailable (routing error, no usable log) | Pinned provider unavailable | **Exclude**; record in Preflight Exclusions naming the pinned slug. Do **not** relax the pin to get the model through preflight — an unpinned run measures with a different instrument, and the orchestrator needs to decide whether to wait, re-pin, or drop the model |
 
 Only the last two outcomes cause exclusion. Transient and sample-specific preflight outcomes are informational — they do not gate execution.
 
@@ -222,7 +272,7 @@ After preflight, the `_preflight/` log subdirectory is deleted. Preflight logs m
 
 **No scientific judgement on data quality.** The Executor reports objective observable properties — exit codes, sample counts, transcript termination shape, retry counts. It never decides whether a transcript is "good enough," whether a sample error is "acceptable," or whether an attrition rate is "too high." Those judgements belong to the orchestrator and the Analyst.
 
-**Log organisation is per-condition.** Every condition gets its own subdirectory under `<experiment_dir>/logs/<condition_name>/`. Every invocation includes `--metadata condition=<condition_name>` and `--metadata model=<model_string>` so condition and model labels are embedded in the log file itself, providing redundancy against file reorganisation.
+**Log organisation is per-condition.** Every condition gets its own subdirectory under `<experiment_dir>/logs/<condition_name>/`. Every invocation includes `--metadata condition=<condition_name>`, `--metadata model=<model_string>` and `--metadata route=<route>` so condition, model and route labels are embedded in the log file itself, providing redundancy against file reorganisation. The route label is not redundant with the model string: for an OpenRouter model, `model=` records what was *requested* while `route=` records how it was reached.
 
 **Tag namespacing.** Tags use namespaced prefixes to avoid substring ambiguity: `--tags "exp:<experiment_name>,cond:<condition_name>"`.
 
@@ -240,7 +290,7 @@ The Executor's report **must** satisfy these commitments. They are non-negotiabl
 
 - **Evidence with every structural failure.** Structural failures must include exit code, exact command, and the combined stdout+stderr tail. Reporting a structural failure without evidence robs the orchestrator of the material needed to diagnose root cause, forcing re-runs instead of fixes. If a command exits non-zero with genuinely no output on either stream, say so explicitly rather than omitting the evidence line.
 
-- **Correct category assignment.** The three-category taxonomy is observable and rule-bound. Mis-classifying a structural failure as transient would lead the orchestrator to re-run instead of investigate; mis-classifying transient as structural would lead to unnecessary diagnostic work. The Executor applies the criteria literally, not by judgement.
+- **Correct category assignment.** The four-category taxonomy is observable and rule-bound. Mis-classifying a structural failure as transient would lead the orchestrator to re-run instead of investigate; mis-classifying transient as structural would lead to unnecessary diagnostic work. The Executor applies the criteria literally, not by judgement.
 
 - **Transcript termination metadata for every fully-executed pair.** The Analyst downstream assumes these counts are available. Omitting them forces the orchestrator to read log contents itself, which it is explicitly not allowed to do before the Analyst reports (per `orchestrator_responsibilities.md` Step 2e).
 

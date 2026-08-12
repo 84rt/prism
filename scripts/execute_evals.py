@@ -151,6 +151,12 @@ _STRUCTURAL_PATTERNS = [
     "defined in the environment",
     "Unable to initialise",
     "Unable to initialize",
+    # Missing/outdated provider SDKs. Inspect's OpenRouter provider requires a
+    # recent `openai` package and refuses to start without it; retrying cannot
+    # help, and the remedy (pin the dependency on the invocation) is the
+    # orchestrator's to apply.
+    "requires optional dependencies",
+    "requires at least version",
     "No such file",
     "PermissionError",
     "dataset",
@@ -167,6 +173,22 @@ _RESOURCE_CONTENTION_PATTERNS = [
     "error creating container",
     "Cannot connect to the Docker",
     "Resource temporarily unavailable",
+]
+
+# OpenRouter routing failures. These are structural in the sense that retrying
+# the identical command cannot help — the pinned provider is unavailable, or the
+# account cannot pay — but they are kept separate from _STRUCTURAL_PATTERNS so
+# the Executor can report them under their own category. The remedy is the
+# orchestrator's (wait, re-pin, or drop the model), not a configuration fix, and
+# relaxing the pin to make the command succeed would silently change the
+# measurement instrument mid-experiment.
+_ROUTING_PATTERNS = [
+    "no allowed providers",
+    "no endpoints found",
+    "no providers available",
+    "requires more credits",
+    "insufficient credits",
+    "402",
 ]
 
 _TRANSIENT_PATTERNS = [
@@ -219,7 +241,7 @@ def combine_output(stdout: str, stderr: str, max_lines: int = 50) -> str:
 
 
 def classify_error(returncode: int, output: str, log_status: str | None) -> str:
-    """Classify an error as structural, transient, resource_contention, or unknown.
+    """Classify an error as routing, structural, transient, resource_contention, or unknown.
 
     `output` should be the combined stdout+stderr from `combine_output`, since
     Inspect reports prerequisite failures on stdout.
@@ -229,6 +251,13 @@ def classify_error(returncode: int, output: str, log_status: str | None) -> str:
     for pattern in _RESOURCE_CONTENTION_PATTERNS:
         if pattern.lower() in combined:
             return "resource_contention"
+
+    # Checked before structural: an OpenRouter routing failure often also
+    # mentions the model, which would otherwise match a structural pattern and
+    # obscure the actual (and differently-remedied) cause.
+    for pattern in _ROUTING_PATTERNS:
+        if pattern.lower() in combined:
+            return "routing"
 
     for pattern in _STRUCTURAL_PATTERNS:
         if pattern.lower() in combined:
@@ -251,7 +280,10 @@ def classify_error(returncode: int, output: str, log_status: str | None) -> str:
 
 def should_retry(error_class: str, attempt: int, max_retries: int) -> bool:
     """Decide whether to retry based on error class and attempt count."""
-    if error_class == "structural":
+    # Routing failures share structural's "retrying the same command cannot
+    # help" property: the pinned provider is unavailable or the account cannot
+    # pay, and neither resolves within a backoff window.
+    if error_class in ("structural", "routing"):
         return False
     if error_class == "unknown":
         return attempt < min(1, max_retries)  # retry unknown at most once, but respect max_retries
@@ -502,17 +534,19 @@ def execute(commands: list[CommandSpec], config: ExecutionConfig) -> ExecutionRe
                         )
                     )
                     current_concurrency = new_concurrency
-            elif all(ec == error_classes[0] for ec in error_classes) and error_classes[0] == "structural":
-                # All same structural error — systemic problem, abort remaining
+            elif all(ec == error_classes[0] for ec in error_classes) and error_classes[0] in ("structural", "routing"):
+                # All the same unretryable error — systemic problem, abort
+                # remaining. A uniform routing failure means the pinned provider
+                # is down for every command, so continuing only wastes time.
                 report.errors.append(
-                    f"Batch {batch_num}: all failures are structural — aborting remaining commands"
+                    f"Batch {batch_num}: all failures are {error_classes[0]} — aborting remaining commands"
                 )
                 # Mark remaining pending as not_run
                 for remaining_cmd in pending:
                     completed_results[remaining_cmd.id] = EvalResult(
                         id=remaining_cmd.id,
                         status="aborted",
-                        errors=["Aborted due to systemic structural failure"],
+                        errors=[f"Aborted due to systemic {error_classes[0]} failure"],
                     )
                 pending = []
                 break

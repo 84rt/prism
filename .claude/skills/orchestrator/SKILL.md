@@ -38,7 +38,7 @@ The pipeline is not optional and is not a default you may opt out of when the ev
 | Agent | Receives | Returns |
 |-------|----------|---------|
 | Environment Explorer | Hypothesis, experiment description, environment path, optional constraints | Structured briefing: environment summary, pipeline model, modification sites with diffs, variant dependencies, risk assessment, open questions. See `explorer_interface_contract.md` |
-| Experiment Executor | Experiment name, experiment dir, conditions, models, overrides | Log paths, status per condition-model pair, errors, retry flags |
+| Experiment Executor | Experiment name, experiment dir, conditions, models, model routing, overrides | Log paths, route used, status per condition-model pair, errors, retry flags |
 | Transcript Analyst | **Neutral topic** (never the hypothesis), transcript source (condition→path mapping), scanning model?, constraints? | Scanner definitions, validation metrics, quantified results, scan results path, transcript exclusions, excerpts |
 
 **Critical rule:** The Transcript Analyst must NEVER receive the hypothesis. It receives only a neutral topic that you construct. This is the primary safeguard against confirmation bias. See `hypothesis-methodology.md` for detailed guidance on neutral topic translation.
@@ -88,7 +88,7 @@ Ask the user: "What behaviour would you like to investigate?" Then proceed with 
 **Phase 1 checklist** (confirm all before entering Phase 2):
 1. Research question and initial hypothesis — you and the user agree on (i) the durable research question (the one-paragraph framing the whole investigation will be judged against) and (ii) a specific testable hypothesis for iteration 1 (with IV, DV, direction, competing hypotheses considered). The research question becomes the *Research question* bullet of the Agreed Scope; the initial hypothesis becomes iteration 1's *Hypothesis this iteration → Statement*. Discuss both in plain language with the user.
 2. Eval environment path — confirmed to exist and contain task files
-3. Model(s) — exact `provider/model-name` strings
+3. Model(s) — exact `provider/model-name` strings, each with a resolved route (direct first-party, OpenRouter pinned to an enumerated provider slug, or OpenRouter unpinned with routing recorded). Routes are resolved once and reused for the whole investigation
 4. Execution parameters — sample limit, epochs, any overrides
 5. Autonomy agreement — see below
 6. Investigation log initialized — Agreed Scope filled out (Research question, Models, Eval environment, Execution parameters) and iteration 1's *Hypothesis this iteration → Statement* written before the Explorer is launched

@@ -43,6 +43,16 @@ async def run_experiment_executor(cwd: str | None = None, **data: Any) -> str:
 
 {chr(10).join(f"- `{m}`" for m in models)}
 
+## Model Routing
+
+```json
+{json.dumps(data.get("model_routing") or {}, indent=2)}
+```
+
+Render each model's `model_args` as `-M key=value` arguments on that model's \
+invocations, using JSON for object values. Models absent from this mapping take \
+no `-M` arguments. Never relax or substitute a pin to make a command succeed.
+
 ## Execution Parameter Overrides
 
 ```json

@@ -35,17 +35,56 @@ These flags are policy, not configuration. They are not in the request's `overri
 - `--display plain` — headless operation (no TTY control sequences). **Not `--display none`**: `none` suppresses Inspect's startup errors entirely, so a missing API key or an unresolvable model exits non-zero with zero bytes on both streams and the orchestrator gets no evidence at all. `plain` is equally headless and still reports. Note that Inspect writes these errors to *stdout*, which is why `execute_evals.py` classifies on both streams
 - `--log-dir <experiment_dir>/logs/<condition_name>/` — per-condition log organisation
 - `--tags "exp:<experiment_name>,cond:<condition_name>"` — namespaced tags avoid substring ambiguity
-- `--metadata condition=<condition_name> --metadata model=<model_string>` — embeds condition label in the log file itself (load-bearing: provides redundancy against later file reorganisation)
+- `--metadata condition=<condition_name> --metadata model=<model_string> --metadata route=<route>` — embeds condition, model and route labels in the log file itself (load-bearing: provides redundancy against later file reorganisation, and `model=` alone cannot say how the request was routed)
 - `--no-fail-on-error` — sample errors do not abort the eval
 - `--retry-on-error 3` — Inspect retries errored samples up to 3 times inside the eval
 - Any `overrides` from the request (`--limit`, `--epochs`, `--max-connections`)
+- Any `-M key=value` model arguments from the request's `model_routing` for that model
+
+### OpenRouter routing
+
+Inspect ships a first-class OpenRouter provider. Model strings are `openrouter/<author>/<model>` (e.g. `openrouter/meta-llama/llama-3.3-70b-instruct`), authenticated with `OPENROUTER_API_KEY`.
+
+**Dependency prerequisite.** The OpenRouter provider is built on the OpenAI-compatible client and requires the `openai` package at a recent version — Inspect refuses to start otherwise, with `OpenRouter API requires at least version X of package openai`. A target repo with Inspect installed does **not** necessarily satisfy this.
+
+The Executor therefore launches `openrouter/…` models as `uv run --with "openai>=2.45.0" inspect eval ...`, declaring the dependency per invocation rather than relying on the target repo's environment. This follows the same pattern as the sub-agent launchers (`uv run --with claude-agent-sdk ...`) and avoids mutating the user's eval environment, whose pinned versions may be load-bearing for reproducibility. The floor moves as Inspect's requirement moves — when Inspect names a higher minimum in its error, use that value rather than concluding the environment is broken.
+
+**Why routing has to be pinned.** OpenRouter resolves one model id to one of several upstream providers, and those providers are not interchangeable measurement instruments. For the same model id they differ in quantization, in which sampling parameters they honour, and in maximum context and completion length — differences large enough to change results. Unpinned, upstream provider varies freely across a run and becomes confounded with condition.
+
+The relevant `-M` arguments (all forwarded by Inspect into OpenRouter's `extra_body`):
+
+- `provider` — routing controls. Pinning takes the form `{"order": ["<slug>"], "allow_fallbacks": false, "require_parameters": true}`. `allow_fallbacks: false` makes an unavailable provider a hard failure instead of a silent reroute; `require_parameters: true` stops OpenRouter selecting an endpoint that would quietly drop sampling parameters.
+- `models`, `transforms`, `reasoning_enabled` — other OpenRouter features, not used by default.
+- `default_headers` — reaches the underlying client; used to enable router metadata (below).
+
+**Recording which provider actually served a request.** Two levels, both verified present in `.eval` logs (2026-08-10):
+
+- **By default**, every OpenRouter response carries a top-level `provider` field naming the upstream that served it (e.g. `"provider": "Novita"`). No header needed.
+- **With `-M default_headers='{"X-OpenRouter-Metadata": "enabled"}'`**, the response additionally carries an `openrouter_metadata` object giving the routing decision itself: how many endpoints existed, how many survived the routing constraints, which was selected, and the attempt number. A pinned request shows `available=1` against a much larger `endpoints.total` — which is what turns "we asked for a pin" into "the pin demonstrably narrowed routing to one provider".
+
+Inspect stores the raw response dict in the logged `ModelCall`, so both survive into the `.eval` file per sample. Prism sets the header because the difference matters: the top-level field tells you *who answered*, while the metadata object tells you *whether the constraint you set was actually in force* — the latter is the auditable claim.
+
+**Pinning concentrates load, and that has a cost.** `allow_fallbacks: false` means every request goes to one upstream, so a pinned model is far more exposed to that provider's shared-pool rate limits than an unpinned one. Observed live: a pinned model returned HTTP 429 from the pinned provider while other providers for the same model were healthy, and Inspect retried with backoff for several minutes before the run could proceed. This is the correct trade — a 429 is recoverable, a silent reroute corrupts the comparison — but it means pinned runs may need a lower `--max-connections`, and a pinned model that rate-limits is a normal operating condition rather than a bug.
+
+Provider slugs cannot be guessed — `provider.order` takes slugs while the endpoints API reports display names, and the mapping is not mechanical. Use `scripts/openrouter_endpoints.py` to enumerate.
+
+A fully-formed pinned invocation looks like:
+
+```bash
+uv run inspect eval task.py --model openrouter/meta-llama/llama-3.3-70b-instruct \
+  -M provider='{"order": ["crusoe"], "allow_fallbacks": false, "require_parameters": true}' \
+  -M default_headers='{"X-OpenRouter-Metadata": "enabled"}'
+```
+
+`-M` values are parsed as JSON/YAML, so object values must use double-quoted keys and lowercase `true`/`false`, single-quoted for the shell. Python-style dicts do not survive the round trip.
 
 ### Metadata convention
 
-Two pieces of metadata are attached to every log:
+Three pieces of metadata are attached to every log:
 
 - `condition=<condition_name>` — the snake_case identifier from the orchestrator's request
 - `model=<model_string>` — the full `provider/model-name` string
+- `route=<direct|openrouter:<slug>|openrouter:unpinned>` — how the request reached the model
 
 This is redundant with the log directory structure and the tag, and that is intentional. The Analyst downstream may reorganise logs by metadata rather than by path, and the label must survive such reorganisation. Do not omit these `--metadata` flags even if the log path seems sufficient.
 
@@ -198,7 +237,7 @@ These two error classes require different responses (see `executor_interface_con
 - **Transient** errors are absorbed by process-level retries inside `execute_evals.py` (rate limits, transient network failures, provider 500s). The eval ultimately succeeds.
 - **Structural** errors persist across retries (ImportError from a bad modification, missing API key, Docker daemon down). Re-running without intervention does not help.
 
-The three-category taxonomy is defined operationally in the contract; the Executor applies it by observable criteria, not by guessing cause.
+The four-category taxonomy is defined operationally in the contract; the Executor applies it by observable criteria, not by guessing cause.
 
 ---
 

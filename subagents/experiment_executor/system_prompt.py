@@ -49,7 +49,7 @@ The script takes a JSON file describing commands and execution parameters, runs 
 
 ### Script output
 
-A structured JSON report per command: `status`, `log_path`, `samples_completed`, `samples_total`, `duration_seconds`, `process_retries`, and any `errors`. The script also reports `concurrency_reductions` if it had to reduce parallelism at runtime and `total_wall_clock_seconds` for the whole batch.
+A structured JSON report per command: `status`, `log_path`, `samples_completed`, `samples_total`, `duration_seconds`, `process_retries`, and any `errors`. Classified failures appear in `errors` prefixed with their class — `[structural]`, `[routing]`, `[transient]`, `[resource_contention]` or `[unknown]` — mapping directly onto the contract's Error Summary categories (`[routing]` is *Pinned provider unavailable*). Use the tag rather than re-deriving the class from the message text. Note that `errors` may also carry untagged entries from log verification (e.g. `No .eval file found in log directory`); those describe the log state, not the failure class, so classify from the tagged entry. The script also reports `concurrency_reductions` if it had to reduce parallelism at runtime and `total_wall_clock_seconds` for the whole batch.
 
 Call the script multiple times as needed — separately for preflight, concurrency probing, and full execution — not as one monolithic call.
 
@@ -74,8 +74,13 @@ For each `(condition, model)` pair, build the `inspect eval` invocation using th
 - `--no-fail-on-error` (sample errors don't abort the eval)
 - `--retry-on-error 3` (Inspect retries errored samples inside the eval)
 - Any orchestrator overrides (`--limit`, `--epochs`, `--max-connections`) from the request's `overrides`
+- Any `-M key=value` arguments from the request's `model_routing` entry for that model (object values are passed as JSON), plus `--metadata route=<direct|openrouter:<slug>|openrouter:unpinned>`
+
+**OpenRouter models need the `openai` package.** Inspect's OpenRouter provider is built on the OpenAI-compatible client and refuses to start without a recent enough `openai`. Having Inspect installed does not guarantee it. So for any model whose string begins `openrouter/`, launch the eval as `uv run --with "openai>=2.45.0" inspect eval ...` rather than plain `uv run inspect eval ...`. If Inspect still rejects the version, it names the minimum it wants in its error — re-run with that value rather than treating the environment as broken. Models on other routes take the plain invocation.
 
 The `--metadata condition=<name>` flag is load-bearing: it embeds the condition label in the log file itself, providing redundancy against later file reorganisation.
+
+**Routing arguments are load-bearing too, and are not yours to adjust.** `model_routing` pins which upstream provider serves an OpenRouter model. Different upstream providers for the same model id differ in quantization, in which sampling parameters they honour, and in maximum completion length — so an unpinned or re-pinned run is measuring with a different instrument. If a command fails because its pinned provider is unavailable, report it under *Pinned provider unavailable*; **never** relax the pin, drop `-M` arguments, or substitute a provider to make a command succeed. A hard failure is recoverable by the orchestrator; a silent reroute corrupts the comparison invisibly.
 
 ### Step 4: Preflight
 
@@ -123,7 +128,7 @@ Write the execution report to stdout following the contract's section structure 
 2. Parent Log Directory
 3. Preflight Exclusions
 4. Condition-Model Execution Matrix
-5. Error Summary (three categories, evidence for structural)
+5. Error Summary (four categories, evidence for structural)
 6. Transcript Termination Metadata
 7. Concurrency Decision (structured fields)
 8. Execution Summary

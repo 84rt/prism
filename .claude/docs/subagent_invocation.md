@@ -97,6 +97,13 @@ Running the Analyst cross-family is additionally a robustness check on the scaff
         }
     },
     "models": ["anthropic/claude-sonnet-4-5-20250929"],
+    "model_routing": {
+        "anthropic/claude-sonnet-4-5-20250929": {
+            "route": "direct",
+            "provider_slug": null,
+            "model_args": {}
+        }
+    },
     "overrides": {
         "sample_limit": 50,
         "epochs": 1,
@@ -108,6 +115,7 @@ Running the Analyst cross-family is additionally a robustness check on the scaff
 ```
 
 - `experiment_dir` must be an existing directory
+- `model_routing` is optional; per-model routing directives resolved by the Orchestrator in Phase 1 and rendered by the Executor as `-M` arguments. Omit it and every model is invoked directly (the pre-existing behaviour). For OpenRouter models, get the provider slug and model args from `scripts/openrouter_endpoints.py` — never guess a slug. See `executor_interface_contract.md §Model routing`
 - `overrides` is optional; supported keys: `sample_limit`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `runs_per_condition`
 - `subagent_model` is optional; the model the Executor agent runs on. **Distinct from `models`**, which are the eval's target models — `subagent_model` has no provider prefix (e.g. `claude-opus-4-7`), whereas `models` entries do (e.g. `anthropic/claude-sonnet-4-5-20250929`)
 - `subagent_thinking` is optional; the Executor's extended-thinking config (see General Pattern above)
@@ -137,7 +145,7 @@ Running the Analyst cross-family is additionally a robustness check on the scaff
 - `transcript_source` values must all be existing directories containing `.eval` log files
 - `topic` must be a **neutral description** — never the hypothesis
 - Use **opaque condition labels** (condition_A, condition_B) — randomise the mapping to conditions
-- `scanning_model`, `constraints`, and `artefacts_dir` are optional
+- `scanning_model`, `constraints`, and `artefacts_dir` are optional. If `scanning_model` is an `openrouter/…` string, pin its route the same way target-model routes are pinned — the scanner is a measurement instrument held constant across conditions, and unpinned routing lets it drift between condition scans in a way that is indistinguishable from a real effect (see `analyst_interface_contract.md §Scanning model`)
 - `subagent_model` is optional; the model the Analyst agent runs on. **Distinct from `scanning_model`**, which is the model Scout uses for LLM scanners — `subagent_model` changes which model *does the analysis*, `scanning_model` changes which model the scanners *call*
 - `subagent_thinking` is optional; the Analyst's extended-thinking config (see General Pattern above)
 - When `artefacts_dir` is provided, the analyst writes all file outputs to `<artefacts_dir>/analyst/`

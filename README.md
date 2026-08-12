@@ -32,7 +32,7 @@ When finished, the Orchestrator produces a structured report for the User that s
 ## Prerequisites
 
 - **[Claude Code](https://claude.com/product/claude-code)** — the Orchestrator skill and its sub-agents run inside Claude Code; the scaffold cannot be used without it.
-- **API keys** — an `ANTHROPIC_API_KEY` (always required), plus an `OPENAI_API_KEY` if your target eval or its grader uses OpenAI models.
+- **API keys** — an `ANTHROPIC_API_KEY` (always required, since the Orchestrator and sub-agents run on Claude by default), plus whichever keys your target models need: an `OPENAI_API_KEY` if your eval or its grader uses OpenAI models, and/or an `OPENROUTER_API_KEY` to reach models from any provider through [OpenRouter](https://openrouter.ai/) with a single key.
 
 ## Quick Start
 
@@ -47,16 +47,43 @@ cd <your-inspect-ai-eval-repo>
 /path/to/prism/install.sh .
 
 # Add your API keys to a `.env` file (loaded automatically by the sub-agents).
-# ANTHROPIC_API_KEY is always required; add OPENAI_API_KEY only if your
-# target eval or its grader uses OpenAI models.
+# ANTHROPIC_API_KEY is always required. Add OPENAI_API_KEY if your target eval
+# or its grader uses OpenAI models, and/or OPENROUTER_API_KEY to reach models
+# from any provider through OpenRouter with one key.
 echo "ANTHROPIC_API_KEY=sk-..." >> .env
-echo "OPENAI_API_KEY=sk-..." >> .env  # optional
+echo "OPENAI_API_KEY=sk-..." >> .env      # optional
+echo "OPENROUTER_API_KEY=sk-or-..." >> .env  # optional
 
 # Launch Claude Code in the target repo and start an investigation:
 # /orchestrator [your research question]
 
 # To uninstall (remove symlinks and revert target repo changes):
 # /path/to/prism/uninstall.sh .
+```
+
+## Using models from any provider
+
+Adding `OPENROUTER_API_KEY` to your `.env` is the main setup step needed to evaluate models from any provider — Meta, Google, DeepSeek, Qwen, Mistral and the rest — alongside or instead of Anthropic and OpenAI models. Name them with an `openrouter/` prefix when you agree the model set with the Orchestrator, e.g. `openrouter/meta-llama/llama-3.3-70b-instruct`.
+
+One dependency caveat: Inspect's OpenRouter provider is built on the OpenAI-compatible client and needs a recent `openai` package (it will tell you the minimum version if yours is too old). Having Inspect installed does not guarantee this, so if an OpenRouter run refuses to start, pin it on the invocation — `uv run --with "openai>=2.45.0" inspect eval ...`.
+
+The same key also lets any *sub-agent* run on a non-Claude model, via an optional `subagent_route` field. Sub-agent roles are not restricted to Claude; the defaults are Claude only because that is what the scaffold has been exercised against.
+
+**Why the Orchestrator pins a provider.** OpenRouter resolves one model id to one of several upstream providers, and for the same model id those providers differ in quantization, in which sampling parameters they honour, and in maximum context and completion length. Left to route freely, which provider served a run varies over time — so upstream provider becomes confounded with your experimental condition, invisibly, because the eval log records what was *requested* rather than what answered.
+
+So the Orchestrator resolves a route for each model once, during the scoping discussion, and reuses it for the whole investigation:
+
+1. **Direct** to the model's own provider when you have that key — fewest layers.
+2. **OpenRouter, pinned** to a specific upstream provider otherwise. It enumerates the live endpoints and picks the model author's own endpoint where available, otherwise the one serving at the model's native precision (never an upcast — more expensive and no more faithful).
+3. **OpenRouter, unpinned** only as a last resort, with routing recorded per sample and a caveat carried into the final report.
+
+It announces its choice rather than blocking on you, so autonomous runs are unaffected. If you would rather optimise for cost than fidelity, or want a specific provider, say so during the scoping discussion and that preference is honoured — pinning to the cheapest endpoint removes the confound just as completely; it only trades away some fidelity to the reference model, which is then noted in the report.
+
+You can inspect the choice yourself for any model:
+
+```bash
+uv run --no-project python scripts/openrouter_endpoints.py meta-llama/llama-3.3-70b-instruct
+# add --prefer cost to rank by price instead
 ```
 
 > **How the scaffold is reached.** `install.sh` picks one of two modes deterministically:
@@ -81,7 +108,8 @@ prism/
 │   ├── skills/orchestrator/       # Orchestrator skill definition
 │   └── settings.json              # Claude Code permissions
 ├── scripts/
-│   └── execute_evals.py           # Parallel eval execution engine
+│   ├── execute_evals.py           # Parallel eval execution engine
+│   └── openrouter_endpoints.py    # Provider enumeration + pin selection
 ├── docs/
 │   └── scaffold-diagram.png       # Architecture diagram
 ├── templates/

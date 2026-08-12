@@ -48,6 +48,8 @@ condition_b: task.py --model openai/gpt-4o
 
 **Watch for:** Model differences are confounded with everything — training data, architecture, RLHF procedure, system prompt handling. Cross-model comparisons describe differences but cannot attribute them to any specific cause.
 
+**Also watch for:** how each model is *served*. This pattern most often reaches models through a router, where the same model id can be answered by different upstream providers at different quantizations, honouring different sampling parameters, with different output-length caps. Pin each model's route before running (see `orchestrator_responsibilities.md` Phase 1), or the comparison silently includes a serving difference alongside the model difference.
+
 ### Choosing a Pattern
 
 | Situation | Pattern | Reasoning |
