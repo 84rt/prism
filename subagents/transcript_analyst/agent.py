@@ -59,4 +59,5 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
         restrict_writes_to_memory=False,
         model=data.get("subagent_model"),
         thinking=data.get("subagent_thinking"),
+        route=data.get("subagent_route"),
     )

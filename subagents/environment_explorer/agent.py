@@ -53,4 +53,5 @@ async def run_environment_explorer(cwd: str | None = None, **data: Any) -> str:
         memory_file=None,
         model=data.get("subagent_model"),
         thinking=data.get("subagent_thinking"),
+        route=data.get("subagent_route"),
     )

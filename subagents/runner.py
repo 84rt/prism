@@ -40,6 +40,92 @@ DEFAULT_MODEL = "claude-opus-4-8"
 # `subagent_model` is — e.g. when overriding to a model without adaptive support.
 DEFAULT_THINKING: ThinkingConfig = {"type": "adaptive"}
 
+# OpenRouter exposes an Anthropic-Messages-compatible endpoint, so the Claude
+# Code CLI the Agent SDK spawns can be pointed at it without a local proxy. This
+# is what allows a sub-agent to run on a non-Claude model — e.g. running the
+# Analyst on a different model family as a robustness check on whether the
+# sub-agent model really is "infrastructure, not experiment".
+OPENROUTER_ANTHROPIC_BASE_URL = "https://openrouter.ai/api"
+
+
+def _resolve_route_env(route: str | None, model: str) -> dict[str, str]:
+    """Build the environment overrides that select a sub-agent's provider.
+
+    These are set per invocation via `ClaudeAgentOptions.env` rather than in the
+    process environment, so one sub-agent can run through OpenRouter while
+    another runs directly against Anthropic in the same investigation.
+
+    Parameters
+    ----------
+    route : str | None
+        Either "openrouter" or None/"direct" (the default, unchanged behaviour).
+    model : str
+        The model string, used only for the error message.
+
+    Returns
+    -------
+    dict[str, str]
+        Environment variables to pass to the Claude Code subprocess. Empty for
+        the direct route.
+
+    Raises
+    ------
+    RuntimeError
+        If the OpenRouter route is requested without `OPENROUTER_API_KEY` set.
+    """
+    if route in (None, "direct"):
+        return {}
+    if route != "openrouter":
+        raise RuntimeError(f"Unknown subagent_route: {route!r} (expected 'direct' or 'openrouter')")
+
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            f"subagent_route='openrouter' requested for model {model!r} but "
+            "OPENROUTER_API_KEY is not set. Add it to the project's .env file."
+        )
+
+    # ANTHROPIC_API_KEY must be explicitly blank: if both it and the auth token
+    # are set, the CLI prefers the API key and would authenticate against the
+    # wrong service.
+    return {
+        "ANTHROPIC_BASE_URL": OPENROUTER_ANTHROPIC_BASE_URL,
+        "ANTHROPIC_AUTH_TOKEN": api_key,
+        "ANTHROPIC_API_KEY": "",
+    }
+
+
+def _resolve_thinking(
+    thinking: ThinkingConfig | None, model: str, route: str | None
+) -> ThinkingConfig:
+    """Choose the extended-thinking config, guarding non-Claude models.
+
+    Adaptive thinking is a Claude feature. Sending it to a non-Claude model
+    routed through OpenRouter's Anthropic-compatible endpoint is at best
+    ignored and at worst a request error, so the default is downgraded to
+    disabled for those models. An explicit `subagent_thinking` always wins —
+    the guard only replaces the *default*.
+
+    Parameters
+    ----------
+    thinking : ThinkingConfig | None
+        The per-invocation override, if any.
+    model : str
+        The resolved model string for this sub-agent.
+    route : str | None
+        The resolved route.
+
+    Returns
+    -------
+    ThinkingConfig
+        The thinking config to run with.
+    """
+    if thinking is not None:
+        return thinking
+    if route == "openrouter" and "claude" not in model.lower():
+        return {"type": "disabled"}
+    return DEFAULT_THINKING
+
 _MEMORY_INSTRUCTIONS = """\
 ## Agent Memory
 
@@ -195,6 +281,7 @@ async def run_agent(
     restrict_writes_to_memory: bool = True,
     model: str | None = None,
     thinking: ThinkingConfig | None = None,
+    route: str | None = None,
 ) -> str:
     """Run an Agent SDK agent and return its output.
 
@@ -225,6 +312,16 @@ async def run_agent(
             {"type": "disabled"} to switch thinking off, or
             {"type": "enabled", "budget_tokens": N} for a fixed budget on a
             model that doesn't support adaptive thinking.
+        route: How this sub-agent reaches its model — "direct" (default,
+            Anthropic) or "openrouter", which points the spawned CLI at
+            OpenRouter's Anthropic-compatible endpoint so `model` may name any
+            model family. Set per-invocation via the `subagent_route` input
+            field. This is an infrastructure choice, independent of the eval's
+            target models. No role is restricted to Claude: the interface
+            contracts aim to specify each sub-agent completely enough that any
+            capable model can fulfil it, so a contract violation under a
+            non-Claude model is evidence the guidance is underspecified rather
+            than a reason to restrict the model.
 
     Returns:
         The agent's output as a string.
@@ -268,15 +365,20 @@ async def run_agent(
     if memory_file and "Write" not in allowed_tools:
         allowed_tools = [*allowed_tools, "Write"]
 
+    # --- Model, route, and thinking resolution ---
+    resolved_model = model or DEFAULT_MODEL
+    route_env = _resolve_route_env(route, resolved_model)
+
     options = ClaudeAgentOptions(
-        model=model or DEFAULT_MODEL,
-        thinking=thinking or DEFAULT_THINKING,
+        model=resolved_model,
+        thinking=_resolve_thinking(thinking, resolved_model, route),
         system_prompt=system_prompt,
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
         permission_mode="bypassPermissions",
         max_turns=100,
         cwd=working_dir,
+        **({"env": route_env} if route_env else {}),
         **({"hooks": hooks} if hooks else {}),
     )
 

@@ -38,6 +38,22 @@ Every agent's input JSON also accepts an optional `subagent_thinking` field — 
 
 Like `subagent_model`, this is an infrastructure choice independent of the experiment. The two pair naturally: if you override `subagent_model` to a model without adaptive support, override `subagent_thinking` alongside it.
 
+### Optional: `subagent_route` (all agents)
+
+Every agent's input JSON also accepts an optional `subagent_route` field — **how the sub-agent reaches its model**. Two values:
+
+- `"direct"` (default) — Anthropic, using `ANTHROPIC_API_KEY`. Unchanged behaviour.
+- `"openrouter"` — points the sub-agent at OpenRouter's Anthropic-compatible endpoint using `OPENROUTER_API_KEY`, so `subagent_model` may name **any** model family (e.g. `openai/gpt-5`, `google/gemini-3-pro`).
+
+The route is set per invocation, so one sub-agent can run through OpenRouter while another runs directly against Anthropic in the same investigation.
+
+Two things to know before using it:
+
+- **Thinking is auto-guarded.** Adaptive thinking is a Claude feature, so when the route is `openrouter` and the model is not a Claude model, `subagent_thinking` defaults to `{"type": "disabled"}` instead of adaptive. An explicit `subagent_thinking` still wins.
+- **Every role is open to any sufficiently capable model.** No sub-agent is restricted to Claude. The interface contracts and system prompts are meant to specify each role completely enough that any capable agent can fulfil it — so if a non-Claude sub-agent produces a report that violates its contract, treat that as evidence the *guidance* is underspecified, not as a reason to restrict the model. Fix the contract. The defaults remain Claude simply because that is what the scaffold has been exercised against, not because the roles depend on it.
+
+Running the Analyst cross-family is additionally a robustness check on the scaffold's own assumption that the sub-agent model is infrastructure rather than part of the experiment — the one place where a differing result is informative rather than merely a bug.
+
 ## Environment Explorer
 
 **Script**: `subagents/environment_explorer/main.py`
