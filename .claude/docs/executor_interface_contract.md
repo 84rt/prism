@@ -218,6 +218,8 @@ After preflight, the `_preflight/` log subdirectory is deleted. Preflight logs m
 
 **Stdout-only reporting.** The report is written to stdout and captured by the orchestrator, which saves it to `artefacts/executor/report.md`. Errors (from the wrapping CLI, not from eval subprocesses) go to stderr.
 
+**Section headings are markdown, and their text is verbatim.** Emit each report section as a markdown heading at the level shown in the Report Format above (`### Condition-Model Execution Matrix`, `#### Structural`, …), using the exact heading text, in the order given. Plain-text section titles are not sufficient: the orchestrator locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read. This is stated explicitly rather than left to be inferred from the formatting of this document.
+
 **No scientific judgement on data quality.** The Executor reports objective observable properties — exit codes, sample counts, transcript termination shape, retry counts. It never decides whether a transcript is "good enough," whether a sample error is "acceptable," or whether an attrition rate is "too high." Those judgements belong to the orchestrator and the Analyst.
 
 **Log organisation is per-condition.** Every condition gets its own subdirectory under `<experiment_dir>/logs/<condition_name>/`. Every invocation includes `--metadata condition=<condition_name>` and `--metadata model=<model_string>` so condition and model labels are embedded in the log file itself, providing redundancy against file reorganisation.

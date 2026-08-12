@@ -94,6 +94,8 @@ Each item should name what the orchestrator needs to do to resolve it (read a sp
 
 **Read-only, stdout-only.** The Explorer never modifies, creates, or deletes files. Its report is written to stdout and captured by the orchestrator, which saves it to `artefacts/explorer/report.md`.
 
+**Section headings are markdown, and their text is verbatim.** Emit each report section as a markdown heading at the level shown in the Report Format above (`### Summary`, `### Pipeline Model`, …), using the exact heading text, in the order given. Plain-text section titles are not sufficient: the orchestrator locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read. This is stated explicitly rather than left to be inferred from the formatting of this document.
+
 **Diff notation.** Use unified diff format with `-` / `+` line markers and sufficient context lines for the diff to apply unambiguously. Include the file path and line range for each diff so the orchestrator can apply it mechanically.
 
 **Condition naming.** When the orchestrator names conditions (downstream of the Explorer), the names must be filesystem-safe `snake_case` identifiers (e.g., `control`, `treatment_explicit_goal`). This convention is recorded here because the Explorer's per-site rationale may reference the conceptual role a variant plays under a particular naming scheme.
