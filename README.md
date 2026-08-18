@@ -17,7 +17,7 @@ The scaffold has two primary use cases:
   <img src="docs/scaffold-diagram.png" alt="Scaffold architecture: User talks to an Orchestrator, which delegates to an Environment Explorer, Experiment Executor, and Transcript Analyst (behind a hypothesis firewall)" width="500">
 </p>
 
-The Orchestrator agent (launched with the `/orchestrator` skill) begins by discussing the research question with the User to define its scope. It then runs the following loop, recording each iteration in an append-only investigation log:
+The Orchestrator agent (launched with the `/orchestrate` skill) begins by discussing the research question with the User to define its scope. It then runs the following loop, recording each iteration in an append-only investigation log:
 
 1. **Generate falsifiable hypotheses** that are relevant and targeted to the research scope defined in the discussion phase;
 2. Ask the *Environment Explorer* sub-agent to **identify informative, minimal perturbations** in the target eval setting;
@@ -55,7 +55,7 @@ echo "OPENAI_API_KEY=sk-..." >> .env      # optional
 echo "OPENROUTER_API_KEY=sk-or-..." >> .env  # optional
 
 # Launch Claude Code in the target repo and start an investigation:
-# /orchestrator [your research question]
+# /orchestrate [your research question]
 
 # To uninstall (remove symlinks and revert target repo changes):
 # /path/to/prism/uninstall.sh .
@@ -105,7 +105,7 @@ prism/
 │   └── transcript_analyst/        # Blinded transcript analysis
 ├── .claude/
 │   ├── docs/                      # Orchestrator reference documents
-│   ├── skills/orchestrator/       # Orchestrator skill definition
+│   ├── skills/orchestrate/       # Orchestrator skill definition
 │   └── settings.json              # Claude Code permissions
 ├── scripts/
 │   ├── execute_evals.py           # Parallel eval execution engine

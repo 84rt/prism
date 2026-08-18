@@ -1,5 +1,5 @@
 ---
-name: orchestrator
+name: orchestrate
 description: "Inject the experiment orchestrator role into the current session. Drives the full investigation pipeline: hypothesis refinement, environment exploration, experiment execution, transcript analysis, and reporting."
 user-invokable: true
 argument-hint: "[research question or hypothesis]"

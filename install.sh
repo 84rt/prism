@@ -196,10 +196,10 @@ link_file ".claude/docs/orchestrator_responsibilities.md"
 link_file ".claude/docs/scout_reference.md"
 link_file ".claude/docs/subagent_invocation.md"
 
-# .claude/skills/orchestrator
-link_file ".claude/skills/orchestrator/SKILL.md"
-link_file ".claude/skills/orchestrator/experimental-design-patterns.md"
-link_file ".claude/skills/orchestrator/hypothesis-methodology.md"
+# .claude/skills/orchestrate
+link_file ".claude/skills/orchestrate/SKILL.md"
+link_file ".claude/skills/orchestrate/experimental-design-patterns.md"
+link_file ".claude/skills/orchestrate/hypothesis-methodology.md"
 
 # .claude/settings.json
 link_file ".claude/settings.json"
@@ -226,7 +226,7 @@ GITIGNORE_ENTRIES=(
     ".claude/docs/orchestrator_responsibilities.md"
     ".claude/docs/scout_reference.md"
     ".claude/docs/subagent_invocation.md"
-    ".claude/skills/orchestrator/"
+    ".claude/skills/orchestrate/"
     ".claude/settings.json"
     ".claude/autopilot/"
     "CLAUDE.local.md"
@@ -348,7 +348,7 @@ echo "      OPENROUTER_API_KEY to reach any provider's models through OpenRouter
 step=$((step + 1))
 echo "  $step. (Optional) create .claude/settings.local.json for local overrides"
 step=$((step + 1))
-echo "  $step. Launch the orchestrator in Claude Code: /orchestrator [research question]"
+echo "  $step. Launch the orchestrator in Claude Code: /orchestrate [research question]"
 echo ""
 echo "Tip: run the Orchestrator on the most recent Claude model available —"
 echo "we observed weaker scaffold compliance on older models (e.g. Opus 4.5)."

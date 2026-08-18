@@ -141,10 +141,10 @@ unlink_file ".claude/docs/orchestrator_responsibilities.md"
 unlink_file ".claude/docs/scout_reference.md"
 unlink_file ".claude/docs/subagent_invocation.md"
 
-# .claude/skills/orchestrator
-unlink_file ".claude/skills/orchestrator/SKILL.md"
-unlink_file ".claude/skills/orchestrator/experimental-design-patterns.md"
-unlink_file ".claude/skills/orchestrator/hypothesis-methodology.md"
+# .claude/skills/orchestrate
+unlink_file ".claude/skills/orchestrate/SKILL.md"
+unlink_file ".claude/skills/orchestrate/experimental-design-patterns.md"
+unlink_file ".claude/skills/orchestrate/hypothesis-methodology.md"
 
 # .claude/settings.json
 unlink_file ".claude/settings.json"
@@ -176,7 +176,7 @@ for dir in \
     "$TARGET_DIR/subagents/transcript_analyst" \
     "$TARGET_DIR/subagents" \
     "$TARGET_DIR/.claude/docs" \
-    "$TARGET_DIR/.claude/skills/orchestrator" \
+    "$TARGET_DIR/.claude/skills/orchestrate" \
     "$TARGET_DIR/.claude/skills"; do
     if [ -d "$dir" ] && [ -z "$(ls -A "$dir")" ]; then
         rmdir "$dir"
