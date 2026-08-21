@@ -73,8 +73,12 @@ For each `(condition, model)` pair, build the `inspect eval` invocation using th
 - `--metadata condition=<condition_name> --metadata model=<model_string>`
 - `--no-fail-on-error` (sample errors don't abort the eval)
 - `--retry-on-error 3` (Inspect retries errored samples inside the eval)
-- Any orchestrator overrides (`--limit`, `--epochs`, `--max-connections`) from the request's `overrides`
+- Any orchestrator overrides (`--limit`, `--sample-id`, `--epochs`, `--max-connections`) from the request's `overrides`
 - Any `-M key=value` arguments from the request's `model_routing` entry for that model (object values are passed as JSON), plus `--metadata route=<direct|openrouter:<slug>|openrouter:unpinned>`
+
+**`sample_id` selects dataset entries and pairs with `epochs`.** `--epochs` repeats the whole dataset, so a caller wanting *n* repetitions of one specific sample passes both: `sample_id` pins the entry, `epochs` sets the count. Pass the value straight through to `--sample-id` (Inspect accepts a comma-separated list). Do not substitute `--limit` for it — `--limit` takes the first *n* entries or an index range, which is not the same as naming one, and quietly runs the wrong sample if the dataset order changes.
+
+**`runs_per_condition` is accepted but not applied.** The contract documents it as an override key, but there is no rendering step for it: unlike `--limit`, `--sample-id`, `--epochs` and `--max-connections`, which each map to a flag, it would require running the whole eval more than once per condition-model pair, and nothing does that. Because it is a *recognised* key it would otherwise pass silently, leaving the caller believing it took effect. So whenever `overrides` contains `runs_per_condition`, run the pair once as normal and record it in **Additional Notes** as accepted-but-not-applied, naming the value received and telling the caller to use `epochs` if they need repeated sampling. Do not attempt to emulate it by multiplying commands yourself — that would change the log-directory layout the report and the Analyst both depend on.
 
 **OpenRouter models need the `openai` package.** Inspect's OpenRouter provider is built on the OpenAI-compatible client and refuses to start without a recent enough `openai`. Having Inspect installed does not guarantee it. So for any model whose string begins `openrouter/`, launch the eval as `uv run --with "openai>=2.45.0" inspect eval ...` rather than plain `uv run inspect eval ...`. If Inspect still rejects the version, it names the minimum it wants in its error — re-run with that value rather than treating the environment as broken. Models on other routes take the plain invocation.
 

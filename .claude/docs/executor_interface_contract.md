@@ -80,13 +80,51 @@ A mapping of execution-parameter overrides. Supported keys:
 | Key | Type | Meaning |
 |---|---|---|
 | `sample_limit` | int | Maps to `--limit` |
+| `sample_id` | str | Maps to `--sample-id` (comma-separated ids; runs only those dataset entries) |
 | `epochs` | int | Maps to `--epochs` |
 | `skip_preflight` | bool | If `true`, the Executor does not run preflight and goes straight to full execution |
 | `max_parallel` | int | Upper bound on concurrent eval subprocesses |
 | `max_connections` | int | Maps to `--max-connections` (concurrent API calls within an eval) |
-| `runs_per_condition` | int | Number of full-run repetitions per condition-model pair |
+| `runs_per_condition` | int | Number of full-run repetitions per condition-model pair — **specified but not currently implemented**, see below |
 
 Unrecognised keys are ignored with a note in **Additional Notes**. The Executor may apply other defaults (e.g., `--retry-on-error 3`, `--no-fail-on-error`, `--display plain`, and `--with "openai>=…"` on `openrouter/…` models) without them being in overrides — these are policy, not configuration.
+
+**`runs_per_condition` is documented here but has no rendering step in the Executor's system prompt.** `sample_limit`, `sample_id`, `epochs` and `max_connections` each name a flag the Executor is instructed to append; `runs_per_condition` names a *multiplication of commands* that nothing performs. It is also a *recognised* key, so it would not earn the Additional Notes entry that unrecognised keys get — it would simply take no effect while the caller believed it had. The Executor therefore treats it as **accepted-but-not-applied**: it runs the pair once and records the key and its value in **Additional Notes**, naming `epochs` as the alternative. Callers needing repeated sampling should use `epochs` directly; see *Resample runs* below for when the two genuinely differ.
+
+### Resample runs (Model Forensics)
+
+A *resample* is the Model Forensics equivalent of a baseline measurement: the unmodified eval run *n* times to establish how often the behaviour under investigation occurs at all. It is a normal Executor invocation with a constrained shape, not a new mode.
+
+The paragraphs below are marked **[caller]** or **[Executor]**. Caller-facing paragraphs constrain how the request is built; Executor-facing paragraphs constrain what the Executor does with it. The Executor need only act on the latter — but the former are here rather than in the caller's own documentation because they define what makes a request a resample at all.
+
+**[caller] Request shape.** Exactly one condition, named `baseline`, pointing at the unmodified task file with **no `-T` overrides at all**. The point of the resample is to characterise the episode's own setting; any `-T` argument makes it a variant of that setting rather than the setting itself, and every later comparison is drawn against this run. One model — the frozen target model for the investigation. The episode is isolated with `sample_id` and repeated with `epochs`.
+
+```json
+{
+    "experiment_name": "mf_<investigation>_resample",
+    "experiment_dir": "investigations/<name>/iterations/00_resample",
+    "conditions": {"baseline": "<path/to/unmodified_task.py>"},
+    "models": ["<frozen target model>"],
+    "overrides": {"sample_id": "<id of the episode under investigation>", "epochs": 30}
+}
+```
+
+**[caller] `sample_id` is required, not optional, whenever the task has more than one sample.** `--epochs` repeats the *whole dataset*, so a task with *k* samples and `epochs: n` produces *k × n* transcripts of which only *n* resample the episode under investigation. The rest are a different scenario entirely: they inflate cost by a factor of *k*, and — worse — they contaminate the resample pool the Analyst draws negative controls and borderline cases from, with transcripts that were never the thing being studied. Pinning `sample_id` yields exactly *n* trajectories of exactly the episode, in one log directory.
+
+Note that `sample_id` selects which dataset entry runs; it does not alter the task's content, so it does not conflict with the no-`-T`-overrides rule above.
+
+**[caller] Why `epochs` and not `runs_per_condition`.** They are not interchangeable, and the difference is about where state lives:
+
+- `epochs` re-runs each selected *sample* *n* times **inside one eval**, producing one log directory and one `.eval` file containing all *n* trajectories. Each epoch is an independent rollout — a fresh model context and, for sandboxed tasks, a fresh sandbox — so for the overwhelming majority of evals this is exactly the independent resampling the investigation wants.
+- `runs_per_condition` would re-run the *whole eval* *n* times as *n* separate processes. This is only materially different when the eval carries state that survives across samples within a single run: a module-level accumulator, a shared external service, a dataset the task mutates, a solver that caches. There, epochs are not independent draws and separate runs would be the only honest resample.
+
+`epochs` is the documented mechanism because it is the one the Executor implements (see the `runs_per_condition` note above) and because it keeps the resample in a single log directory. If the eval under investigation *does* carry cross-sample state, that is a blocker for the caller to raise rather than work around — the resample would be measuring a sequence rather than a population, and no override available here fixes that.
+
+**[Executor] Log organisation.** Resample logs go to their own directory under their own `experiment_dir`, exactly as any single-condition run does: `<experiment_dir>/logs/baseline/`. This is the ordinary per-condition rule, stated here only because the Analyst later receives that one path as one condition and the resample is compared against for the life of the investigation.
+
+**[Executor] Zero successful runs is reported, never recovered.** If every command for the `baseline` condition fails — nothing ran, or things ran and no samples completed — report it plainly and completely: the normal taxonomy applies, with exit code, command and output tail per the structural-failure rules. Do not relax a pin, drop `-M` arguments, widen a limit, or otherwise adjust the invocation to make it succeed. Standard retry policy applies and nothing beyond it. The Executor makes no judgement about what a zero count means for the investigation.
+
+**[caller] Zero successful runs and zero behaviour rate are different things.** The Executor can observe the first and structurally cannot observe the second — it reports execution outcomes and never scorer outputs. A resample that ran cleanly but in which the target behaviour never occurred is a *finding* about reproducibility and terminates the investigation; a resample that failed to run is a broken setup and is fixed and re-run. Only the caller, holding the Analyst's report, can tell these apart. See `diagnostician_responsibilities.md` for what follows from each.
 
 ---
 
