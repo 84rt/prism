@@ -1,0 +1,162 @@
+"""Variant Designer agent — prompt building and config."""
+
+import json
+from typing import Any
+
+from subagents.runner import run_agent
+from subagents.variant_designer.system_prompt import SYSTEM_PROMPT
+
+ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
+DISALLOWED_TOOLS = ["Edit", "Bash", "WebSearch", "WebFetch"]
+
+# Files this agent must not read. Mapping of filename pattern → reason.
+# The Designer must read its own contract (designer_interface_contract.md) and
+# the Mapper's briefing; both are intentionally absent from this list. It does
+# receive the candidate explanations — it cannot separate what it cannot see —
+# but not the framework for adjudicating between them, because an agent that
+# has absorbed the elimination rules starts designing for the verdict it
+# expects rather than for the comparison it was asked to make possible.
+RESTRICTED_FILES: dict[str, str] = {
+    "model_forensics_principles.md": "Diagnostician-only methodological reference.",
+    "eval_science_principles.md": "Diagnostician-only methodological reference.",
+    "analyst_delegation_guide.md": "Diagnostician-only delegation guide.",
+    "analyst_interface_contract.md": (
+        "Analyst-Diagnostician interface contract. Not relevant to this agent."
+    ),
+    "candidate-methodology.md": (
+        "Contains the Diagnostician's framework for ranking and retiring "
+        "candidates. The Designer separates candidates; it does not adjudicate "
+        "between them."
+    ),
+}
+
+
+async def run_variant_designer(cwd: str | None = None, **data: Any) -> str:
+    """Run the variant designer agent and return its markdown design report.
+
+    Parameters
+    ----------
+    cwd : str | None
+        Working directory for the agent. Defaults to the project root.
+    **data : Any
+        Fields from the invocation JSON. Required: ``mapper_report_path``,
+        ``environment_path``, ``candidates``, ``regime``, ``environment_rate``,
+        ``variant_budget``. Optional: ``environment_delta``,
+        ``variations_tried``, ``elimination_targets``, ``constraints``, and the
+        shared ``subagent_model`` / ``subagent_thinking`` / ``subagent_route``
+        infrastructure fields.
+
+    Returns
+    -------
+    str
+        The Designer's markdown report, per `designer_interface_contract.md`.
+    """
+    # The Mapper's briefing is passed by path rather than inlined so the
+    # Designer reads the full report — the surface inventory's coupling column
+    # and the pipeline model are both load-bearing and both easy to lose in a
+    # summary.
+    prompt = f"""\
+## Environment Path
+
+{data["environment_path"]}
+
+## Mapper Briefing
+
+Read the Mapper's briefing in full before designing anything: \
+`{data["mapper_report_path"]}`
+"""
+
+    # Present only when the supplied environment is a derived variant rather
+    # than a fresh copy of the original. Without it the Designer meets a
+    # mismatch between the Mapper's map and the tree it is holding, and the
+    # readings available to it — stale map, broken environment — would have it
+    # report the investigation's own manipulation as an environment defect.
+    # Outcomes are deliberately absent: the changes are needed for coherence,
+    # their effects would bias the Designer toward edits that already worked.
+    environment_delta = data.get("environment_delta")
+    if environment_delta:
+        prompt += (
+            "\n## Environment Delta\n\n"
+            "The environment above is **not** a fresh copy of the original eval. "
+            "The Mapper's briefing describes the original, so its file locations "
+            "are against that tree, not this one. These modifications have "
+            "already been applied here:\n\n"
+            f"```json\n{json.dumps(environment_delta, indent=2)}\n```\n"
+        )
+
+    prompt += f"""
+## Candidate Explanations
+
+```json
+{json.dumps(data["candidates"], indent=2)}
+```
+"""
+
+    # Ground already covered, outcomes stripped for the same reason. Broader
+    # than the delta: it includes variations from branches this environment
+    # does not descend from.
+    variations_tried = data.get("variations_tried")
+    if variations_tried:
+        prompt += (
+            "\n## Variations Already Tried\n\n"
+            "Across all rounds and branches of this investigation. Re-proposing "
+            "one of these is permitted, but say why re-testing it in the current "
+            "environment is discriminating:\n\n"
+            f"```json\n{json.dumps(variations_tried, indent=2)}\n```\n"
+        )
+
+    prompt += f"""
+## Regime
+
+{data["regime"]}
+
+## Environment Rate
+
+The measured rate of the target behaviour in the environment supplied above.
+
+```json
+{json.dumps(data["environment_rate"], indent=2)}
+```
+
+## Variant Budget
+
+{data["variant_budget"]}
+"""
+
+    # Present only when the Diagnostician intends to retire a candidate on
+    # absence of evidence this round. It is what triggers the positive-control
+    # obligation, so it must be rendered — an unrendered field would leave the
+    # contract requiring controls the Designer was never told to build.
+    elimination_targets = data.get("elimination_targets")
+    if elimination_targets:
+        prompt += (
+            "\n## Elimination Targets\n\n"
+            "The Diagnostician intends to retire these candidates on *absence* of "
+            "evidence this round. Supply a positive-control variant for each, per "
+            "the contract:\n\n"
+            + "\n".join(f"- `{c}`" for c in elimination_targets)
+            + "\n"
+        )
+
+    constraints = data.get("constraints")
+    if constraints:
+        prompt += f"\n## Constraints\n\n{constraints}\n"
+
+    # Memory is disabled: each design round is self-contained, per the
+    # contract. Continuity across rounds arrives through the candidate ledger
+    # and the `constraints` field, both supplied by the Diagnostician. This
+    # also keeps the agent fully read-only (runner.py only injects Write into
+    # allowed_tools when a memory_file is set).
+    return await run_agent(
+        prompt=prompt,
+        system_prompt=SYSTEM_PROMPT,
+        allowed_tools=ALLOWED_TOOLS,
+        disallowed_tools=DISALLOWED_TOOLS,
+        agent_name="Variant designer",
+        cwd=cwd,
+        restricted_files=RESTRICTED_FILES,
+        memory_file=None,
+        model=data.get("subagent_model"),
+        thinking=data.get("subagent_thinking"),
+        route=data.get("subagent_route"),
+    )
