@@ -4,7 +4,10 @@ import json
 from typing import Any
 
 from subagents.runner import run_agent
-from subagents.transcript_analyst.system_prompt import SYSTEM_PROMPT
+from subagents.transcript_analyst.system_prompt import (
+    SYSTEM_PROMPT,
+    SYSTEM_PROMPT_FORENSIC,
+)
 
 ALLOWED_TOOLS = ["Bash", "Read", "Write", "Glob", "Grep"]
 DISALLOWED_TOOLS = ["Edit", "WebSearch", "WebFetch"]
@@ -37,14 +40,32 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
             f"## Constraints\n\n```json\n{json.dumps(data['constraints'], indent=2)}\n```"
         )
 
+    # Model Forensics mode: a fixed grader for a named behaviour, applied
+    # across all conditions. Additive and optional — an invocation without
+    # this field behaves exactly as before, which is what keeps the
+    # Orchestrator's pipeline unchanged.
+    if data.get("behaviour_spec"):
+        sections.append(
+            "## Behaviour Spec\n\n"
+            f"```json\n{json.dumps(data['behaviour_spec'], indent=2)}\n```"
+        )
+
     if data.get("artefacts_dir"):
         sections.append(f"## Artefacts Directory\n\n{data['artefacts_dir']}")
 
     prompt = "\n\n".join(sections) + "\n"
 
+    # Model Forensics investigations get an extended system prompt. The two
+    # variants are selected here rather than branched inside a single prompt so
+    # that an Orchestrator-mode analyst never receives the forensic text at
+    # all — it cannot mistakenly adopt a mode it has not been told exists. The
+    # forensic variant is the base prompt plus an overlay, so the shared
+    # instructions have exactly one definition and the modes cannot drift.
+    system_prompt = SYSTEM_PROMPT_FORENSIC if data.get("behaviour_spec") else SYSTEM_PROMPT
+
     return await run_agent(
         prompt=prompt,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         allowed_tools=ALLOWED_TOOLS,
         disallowed_tools=DISALLOWED_TOOLS,
         agent_name="Transcript analyst",
