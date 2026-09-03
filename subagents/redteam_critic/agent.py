@@ -45,13 +45,20 @@ MODE_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 # principles doc over time. The fix is to keep them in sync, never to relax
 # the blinding — the blinding is what the mode is for.
 RESTRICTED_FILES: dict[str, str] = {
-    "model_forensics_principles.md": (
-        "Diagnostician-only methodological reference. The Critic's independence "
-        "depends on not sharing the Diagnostician's analytical framework."
+    # Directory-level denial: everything under investigator/ is lead-agent
+    # material, so documents added there later are blinded automatically
+    # rather than escaping a list of filenames.
+    ".claude/docs/investigator/": (
+        "Diagnostician-only material: methodological principles, pipeline "
+        "responsibilities, delegation guides. The Critic's independence "
+        "depends on not sharing the Diagnostician's analytical framework — "
+        "a critic reasoning from the same priors inherits the same blind "
+        "spots, which is precisely what it exists to counter."
     ),
-    "eval_science_principles.md": "Diagnostician-only methodological reference.",
-    "candidate-methodology.md": "Diagnostician-only candidate framework.",
-    "analyst_delegation_guide.md": "Diagnostician-only delegation guide.",
+    ".claude/skills/": (
+        "Skill definitions and their methodology documents carry the "
+        "Diagnostician's candidate framework."
+    ),
 }
 
 
@@ -146,7 +153,7 @@ async def run_redteam_critic(cwd: str | None = None, **data: Any) -> str:
     **data : Any
         Fields from the invocation JSON. Always required: ``mode``.
         Mode-conditional requirements are documented in
-        `.claude/docs/critic_interface_contract.md` and enforced in
+        `.claude/docs/contracts/critic_interface_contract.md` and enforced in
         :func:`_build_prompt`. The shared ``subagent_model`` /
         ``subagent_thinking`` / ``subagent_route`` infrastructure fields apply
         as they do to every sub-agent; the Critic is routed cross-family by

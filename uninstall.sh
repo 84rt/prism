@@ -131,15 +131,15 @@ unlink_file "subagents/transcript_analyst/main.py"
 unlink_file "subagents/transcript_analyst/system_prompt.py"
 
 # .claude/docs
-unlink_file ".claude/docs/analyst_delegation_guide.md"
-unlink_file ".claude/docs/analyst_interface_contract.md"
-unlink_file ".claude/docs/eval_science_principles.md"
-unlink_file ".claude/docs/executor_interface_contract.md"
-unlink_file ".claude/docs/explorer_interface_contract.md"
-unlink_file ".claude/docs/inspect_reference.md"
-unlink_file ".claude/docs/orchestrator_responsibilities.md"
-unlink_file ".claude/docs/scout_reference.md"
-unlink_file ".claude/docs/subagent_invocation.md"
+unlink_file ".claude/docs/investigator/orchestrator_analyst_guide.md"
+unlink_file ".claude/docs/contracts/analyst_interface_contract.md"
+unlink_file ".claude/docs/investigator/eval_science_principles.md"
+unlink_file ".claude/docs/contracts/executor_interface_contract.md"
+unlink_file ".claude/docs/contracts/explorer_interface_contract.md"
+unlink_file ".claude/docs/references/inspect_reference.md"
+unlink_file ".claude/docs/investigator/orchestrator_responsibilities.md"
+unlink_file ".claude/docs/references/scout_reference.md"
+unlink_file ".claude/docs/investigator/subagent_invocation.md"
 
 # .claude/skills/orchestrate
 unlink_file ".claude/skills/orchestrate/SKILL.md"
@@ -175,6 +175,9 @@ for dir in \
     "$TARGET_DIR/subagents/experiment_executor" \
     "$TARGET_DIR/subagents/transcript_analyst" \
     "$TARGET_DIR/subagents" \
+    "$TARGET_DIR/.claude/docs/investigator" \
+    "$TARGET_DIR/.claude/docs/contracts" \
+    "$TARGET_DIR/.claude/docs/references" \
     "$TARGET_DIR/.claude/docs" \
     "$TARGET_DIR/.claude/skills/orchestrate" \
     "$TARGET_DIR/.claude/skills"; do

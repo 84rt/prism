@@ -62,7 +62,7 @@ The user presents a research question. The orchestrator helps articulate it as t
 
    **Methodological check** (see `eval_science_principles.md` §3, Q4 corollary): When proposing or accepting a single-provider model set, name the construct-validity implication explicitly to the user — findings about a *construct* obtained on one provider's models test one operationalisation, not the construct itself. If the research question is about the construct rather than about a specific provider or model, surface a multi-provider option, alongside its practical preconditions: commercial alternatives (e.g. OpenAI, Google) require either their own API keys or a single `OPENROUTER_API_KEY` in the project's `.env` file before step 5 — OpenRouter reaches every family on one key, so a second provider family is usually cheap to add and the multi-provider option should be offered rather than assumed away; open-weight models (e.g. from HuggingFace) can be run locally given GPU resources, removing the API-key dependency but adding setup overhead. The user's choice stands either way — single-provider, and indeed single-model, is a legitimate scope decision when the question is about that specific provider or model (e.g. *"how does Opus 4.7 behave under condition X?"*), when compute or refusal-rate constraints rule out alternatives (as in dangerous-capability evals), or when the user explicitly accepts the construct-validity limitation for a construct-level claim. The discipline is in raising the question, not in forcing the answer.
 
-4. **Resolve routing for each model.** Every model needs a *route* — how the request physically reaches it — decided here, once, and recorded. Routing is not a detail: OpenRouter resolves a single model id to one of several upstream providers, and those providers are not interchangeable measurement instruments. For the same model id they differ in quantization, in which sampling parameters they honour, and in maximum context and completion length. If conditions land on different upstreams, **upstream provider becomes confounded with condition** — the same temporal confound described in `analyst_delegation_guide.md`, but invisible, because `--metadata model=` records what was *requested*, never what served it.
+4. **Resolve routing for each model.** Every model needs a *route* — how the request physically reaches it — decided here, once, and recorded. Routing is not a detail: OpenRouter resolves a single model id to one of several upstream providers, and those providers are not interchangeable measurement instruments. For the same model id they differ in quantization, in which sampling parameters they honour, and in maximum context and completion length. If conditions land on different upstreams, **upstream provider becomes confounded with condition** — the same temporal confound described in `orchestrator_analyst_guide.md`, but invisible, because `--metadata model=` records what was *requested*, never what served it.
 
    Resolve each model to the first applicable tier:
 
@@ -342,7 +342,7 @@ This is the orchestrator's most important cognitive task. The Transcript Analyst
 **What can go wrong:**
 - The log directories contain no `.eval` files (e.g., the Executor put logs in a different location than reported). Verify the paths contain logs before launching.
 - The condition labels leak the experimental design (e.g., using "control" and "treatment" instead of opaque labels). Always use condition_A, condition_B, etc.
-- The topic accidentally contains hypothesis-leaking language. Re-read the topic one more time before launching. See `analyst_delegation_guide.md` for detailed guidance.
+- The topic accidentally contains hypothesis-leaking language. Re-read the topic one more time before launching. See `orchestrator_analyst_guide.md` for detailed guidance.
 
 ---
 
@@ -359,7 +359,7 @@ This is the orchestrator's most important cognitive task. The Transcript Analyst
 
 **Orchestrator work:**
 
-Run lightweight consistency checks before interpreting findings. See `analyst_delegation_guide.md` for detailed guidance.
+Run lightweight consistency checks before interpreting findings. See `orchestrator_analyst_guide.md` for detailed guidance.
 
 1. **Verify summary statistics.** Do per-condition counts sum to the total? Are reported rates arithmetically consistent with the raw counts?
 

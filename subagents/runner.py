@@ -164,7 +164,14 @@ def _build_hooks(
 
     Args:
         agent_name: Human-readable agent name for error messages.
-        restricted_files: Mapping of filename patterns to denial reasons.
+        restricted_files: Mapping of path patterns to denial reasons. A
+            pattern ending in "/" denies an entire directory (matched
+            anywhere in the path); any other pattern denies paths ending
+            with it, which is normally a bare filename. Directory patterns
+            exist so that a whole class of documents can be blinded once
+            rather than enumerated — a file added to a denied directory
+            later is blocked automatically, whereas a new filename is
+            invisible to a list of filenames until someone remembers it.
         memory_abs_path: Absolute path to the agent's memory.md, or None.
         restrict_writes_to_memory: If True, block all writes except to
             memory.md. If False, only enforce append-only on memory.md.
@@ -187,7 +194,14 @@ def _build_hooks(
             if memory_abs_path and os.path.abspath(file_path) == memory_abs_path:
                 return {}
             for pattern, reason in restricted_files.items():
-                if file_path.endswith(pattern):
+                # A trailing slash marks a directory pattern: match it
+                # anywhere in the path, since a file path ends in the
+                # filename and would never end with the directory itself.
+                if pattern.endswith("/"):
+                    matched = pattern in file_path
+                else:
+                    matched = file_path.endswith(pattern)
+                if matched:
                     return {
                         "decision": "block",
                         "reason": (

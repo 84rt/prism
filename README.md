@@ -104,7 +104,11 @@ prism/
 │   ├── experiment_executor/       # Runs Inspect AI evals
 │   └── transcript_analyst/        # Blinded transcript analysis
 ├── .claude/
-│   ├── docs/                      # Orchestrator reference documents
+│   ├── docs/
+│   │   ├── investigator/          # Lead-agent only (principles, responsibilities,
+│   │   │                          #   delegation guides, invocation reference)
+│   │   ├── contracts/             # Interface contracts, one per sub-agent
+│   │   └── references/            # Tool references (Inspect, Scout)
 │   ├── skills/orchestrate/       # Orchestrator skill definition
 │   └── settings.json              # Claude Code permissions
 ├── scripts/

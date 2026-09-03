@@ -17,16 +17,20 @@ DISALLOWED_TOOLS = ["Edit", "Bash", "WebSearch", "WebFetch"]
 # has absorbed the elimination rules starts designing for the verdict it
 # expects rather than for the comparison it was asked to make possible.
 RESTRICTED_FILES: dict[str, str] = {
-    "model_forensics_principles.md": "Diagnostician-only methodological reference.",
-    "eval_science_principles.md": "Diagnostician-only methodological reference.",
-    "analyst_delegation_guide.md": "Diagnostician-only delegation guide.",
+    # Directory-level denial: everything under investigator/ is lead-agent
+    # material, so documents added there later are blinded automatically
+    # rather than escaping a list of filenames.
+    ".claude/docs/investigator/": (
+        "Diagnostician-only material: methodological principles, pipeline "
+        "responsibilities, delegation guides. The Designer separates "
+        "candidates; it does not adjudicate between them."
+    ),
+    ".claude/skills/": (
+        "Skill definitions and their methodology documents carry the "
+        "Diagnostician's framework for ranking and retiring candidates."
+    ),
     "analyst_interface_contract.md": (
         "Analyst-Diagnostician interface contract. Not relevant to this agent."
-    ),
-    "candidate-methodology.md": (
-        "Contains the Diagnostician's framework for ranking and retiring "
-        "candidates. The Designer separates candidates; it does not adjudicate "
-        "between them."
     ),
 }
 

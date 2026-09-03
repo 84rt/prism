@@ -14,13 +14,22 @@ DISALLOWED_TOOLS = ["Edit", "WebSearch", "WebFetch"]
 
 # Files this agent must not read. Mapping of filename pattern → reason.
 RESTRICTED_FILES: dict[str, str] = {
-    "eval_science_principles.md": (
-        "Contains hypothesis-informing methodological principles. "
-        "The analyst must not access this to prevent confirmation bias."
+    # Directory-level denial. Everything under investigator/ belongs to the
+    # lead agent — methodological principles, pipeline responsibilities,
+    # delegation guides, the invocation reference. Denying the directory
+    # rather than listing filenames means a document added there later is
+    # blinded automatically; a list of filenames is silently escaped by
+    # every new file until someone remembers to add it.
+    ".claude/docs/investigator/": (
+        "Lead-investigator material: methodological principles, delegation "
+        "logic, and hypothesis-informing guidance. The analyst must not "
+        "access these — its blinding is the scaffold's central integrity "
+        "guarantee, and reading them would supply exactly the expectations "
+        "the blinding exists to withhold."
     ),
-    "analyst_delegation_guide.md": (
-        "Orchestrator-internal delegation logic. "
-        "Contains hypothesis translation guidance not intended for the analyst."
+    ".claude/skills/": (
+        "Skill definitions and their methodology documents belong to the "
+        "lead investigator and carry its hypotheses and candidate framework."
     ),
 }
 
@@ -74,7 +83,7 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
         # The Transcript Analyst is deliberately stateless across invocations:
         # no memory file, so no findings can leak between investigations and
         # the hypothesis firewall holds by construction. Generalisable Scout
-        # craft lives in `.claude/docs/scout_reference.md` instead. (The memory
+        # craft lives in `.claude/docs/references/scout_reference.md` instead. (The memory
         # mechanism in runner.py remains available for other sub-agents.)
         memory_file=None,
         restrict_writes_to_memory=False,

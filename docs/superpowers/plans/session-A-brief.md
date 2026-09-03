@@ -4,9 +4,9 @@ You are building the Environment Mapper, the Variant Designer, and the Red-Teami
 
 **Read first, in this order:**
 1. `docs/superpowers/plans/2026-08-14-model-forensics-mode.md` — Global Constraints, Design decisions D1–D15, then Tasks 2, 3 and 4 in full.
-2. `.claude/docs/model_forensics_principles.md` — at minimum §1 (the source agenda), §2 (diagnosticity), §3 (candidate generation), §6 (interactions), §11 (blinding).
+2. `.claude/docs/investigator/model_forensics_principles.md` — at minimum §1 (the source agenda), §2 (diagnosticity), §3 (candidate generation), §6 (interactions), §11 (blinding).
 3. `subagents/environment_explorer/` — all four files. This is your template.
-4. `.claude/docs/explorer_interface_contract.md` — this is your contract template.
+4. `.claude/docs/contracts/explorer_interface_contract.md` — this is your contract template.
 
 ---
 
@@ -18,13 +18,13 @@ You are building the Environment Mapper, the Variant Designer, and the Red-Teami
 subagents/environment_mapper/{__init__,system_prompt,agent,main}.py
 subagents/variant_designer/{__init__,system_prompt,agent,main}.py
 subagents/redteam_critic/{__init__,system_prompt,agent,main}.py
-.claude/docs/mapper_interface_contract.md
-.claude/docs/designer_interface_contract.md
-.claude/docs/critic_interface_contract.md
+.claude/docs/contracts/mapper_interface_contract.md
+.claude/docs/contracts/designer_interface_contract.md
+.claude/docs/contracts/critic_interface_contract.md
 ```
 
 **Explicitly forbidden**, with reasons:
-- `.claude/docs/subagent_invocation.md` — four tasks want to edit this; Task 6b absorbs all four in one pass. Editing it here causes three-way merge damage in the file that tells the Diagnostician how to invoke everything.
+- `.claude/docs/investigator/subagent_invocation.md` — four tasks want to edit this; Task 6b absorbs all four in one pass. Editing it here causes three-way merge damage in the file that tells the Diagnostician how to invoke everything.
 - `install.sh`, `uninstall.sh`, `README.md` — Task 9 wires everything at once; Session C may be touching them now.
 - `subagents/transcript_analyst/`, `.claude/docs/{analyst,executor}_interface_contract.md` — Session B owns these.
 - `subagents/runner.py`, `subagents/cli.py` — shared infrastructure, and nothing you need requires changing them.
@@ -82,9 +82,9 @@ Copy these from `explorer_interface_contract.md` rather than reinventing:
 
 | Agent | Must not read | Why |
 |---|---|---|
-| Mapper | `model_forensics_principles.md`, `eval_science_principles.md`, `analyst_delegation_guide.md`, `analyst_interface_contract.md`, `candidate-methodology.md` | A descriptive agent that has absorbed the investigator's framework starts producing explanations instead of descriptions |
+| Mapper | `model_forensics_principles.md`, `eval_science_principles.md`, `orchestrator_analyst_guide.md`, `analyst_interface_contract.md`, `candidate-methodology.md` | A descriptive agent that has absorbed the investigator's framework starts producing explanations instead of descriptions |
 | Designer | same list | Needs the candidates themselves, but not the framework for adjudicating between them |
-| Critic | `model_forensics_principles.md`, `eval_science_principles.md`, `candidate-methodology.md`, `analyst_delegation_guide.md` | Its value is reasoning decorrelated from the Diagnostician's; shared methodology is shared priors |
+| Critic | `model_forensics_principles.md`, `eval_science_principles.md`, `candidate-methodology.md`, `orchestrator_analyst_guide.md` | Its value is reasoning decorrelated from the Diagnostician's; shared methodology is shared priors |
 
 Each agent **must** be able to read its own contract — leave those out of the list deliberately, as `environment_explorer/agent.py` does with a comment saying so.
 

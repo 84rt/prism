@@ -13,8 +13,14 @@ DISALLOWED_TOOLS = ["Edit", "WebSearch", "WebFetch"]
 # The Executor must read its own contract (executor_interface_contract.md);
 # it is intentionally absent from this list.
 RESTRICTED_FILES: dict[str, str] = {
-    "eval_science_principles.md": "Orchestrator-only methodological reference.",
-    "analyst_delegation_guide.md": "Orchestrator-only delegation guide.",
+    # Directory-level denial: everything under investigator/ is lead-agent
+    # material, and denying the directory means later additions are blinded
+    # automatically rather than escaping a list of filenames.
+    ".claude/docs/investigator/": (
+        "Lead-investigator material: methodological references, pipeline "
+        "responsibilities, delegation guides, invocation reference."
+    ),
+    ".claude/skills/": "Skill definitions belong to the lead investigator.",
     "analyst_interface_contract.md": (
         "Analyst-orchestrator interface contract. Not relevant to this agent."
     ),

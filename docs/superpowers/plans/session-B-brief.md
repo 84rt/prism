@@ -4,9 +4,9 @@ You are extending Prism's Transcript Analyst so it can grade a *named behaviour*
 
 **Read first, in this order:**
 1. `docs/superpowers/plans/2026-08-14-model-forensics-mode.md` — Global Constraints, D4, D7, D8, D11, D13, then Tasks 5 and 6 in full.
-2. `.claude/docs/analyst_interface_contract.md` — the file you are extending. Read all of it.
+2. `.claude/docs/contracts/analyst_interface_contract.md` — the file you are extending. Read all of it.
 3. `subagents/transcript_analyst/{agent,system_prompt}.py` — the code you are extending.
-4. `.claude/docs/model_forensics_principles.md §11` — blinding, manipulation checks, instrument stability. This section is the *rationale* for everything you are about to write.
+4. `.claude/docs/investigator/model_forensics_principles.md §11` — blinding, manipulation checks, instrument stability. This section is the *rationale* for everything you are about to write.
 
 ---
 
@@ -17,12 +17,12 @@ You are extending Prism's Transcript Analyst so it can grade a *named behaviour*
 ```
 subagents/transcript_analyst/agent.py
 subagents/transcript_analyst/system_prompt.py
-.claude/docs/analyst_interface_contract.md
-.claude/docs/executor_interface_contract.md
+.claude/docs/contracts/analyst_interface_contract.md
+.claude/docs/contracts/executor_interface_contract.md
 ```
 
 **Explicitly forbidden**, with reasons:
-- `.claude/docs/subagent_invocation.md` — you will want to document `behaviour_spec` here. Don't. Four tasks want to edit this file and Task 6b absorbs all four in one pass.
+- `.claude/docs/investigator/subagent_invocation.md` — you will want to document `behaviour_spec` here. Don't. Four tasks want to edit this file and Task 6b absorbs all four in one pass.
 - `install.sh`, `uninstall.sh`, `README.md` — Session C and Task 9 own these.
 - `subagents/environment_mapper/`, `subagents/variant_designer/`, `subagents/redteam_critic/` and their contracts — Session A is creating these right now.
 - `subagents/runner.py`, `subagents/cli.py` — nothing you need requires changing them.

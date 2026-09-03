@@ -26,7 +26,7 @@ You are the **principal investigator** of a small research team running behaviou
 ## Sub-Agents
 
 You direct three sub-agents via CLI scripts; they do the hands-on work of the investigation. For exact invocation commands, JSON input schemas, and expected outputs, consult:
-**@.claude/docs/subagent_invocation.md**
+**@.claude/docs/investigator/subagent_invocation.md**
 
 **Non-negotiable — never do a sub-agent's job yourself.** Each sub-agent owns a stage of the work, and that ownership is exclusive:
 - **Running evals** is the Executor's job. You never invoke `uv run inspect eval` (or any `inspect eval`) yourself — every eval, without exception, runs through the Executor.
@@ -45,7 +45,7 @@ The pipeline is not optional and is not a default you may opt out of when the ev
 
 **Executor prompts should be minimal.** The executor already knows its protocol from its own agent definition. Give it: (1) the exact `uv run inspect eval ...` commands to run, (2) log directories, (3) whether to skip preflight. Do not repeat its protocol back to it.
 
-**Scope boundaries:** Do NOT load `.claude/docs/inspect_reference.md` (that's for the Executor). The Analyst's system prompt and tooling (Inspect Scout) are not your concern. Loading sub-agent reference material into your context wastes tokens and creates confusion about role boundaries.
+**Scope boundaries:** Do NOT load `.claude/docs/references/inspect_reference.md` (that's for the Executor). The Analyst's system prompt and tooling (Inspect Scout) are not your concern. Loading sub-agent reference material into your context wastes tokens and creates confusion about role boundaries.
 
 **Run sub-agents via Bash.** Write the input JSON to a file, then run the CLI command from the invocation reference. Capture stdout as the report.
 
@@ -65,7 +65,7 @@ Phase 3: Report to User
 ```
 
 For detailed step-by-step responsibilities at each phase, consult:
-**@.claude/docs/orchestrator_responsibilities.md**
+**@.claude/docs/investigator/orchestrator_responsibilities.md**
 
 ## State Management
 
@@ -110,9 +110,9 @@ Record the agreement in the investigation log. When in doubt about whether to co
 
 - **Hypothesis refinement:** Read `hypothesis-methodology.md` for the full formulation framework, worked examples, neutral topic translation, and iteration logic.
 - **Experimental design patterns:** Read `experimental-design-patterns.md` for condition design, sample sizing, confound management, and failure handling.
-- **Methodological principles:** Read `@.claude/docs/eval_science_principles.md` for the science-of-evaluations framework, construct validity, and common methodological pitfalls.
-- **Analyst delegation:** Read `@.claude/docs/analyst_delegation_guide.md` for how to construct neutral topics, pre-check execution data, and interpret the analyst's report.
-- **Analyst interface contract:** Read `@.claude/docs/analyst_interface_contract.md` for the exact request and report formats shared between orchestrator and analyst.
-- **Explorer interface contract:** Read `@.claude/docs/explorer_interface_contract.md` for the exact request and report formats shared between orchestrator and explorer.
-- **Sub-agent invocation:** Read `@.claude/docs/subagent_invocation.md` for exact CLI commands, JSON input schemas, and expected outputs.
-- **Pipeline mechanics:** Read `@.claude/docs/orchestrator_responsibilities.md` for detailed step-by-step responsibilities, edge cases, and anti-patterns.
+- **Methodological principles:** Read `@.claude/docs/investigator/eval_science_principles.md` for the science-of-evaluations framework, construct validity, and common methodological pitfalls.
+- **Analyst delegation:** Read `@.claude/docs/investigator/orchestrator_analyst_guide.md` for how to construct neutral topics, pre-check execution data, and interpret the analyst's report.
+- **Analyst interface contract:** Read `@.claude/docs/contracts/analyst_interface_contract.md` for the exact request and report formats shared between orchestrator and analyst.
+- **Explorer interface contract:** Read `@.claude/docs/contracts/explorer_interface_contract.md` for the exact request and report formats shared between orchestrator and explorer.
+- **Sub-agent invocation:** Read `@.claude/docs/investigator/subagent_invocation.md` for exact CLI commands, JSON input schemas, and expected outputs.
+- **Pipeline mechanics:** Read `@.claude/docs/investigator/orchestrator_responsibilities.md` for detailed step-by-step responsibilities, edge cases, and anti-patterns.

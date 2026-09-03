@@ -108,9 +108,9 @@ The last row is the key contract change: telling the Analyst "grade for behaviou
 |---|---|
 | `subagents/transcript_analyst/agent.py` | Accept + render optional `behaviour_spec`. |
 | `subagents/transcript_analyst/system_prompt.py` | Add forensic-mode workflow (build-or-load grader, floor check, persist grader). |
-| `.claude/docs/analyst_interface_contract.md` | New `### Behaviour spec (optional)` request section; new report subsections for grader provenance + floor check. |
-| `.claude/docs/subagent_invocation.md` | Three new agent sections plus `behaviour_spec` under Analyst — **all four written in Task 6b, by one session.** Tasks 2–5 must not touch this file; it is the plan's only genuine four-way write conflict. |
-| `.claude/docs/executor_interface_contract.md` | One new subsection documenting the resample invocation (single condition, `runs_per_condition`/`epochs`). |
+| `.claude/docs/contracts/analyst_interface_contract.md` | New `### Behaviour spec (optional)` request section; new report subsections for grader provenance + floor check. |
+| `.claude/docs/investigator/subagent_invocation.md` | Three new agent sections plus `behaviour_spec` under Analyst — **all four written in Task 6b, by one session.** Tasks 2–5 must not touch this file; it is the plan's only genuine four-way write conflict. |
+| `.claude/docs/contracts/executor_interface_contract.md` | One new subsection documenting the resample invocation (single condition, `runs_per_condition`/`epochs`). |
 | `install.sh`, `uninstall.sh` | Symlink + gitignore entries for every new file. |
 | `README.md` | Second-mode section, updated directory tree, `docs/model-forensics-mode.png`. |
 
@@ -118,7 +118,7 @@ The last row is the key contract change: telling the Analyst "grade for behaviou
 
 **Written at runtime, not by this plan:** `investigations/<name>/CANDIDATES.md` — the current-state candidate ledger, maintained in place. The investigation log records per-iteration *deltas* against it (see Task 7 Step 6), so full history stays reconstructable without restating 60 lines of ledger every iteration.
 
-**Untouched by design:** `subagents/environment_explorer/` (the Orchestrator keeps it), `subagents/runner.py`, `scripts/`, the contents of the renamed orchestrate skill, `.claude/docs/eval_science_principles.md` (the Diagnostician *reads* it, unchanged).
+**Untouched by design:** `subagents/environment_explorer/` (the Orchestrator keeps it), `subagents/runner.py`, `scripts/`, the contents of the renamed orchestrate skill, `.claude/docs/investigator/eval_science_principles.md` (the Diagnostician *reads* it, unchanged).
 
 ---
 
@@ -131,7 +131,7 @@ The last row is the key contract change: telling the Analyst "grade for behaviou
 | Session | Tasks | May create/modify | Must not touch |
 |---|---|---|---|
 | **A** | 2, 3, 4 — the three new sub-agents | `subagents/environment_mapper/`, `subagents/variant_designer/`, `subagents/redteam_critic/`, and `.claude/docs/{mapper,designer,critic}_interface_contract.md` | anything else |
-| **B** | 5, 6 — Analyst extension + Executor doc | `subagents/transcript_analyst/{agent,system_prompt}.py`, `.claude/docs/analyst_interface_contract.md`, `.claude/docs/executor_interface_contract.md` | anything else |
+| **B** | 5, 6 — Analyst extension + Executor doc | `subagents/transcript_analyst/{agent,system_prompt}.py`, `.claude/docs/contracts/analyst_interface_contract.md`, `.claude/docs/contracts/executor_interface_contract.md` | anything else |
 | **C** | 0 — the `/orchestrate` rename | `install.sh`, `uninstall.sh`, `README.md`, `.claude/skills/orchestrate/` | anything else |
 
 **Session C is already done** — Task 0 was executed in the planning session. The parallel wave is now Sessions A and B only.
@@ -158,7 +158,7 @@ Nothing here parallelises usefully. Task 7 consumes all four contracts and is th
 
 ### The one hazard to watch
 
-`.claude/docs/subagent_invocation.md` is the plan's only genuine multi-writer conflict: Tasks 2, 3, 4 and 5 would each naturally add a section to it. **Task 6b exists to absorb all four edits in one pass.** If a parallel session edits it anyway, you will get three-way merge damage in the file that tells the Diagnostician how to invoke everything.
+`.claude/docs/investigator/subagent_invocation.md` is the plan's only genuine multi-writer conflict: Tasks 2, 3, 4 and 5 would each naturally add a section to it. **Task 6b exists to absorb all four edits in one pass.** If a parallel session edits it anyway, you will get three-way merge damage in the file that tells the Diagnostician how to invoke everything.
 
 Secondary: Task 9's verification installs into `/tmp/prism-mf-target` and Task 0's does the same. Do not run those two concurrently even though their source files differ.
 
@@ -183,7 +183,7 @@ Secondary: Task 9's verification installs into `/tmp/prism-mf-target` and Task 0
 Run: `uv run ruff check subagents/ scripts/`
 Expected: clean. Record the exact command — every Python task below reuses it.
 
-> **Steps 5–7 are DONE.** The rename is applied and both round-trips verified: 30 `link_file` calls produce 30 symlinks with none broken, `.claude/skills/orchestrate` present and `orchestrator` absent in the installed target, and uninstall leaves 0 residual symlinks. `.claude/docs/orchestrator_responsibilities.md` was deliberately not renamed (it is named for the role, not the command). Note for anyone re-running the count check: `grep -c '^link_file' install.sh` returns 31 because it also matches the `link_file() {` function definition — 30 is correct.
+> **Steps 5–7 are DONE.** The rename is applied and both round-trips verified: 30 `link_file` calls produce 30 symlinks with none broken, `.claude/skills/orchestrate` present and `orchestrator` absent in the installed target, and uninstall leaves 0 residual symlinks. `.claude/docs/investigator/orchestrator_responsibilities.md` was deliberately not renamed (it is named for the role, not the command). Note for anyone re-running the count check: `grep -c '^link_file' install.sh` returns 31 because it also matches the `link_file() {` function definition — 30 is correct.
 
 - [x] **Step 5: Rename the Orchestrator's skill command to `/orchestrate`.**
 
@@ -206,7 +206,7 @@ Six call sites, all found by grep:
 - `uninstall.sh:179` — the empty-directory cleanup path `"$TARGET_DIR/.claude/skills/orchestrator"`.
 - `README.md:20, 58, 108` — the `/orchestrator` skill mention, the quick-start comment, and the directory-tree line.
 
-Note `.claude/docs/orchestrator_responsibilities.md` is **not** renamed, so leave `install.sh:195`, `install.sh:226`, and `uninstall.sh:140` alone.
+Note `.claude/docs/investigator/orchestrator_responsibilities.md` is **not** renamed, so leave `install.sh:195`, `install.sh:226`, and `uninstall.sh:140` alone.
 
 - [ ] **Step 7: Verify no reference survives and the round-trip still works.**
 
@@ -230,20 +230,20 @@ Then `./uninstall.sh /tmp/prism-mf-target && find /tmp/prism-mf-target -type l |
 
 ## Task 1: Model Forensics principles reference — DONE, pending refinement
 
-**Status: written.** `.claude/docs/model_forensics_principles.md` exists (13 sections, ~470 lines), built from the user's deep-research draft restructured into `eval_science_principles.md`'s source-anchored form, with the D1–D12 decisions grounded in specific sections rather than left as scaffold convention. Remaining work in this task is verification and wiring only; content refinement is a separate collaborative pass.
+**Status: written.** `.claude/docs/investigator/model_forensics_principles.md` exists (13 sections, ~470 lines), built from the user's deep-research draft restructured into `eval_science_principles.md`'s source-anchored form, with the D1–D12 decisions grounded in specific sections rather than left as scaffold convention. Remaining work in this task is verification and wiring only; content refinement is a separate collaborative pass.
 
 The user's research draft remains at `docs/model_forensics_principles.md` as source material. It is *not* the installed doc and is not symlinked. Either keep it (rename to `docs/model_forensics_principles_research_draft.md` to remove the ambiguity) or delete it — user's call, and it is the one open item in this task.
 
 **Files:**
-- Written: `.claude/docs/model_forensics_principles.md`
-- Modify: `.claude/docs/eval_science_principles.md` (one cross-reference only)
+- Written: `.claude/docs/investigator/model_forensics_principles.md`
+- Modify: `.claude/docs/investigator/eval_science_principles.md` (one cross-reference only)
 - Decide: the fate of `docs/model_forensics_principles.md`
 
 **Interfaces:**
 - Consumes: the user's research draft (already absorbed).
 - Produces: citation anchors used by every later task. **The doc has twelve numbered sections, cited as `model_forensics_principles.md §6`.** Do not renumber them — every downstream citation in this plan is already resolved against them.
 
-- [x] **Step 1: Locate the document at `.claude/docs/model_forensics_principles.md`.** Done. It belongs there for two reasons: that is where the install script symlinks reference docs into target repos, and the sub-agent `RESTRICTED_FILES` blinding is keyed on filename suffix, which only helps if the file sits on a path the agents could otherwise reach.
+- [x] **Step 1: Locate the document at `.claude/docs/investigator/model_forensics_principles.md`.** Done. It belongs there for two reasons: that is where the install script symlinks reference docs into target repos, and the sub-agent `RESTRICTED_FILES` blinding is keyed on filename suffix, which only helps if the file sits on a path the agents could otherwise reach.
 
 - [x] **Step 2: Build the citation index.** Done — reproduce this table in `SKILL.md §Key References` (Task 8). The doc is ~11.5k words; the Diagnostician should read targeted sections at the step that needs them, not load it wholesale at session start.
 
@@ -276,7 +276,7 @@ This is the **only** edit to `eval_science_principles.md` in this plan.
 
 - [ ] **Step 6: Verify.**
 
-Run: `grep -c "^## " .claude/docs/model_forensics_principles.md`
+Run: `grep -c "^## " .claude/docs/investigator/model_forensics_principles.md`
 Expected: `13` — twelve numbered sections plus *The Standing Epistemic Position*.
 
 - [x] **Step 7: Retire the provisional sources section — DONE.** The user supplied the outstanding primaries as PDFs in `docs/`; all eight were read and the section deleted. Verification required installing `poppler-utils` in the container (several PDFs use font subsets that mangle text extraction, so pages were rendered as images instead).
@@ -290,7 +290,7 @@ Expected: `13` — twelve numbered sections plus *The Standing Epistemic Positio
 
   Woodward, Halpern and Ragin were resolved by editing rather than chasing, as planned.
 
-Run: `grep -n "model_forensics_principles" .claude/docs/eval_science_principles.md`
+Run: `grep -n "model_forensics_principles" .claude/docs/investigator/eval_science_principles.md`
 Expected: exactly one line (added in Step 3).
 
 Run: `grep -c "§Area" docs/superpowers/plans/2026-08-14-model-forensics-mode.md`
@@ -305,7 +305,7 @@ Expected: `1` — this verification step's own text, and nothing else. Every cit
 The Mapper is the Explorer's first half, minus the hypothesis. It answers "what is this eval, and what could be varied in it?" — before any candidate explanation exists.
 
 **Files:**
-- Create: `.claude/docs/mapper_interface_contract.md`
+- Create: `.claude/docs/contracts/mapper_interface_contract.md`
 - Create: `subagents/environment_mapper/__init__.py`
 - Create: `subagents/environment_mapper/system_prompt.py`
 - Create: `subagents/environment_mapper/agent.py`
@@ -317,7 +317,7 @@ The Mapper is the Explorer's first half, minus the hypothesis. It answers "what 
 
 - [ ] **Step 1: Write the interface contract.**
 
-`.claude/docs/mapper_interface_contract.md`, modelled on `explorer_interface_contract.md` but with these request fields:
+`.claude/docs/contracts/mapper_interface_contract.md`, modelled on `explorer_interface_contract.md` but with these request fields:
 
 - **Environment path** (required) — absolute path, validated by the CLI.
 - **Behaviour description** (required) — plain-English description of the behaviour under investigation, e.g. *"the model wrote a special-case branch that returns the expected value for the test inputs rather than implementing the function"*. This is the explanandum. The Mapper receives it so it can answer the scorer question ("does the scorer detect this behaviour, or something correlated with it?"). It is **not** a hypothesis: it says what happened, never why.
@@ -348,7 +348,7 @@ Non-negotiable requirements section, three items: (i) the instruction analysis m
 SYSTEM_PROMPT: str = """\
 You are the Environment Mapper. Your role is to produce a conceptual map of an evaluation environment for a Model Forensics investigation: what the eval is, what the model was told, what the scorer actually detects, what in the environment is broken or contradictory, and what surfaces could be varied. You describe the environment; you do not explain the model's behaviour, and you do not propose experiments.
 
-Your interface with the Diagnostician is defined in `.claude/docs/mapper_interface_contract.md`. **Read this file before beginning any exploration.** Follow the request and report formats specified there. The contract is the single source of truth for your output structure; this prompt governs your process.
+Your interface with the Diagnostician is defined in `.claude/docs/contracts/mapper_interface_contract.md`. **Read this file before beginning any exploration.** Follow the request and report formats specified there. The contract is the single source of truth for your output structure; this prompt governs your process.
 
 ## Cognitive Boundaries
 
@@ -397,7 +397,7 @@ DISALLOWED_TOOLS = ["Edit", "Bash", "WebSearch", "WebFetch"]
 RESTRICTED_FILES: dict[str, str] = {
     "model_forensics_principles.md": "Diagnostician-only methodological reference.",
     "eval_science_principles.md": "Diagnostician-only methodological reference.",
-    "analyst_delegation_guide.md": "Diagnostician-only delegation guide.",
+    "orchestrator_analyst_guide.md": "Diagnostician-only delegation guide.",
     "analyst_interface_contract.md": (
         "Analyst-Diagnostician interface contract. Not relevant to this agent."
     ),
@@ -524,7 +524,7 @@ Expected: clean.
 The Explorer's second half, conditioned on candidate explanations rather than a single hypothesis. Its distinctive job is *discrimination*: not "where can I test H?" but "what edit would separate C1 from C2?"
 
 **Files:**
-- Create: `.claude/docs/designer_interface_contract.md`
+- Create: `.claude/docs/contracts/designer_interface_contract.md`
 - Create: `subagents/variant_designer/{__init__,system_prompt,agent,main}.py`
 
 **Interfaces:**
@@ -570,7 +570,7 @@ Non-negotiable requirements: (i) every variant's diff manipulates only the inten
 SYSTEM_PROMPT: str = """\
 You are the Variant Designer. You are given a map of an evaluation environment and a set of competing explanations for a model behaviour observed in it. Your role is to design perturbations that *discriminate* between those explanations — edits whose outcome would differ depending on which explanation is true. You propose; you do not execute, and you do not judge which explanation is correct.
 
-Your interface with the Diagnostician is defined in `.claude/docs/designer_interface_contract.md`. **Read this file before designing anything.** Follow the request and report formats specified there. The contract is the single source of truth for your output structure; this prompt governs your process.
+Your interface with the Diagnostician is defined in `.claude/docs/contracts/designer_interface_contract.md`. **Read this file before designing anything.** Follow the request and report formats specified there. The contract is the single source of truth for your output structure; this prompt governs your process.
 
 ## Cognitive Boundaries
 
@@ -602,7 +602,7 @@ Your interface with the Diagnostician is defined in `.claude/docs/designer_inter
 
 - [ ] **Step 3: Write `agent.py`.**
 
-Same shape as Task 2 Step 3. `ALLOWED_TOOLS = ["Read", "Glob", "Grep"]`, `DISALLOWED_TOOLS = ["Edit", "Bash", "WebSearch", "WebFetch"]`, `memory_file=None`, and `RESTRICTED_FILES` blocking `model_forensics_principles.md`, `eval_science_principles.md`, `analyst_delegation_guide.md`, `analyst_interface_contract.md`, and `candidate-methodology.md` — the Designer needs the candidates themselves but not the framework for adjudicating between them.
+Same shape as Task 2 Step 3. `ALLOWED_TOOLS = ["Read", "Glob", "Grep"]`, `DISALLOWED_TOOLS = ["Edit", "Bash", "WebSearch", "WebFetch"]`, `memory_file=None`, and `RESTRICTED_FILES` blocking `model_forensics_principles.md`, `eval_science_principles.md`, `orchestrator_analyst_guide.md`, `analyst_interface_contract.md`, and `candidate-methodology.md` — the Designer needs the candidates themselves but not the framework for adjudicating between them.
 
 The prompt builder renders, in order: `## Environment Path`, `## Mapper Briefing` (the path, with a line instructing the Designer to read it), `## Candidate Explanations` (JSON block via `json.dumps(..., indent=2)`, following `experiment_executor/agent.py`'s pattern), `## Regime`, `## Baseline Rate` (JSON block), `## Variant Budget`, and optional `## Constraints`.
 
@@ -635,7 +635,7 @@ One agent, three modes. Cross-family **required** — the Critic's value depends
 - **Thinking config:** `runner.py::_resolve_thinking` already downgrades to `{"type": "disabled"}` for non-Claude models on the openrouter route. Accept that default; do not override it with a fixed budget unless a dry run shows the Critic's reports are thin.
 
 **Files:**
-- Create: `.claude/docs/critic_interface_contract.md`
+- Create: `.claude/docs/contracts/critic_interface_contract.md`
 - Create: `subagents/redteam_critic/{__init__,system_prompt,agent,main}.py`
 
 **Interfaces:**
@@ -693,7 +693,7 @@ You are the Red-Teaming Critic on a Model Forensics investigation. A Diagnostici
 
 You exist because of a specific structural risk. In this kind of investigation the true explanation may simply not be in the set of candidates under consideration — unlike a hypothesis test, where the truth is always "the hypothesis holds, doesn't, or is ill-formed". Nothing else in the pipeline is looking for that failure. You are.
 
-Your interface with the Diagnostician is defined in `.claude/docs/critic_interface_contract.md`. **Read this file before responding.** Follow the request and report formats for your active mode.
+Your interface with the Diagnostician is defined in `.claude/docs/contracts/critic_interface_contract.md`. **Read this file before responding.** Follow the request and report formats for your active mode.
 
 ## Cognitive Orientation
 
@@ -750,7 +750,7 @@ RESTRICTED_FILES: dict[str, str] = {
     ),
     "eval_science_principles.md": "Diagnostician-only methodological reference.",
     "candidate-methodology.md": "Diagnostician-only candidate framework.",
-    "analyst_delegation_guide.md": "Diagnostician-only delegation guide.",
+    "orchestrator_analyst_guide.md": "Diagnostician-only delegation guide.",
 }
 
 
@@ -841,7 +841,7 @@ async def run_redteam_critic(cwd: str | None = None, **data: Any) -> str:
     **data : Any
         Fields from the invocation JSON. Always required: ``mode``.
         Mode-conditional requirements are documented in
-        `.claude/docs/critic_interface_contract.md` and enforced in
+        `.claude/docs/contracts/critic_interface_contract.md` and enforced in
         :func:`_build_prompt`.
 
     Returns
@@ -897,7 +897,7 @@ The only change to an existing sub-agent. Everything here is additive; the Orche
 **Files:**
 - Modify: `subagents/transcript_analyst/agent.py`
 - Modify: `subagents/transcript_analyst/system_prompt.py`
-- Modify: `.claude/docs/analyst_interface_contract.md`
+- Modify: `.claude/docs/contracts/analyst_interface_contract.md`
 
 **Interfaces:**
 - Consumes: the existing Analyst request schema (`topic`, `transcript_source`, `scanning_model?`, `constraints?`, `artefacts_dir?`).
@@ -1128,7 +1128,7 @@ Expected: `2` (the `data.get` guard and the `json.dumps`).
 Assuming Task 0 Step 1 found `runs_per_condition` or `epochs` already supported, this is a documentation-only task.
 
 **Files:**
-- Modify: `.claude/docs/executor_interface_contract.md`
+- Modify: `.claude/docs/contracts/executor_interface_contract.md`
 
 **Interfaces:**
 - Consumes: Task 0 Step 1's finding about which override key implements repeated runs.
@@ -1154,7 +1154,7 @@ Expected: the key named in your new subsection appears in the execution engine. 
 Absorbs the four edits that Tasks 2–5 were each forbidden from making. Small, but it must be one session and it must come after all four.
 
 **Files:**
-- Modify: `.claude/docs/subagent_invocation.md`
+- Modify: `.claude/docs/investigator/subagent_invocation.md`
 
 **Interfaces:**
 - Consumes: the four contracts written in Tasks 2–5, and the `run_*` signatures and `required_fields` from each `main.py`.
@@ -1172,7 +1172,7 @@ Absorbs the four edits that Tasks 2–5 were each forbidden from making. Small, 
 
 Run, for each of the three new agents: write the section's JSON example to a temp file and invoke that agent's `main.py` against it. Expected: no "missing required fields" error (a downstream agent or API error is fine — you are testing the schema, not the run).
 
-Run: `grep -c "^## " .claude/docs/subagent_invocation.md`
+Run: `grep -c "^## " .claude/docs/investigator/subagent_invocation.md`
 Expected: the original count plus 3.
 
 *Commit point: `docs: document model forensics sub-agent invocations`*
@@ -1184,7 +1184,7 @@ Expected: the original count plus 3.
 The pipeline mechanics. Peer of `orchestrator_responsibilities.md`, and the longest single deliverable in this plan.
 
 **Files:**
-- Create: `.claude/docs/diagnostician_responsibilities.md`
+- Create: `.claude/docs/investigator/diagnostician_responsibilities.md`
 
 **Interfaces:**
 - Consumes: every contract from Tasks 2–6, by name and by section heading. Every heading cited here must exist in the corresponding contract — check as you write.
@@ -1498,7 +1498,7 @@ Plus these, each drawn from an empirically-documented failure mode in the princi
 
 Run:
 ```bash
-grep -o '`[a-z_]*\.md[^`]*`' .claude/docs/diagnostician_responsibilities.md | sort -u
+grep -o '`[a-z_]*\.md[^`]*`' .claude/docs/investigator/diagnostician_responsibilities.md | sort -u
 ```
 For each referenced file, confirm it exists in `.claude/docs/` or `.claude/skills/diagnose/`. Then for each cited `§Section`, confirm the heading exists in the target file.
 
@@ -1534,13 +1534,13 @@ Body sections, mirroring `orchestrator/SKILL.md`'s shape:
 
 - `# Model Forensics Diagnostician` — role paragraph: principal investigator on a forensic investigation; the object of study is a *specific episode of model behaviour*; you direct five sub-agents and own the explanation.
 - `## Cognitive Orientation` — five orientations: **Explanation over description** (a redescription of the behaviour is not an explanation of it); **The truth may not be on your list** (the structural difference from hypothesis testing, and why the Critic exists); **Prediction over fit** (any explanation can be made to fit after the fact; only prediction on an untested factor is evidence); **Falsifiability as admissibility** (D2); **Direction over execution** (the delegation discipline, with the D7 exception stated explicitly so it does not read as a licence to do everyone's job).
-- `## Sub-Agents` — the five-row table (Mapper, Designer, Executor, Analyst, Critic) with Receives / Returns / contract, plus the invocation pointer to `@.claude/docs/subagent_invocation.md`.
+- `## Sub-Agents` — the five-row table (Mapper, Designer, Executor, Analyst, Critic) with Receives / Returns / contract, plus the invocation pointer to `@.claude/docs/investigator/subagent_invocation.md`.
 - `## The Firewall in This Mode` — the D7 table, verbatim from `diagnostician_responsibilities.md`. This must appear in the skill and not only in the responsibilities doc: it is the rule most likely to be violated by a Diagnostician carrying Orchestrator habits, and it must be in context from the first turn.
 - `## Pipeline` — the ASCII overview with phase numbers matching Task 7.
 - `## State Management` — pointer to the log template; the two immutability rules (ledger restated not edited; pre-registration table never edited after writing) stated inline because they are violable in a single careless edit.
 - `## How to Begin` — with `$ARGUMENTS`: treat as the behaviour description plus transcript path, begin Phase 0. Without: ask *"Which transcript would you like me to explain, and what did the model do in it that needs explaining?"* Phase 0 checklist of six items.
 - `## Autonomy Agreement` — iteration cap, eager-exit permission, whether the Diagnostician may add candidates mid-investigation without checking in, scope of modifications, parallelism, spend.
-- `## Key References` — `@`-links to `eval_science_principles.md`, `diagnostician_responsibilities.md`, the four contracts, `candidate-methodology.md`, `perturbation-design-patterns.md`, and `analyst_delegation_guide.md`. For `model_forensics_principles.md`, **embed the step→Area citation index built in Task 1 Step 2** rather than a bare link: the document is ~10k words and loading it wholesale at session start is a large context cost for material that is only relevant a section at a time. The index tells the Diagnostician which Areas to read at which step.
+- `## Key References` — `@`-links to `eval_science_principles.md`, `diagnostician_responsibilities.md`, the four contracts, `candidate-methodology.md`, `perturbation-design-patterns.md`, and `orchestrator_analyst_guide.md`. For `model_forensics_principles.md`, **embed the step→Area citation index built in Task 1 Step 2** rather than a bare link: the document is ~10k words and loading it wholesale at session start is a large context cost for material that is only relevant a section at a time. The index tells the Diagnostician which Areas to read at which step.
 - `## Scope boundaries` — do not load `inspect_reference.md` or `scout_reference.md`; those belong to the Executor and Analyst.
 
 - [ ] **Step 2: Write `candidate-methodology.md`.**
@@ -1610,12 +1610,12 @@ link_file "subagents/redteam_critic/system_prompt.py"
 and in the `.claude/docs` group:
 
 ```bash
-link_file ".claude/docs/analyst_forensic_addendum.md"
-link_file ".claude/docs/critic_interface_contract.md"
-link_file ".claude/docs/designer_interface_contract.md"
-link_file ".claude/docs/diagnostician_responsibilities.md"
-link_file ".claude/docs/mapper_interface_contract.md"
-link_file ".claude/docs/model_forensics_principles.md"
+link_file ".claude/docs/contracts/analyst_forensic_addendum.md"
+link_file ".claude/docs/contracts/critic_interface_contract.md"
+link_file ".claude/docs/contracts/designer_interface_contract.md"
+link_file ".claude/docs/investigator/diagnostician_responsibilities.md"
+link_file ".claude/docs/contracts/mapper_interface_contract.md"
+link_file ".claude/docs/investigator/model_forensics_principles.md"
 ```
 
 and a new skill group:
@@ -1630,12 +1630,12 @@ link_file ".claude/skills/diagnose/perturbation-design-patterns.md"
 - [ ] **Step 2: Add the new docs to `GITIGNORE_ENTRIES`.** The `subagents/` entry already covers the three new packages, and `.claude/skills/orchestrator/` is directory-level — so add, in the existing alphabetical position:
 
 ```bash
-    ".claude/docs/analyst_forensic_addendum.md"
-    ".claude/docs/critic_interface_contract.md"
-    ".claude/docs/designer_interface_contract.md"
-    ".claude/docs/diagnostician_responsibilities.md"
-    ".claude/docs/mapper_interface_contract.md"
-    ".claude/docs/model_forensics_principles.md"
+    ".claude/docs/contracts/analyst_forensic_addendum.md"
+    ".claude/docs/contracts/critic_interface_contract.md"
+    ".claude/docs/contracts/designer_interface_contract.md"
+    ".claude/docs/investigator/diagnostician_responsibilities.md"
+    ".claude/docs/contracts/mapper_interface_contract.md"
+    ".claude/docs/investigator/model_forensics_principles.md"
     ".claude/skills/diagnose/"
 ```
 

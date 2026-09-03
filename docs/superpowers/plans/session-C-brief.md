@@ -2,9 +2,32 @@
 
 You are assembling the Model Forensics mode from parts other sessions built, then proving it runs end to end.
 
-**This brief is also a handoff document.** Sessions A and B fill in the two "What you are inheriting" sections below as they finish. If those sections are still empty when you start, ask before assuming the plan describes what was actually built.
+**This brief is also a handoff document.** Sessions A and B have both finished and filled in the two "What you are inheriting" sections below. Those sections, not the plan, are the authoritative record of what was actually built. Everything through Task 6 is committed; your work starts at 6b.
 
-**Read first:** this brief, then `docs/superpowers/plans/2026-08-14-model-forensics-mode.md` — Global Constraints, D1–D15, and Tasks 6b, 7, 8, 9 and 10 in full. Then `.claude/docs/model_forensics_principles.md`, using the step→section index in Task 1 to read targeted sections rather than the whole thing at once.
+---
+
+## What changed before you started
+
+After Sessions A and B finished, `.claude/docs/` was reorganised and three decisions the brief had left open were settled. **The plan predates all of this.**
+
+**Documents are now grouped by who may read them**, which makes the directory structure the blinding model rather than an unrelated tidy-up:
+
+```
+.claude/docs/
+├── investigator/   ← lead agents only; every sub-agent denies this directory wholesale
+├── contracts/      ← lead agents + the owning sub-agent
+└── references/     ← one sub-agent each (Inspect for Executor, Scout for Analyst)
+```
+
+**`runner.py` now supports directory-level denial.** A `RESTRICTED_FILES` pattern ending in `/` matches anywhere in the path; anything else still matches as a filename suffix, so existing patterns are unaffected. Every sub-agent now denies `.claude/docs/investigator/` and `.claude/skills/` with one entry each. This is the important part: **a document added to a denied directory later is blinded automatically.** `diagnostician_responsibilities.md` is already blocked in all six agents despite not existing yet — verified by exercising the real hook, not by inspection.
+
+**Renames:** `analyst_delegation_guide.md` → `investigator/orchestrator_analyst_guide.md`. The Diagnostician's equivalent will be `investigator/diagnostician_analyst_guide.md` — **you write it, as part of Task 7.** It carries neutral-topic translation plus forensic-specific delegation (`behaviour_spec` construction, grader reuse, the manipulation check). Both live in the same directory, so both are blinded by the same entry.
+
+**Consequences for your tasks.** Every path in the plan's Task 9 wiring list is now wrong — rebuild from disk. `link_file` creates parent directories via `ensure_local_dir`, so subdirectory paths need no special handling, but `uninstall.sh`'s empty-directory cleanup loop enumerates directories by hand and now lists the three subdirectories deepest-first. Install/uninstall round-trip was verified after the move: 9 docs linked, no broken symlinks, no residue.
+
+---
+
+**Read first:** this brief, then `docs/superpowers/plans/2026-08-14-model-forensics-mode.md` — Global Constraints, D1–D15, and Tasks 6b, 7, 8, 9 and 10 in full. Then `.claude/docs/investigator/model_forensics_principles.md`, using the step→section index in Task 1 to read targeted sections rather than the whole thing at once.
 
 ---
 
@@ -33,7 +56,7 @@ You are the **last checkpoint before this mode is usable.** Nobody downstream wi
 > - Anything you discovered that changes a downstream task
 > - Anything you could not verify offline and left for Task 10
 
-**Files created — 15, exactly the brief's allowlist, no deviations.** Three packages of four (`__init__`, `system_prompt`, `agent`, `main`) under `subagents/{environment_mapper,variant_designer,redteam_critic}/`, plus `.claude/docs/{mapper,designer,critic}_interface_contract.md`. Nothing outside the allowlist was touched, and nothing is committed.
+**Files created — 15, exactly the brief's allowlist, no deviations.** Three packages of four (`__init__`, `system_prompt`, `agent`, `main`) under `subagents/{environment_mapper,variant_designer,redteam_critic}/`, plus the three contracts now at `.claude/docs/contracts/{mapper,designer,critic}_interface_contract.md`. Nothing outside the allowlist was touched. All of it is now committed, along with the reorganisation described above.
 
 **Report section headings, verbatim and in emission order.** All at level 3.
 
@@ -75,8 +98,8 @@ The Critic's remaining requirements are **mode-conditional** and cannot live in 
 - **Task 6b** must document `environment_rate` (**not** `baseline_rate` — a copied example using the old name fails validation), plus `elimination_targets`, `environment_delta`, `variations_tried` on the Designer and `iteration` on the Critic. Note the Critic's exit-2 path: a bad `mode`, or a mode missing a field, is an *agent* error.
 - **Task 7 owes the Designer `environment_delta` whenever it hands over a derived variant.** This is the sharpest inheritance. The Mapper runs once on the original and its briefing goes to the Designer every round, so on a derived environment the map describes a different tree — and the Designer is instructed to locate every surface in that map. Without the delta it meets an unexplainable mismatch whose available readings are "stale map" or "broken environment", and the likely result is the investigation's own manipulation being reported as an environment defect with a **Blocker** on a sound variant. The `**Environment:**` Summary line is the detector: if it reads `original` when a derived environment was supplied, the delta did not arrive and that report's surface locations are untrustworthy.
 - **Task 7** also owns the value-of-information gate on `elimination_targets` — each named target costs a condition, so name one only where retiring it would change the leading explanation or move the equivalence-class boundary. A candidate ranked well below the leader belongs in the equivalence class, not in an elimination round. The repo owner has taken this into Task 7's responsibilities.
-- **`diagnostician_responsibilities.md` is in none of the three `RESTRICTED_FILES` lists.** The lists match the brief's table exactly, but that doc will carry the operational methodology — arguably more anchoring than the principles doc beside it. The existing `environment_explorer` has the identical gap for `orchestrator_responsibilities.md`, so it is a consistent omission rather than a new one. The repo owner has taken this into Task 7.
-- **Task 9 wires 15 files**, and both `main.py` bootstraps resolve the project root by three `dirname` calls from `__file__` — so the package directory depth must be preserved by the symlink layout.
+- **`diagnostician_responsibilities.md` was in none of the `RESTRICTED_FILES` lists — since resolved.** The lists enumerated filenames, so a document that did not yet exist could not be in them. The reorganisation replaced enumeration with directory-level denial, so writing that file into `investigator/` blinds it in all six agents automatically. **The reasoning still binds you: put it in `investigator/`.** A responsibilities doc placed anywhere else inherits the original gap.
+- **Task 9 wires my 15 files** (plus B's addendum and whatever you add), and every `main.py` bootstrap resolves the project root by three `dirname` calls from `__file__` — so `subagents/<agent>/main.py` depth must be preserved by the symlink layout. Rebuild the full list from disk rather than counting from any prose in this brief.
 - **On the brief's standing lint gate:** `ruff` is not installed in this container and `uv run ruff check` fails to spawn. `uv run --with ruff ruff check --select E4,E7,E9,F subagents/` passes clean across the tree. A bare `uv run --with ruff ruff check` resolves ruff 0.16.3, whose defaults additionally flag the `# noqa: E402` on every `main.py` (pre-existing on all six agents) and 2 × ASYNC230 in `runner.py`. Nothing here is new.
 
 **Left for Task 10 — nothing was run against an API.** Every check was offline: CLI validation paths, prompt-builder field coverage (each request field probed with a sentinel value), and lint. So all *behavioural* contract adherence is unverified: verbatim heading emission, the fixed-format Summary lines, whether the Designer actually computes the Wilson interval rather than eyeballing it, and whether the Critic honours the `### Independent Reading`-before-ledger ordering. That last one is the highest-value thing to watch, since the whole mode rests on it and a violation is invisible in the output.
@@ -99,9 +122,9 @@ The Critic's remaining requirements are **mode-conditional** and cannot live in 
 subagents/transcript_analyst/agent.py            modified
 subagents/transcript_analyst/system_prompt.py    modified
 subagents/experiment_executor/system_prompt.py   modified  ← outside B's allowlist, see Task 6
-.claude/docs/executor_interface_contract.md      modified
-.claude/docs/analyst_forensic_addendum.md        NEW      ← needs Task 9 wiring
-.claude/docs/analyst_interface_contract.md       UNCHANGED (zero diff — see below)
+.claude/docs/contracts/executor_interface_contract.md      modified
+.claude/docs/contracts/analyst_forensic_addendum.md        NEW      ← needs Task 9 wiring
+.claude/docs/contracts/analyst_interface_contract.md       UNCHANGED (zero diff — see below)
 ```
 
 ### The design changed from the plan: two prompt variants, not one conditional prompt
@@ -174,17 +197,19 @@ The Executor contract now contains a **forward reference to `diagnostician_respo
 
 ### What changes your downstream tasks
 
-1. **Task 9 — wire `.claude/docs/analyst_forensic_addendum.md`.** `link_file` in `install.sh`, the matching `unlink_file` in `uninstall.sh`, and the `.gitignore` entry. `.claude/docs/` is symlinked per-file, so **the addendum does not exist at runtime in a target repo until you do this**, and the forensic Analyst will fail to read a file its system prompt tells it to read. This is the single highest-consequence item in this handoff.
+1. **Task 9 — wire `.claude/docs/contracts/analyst_forensic_addendum.md`.** `link_file` in `install.sh`, the matching `unlink_file` in `uninstall.sh`, and the `.gitignore` entry. `.claude/docs/` is symlinked per-file, so **the addendum does not exist at runtime in a target repo until you do this**, and the forensic Analyst will fail to read a file its system prompt tells it to read. This is the single highest-consequence item in this handoff.
 2. **Task 7 — require `sample_id` in the 1b resample.** Phase 1 must have the Diagnostician identify the episode's sample id at scoping and pass it. Without it the resample is *k*× cost with a contaminated pool, and nothing downstream will flag it.
 3. **Task 7 — cite the addendum, not the base contract**, for all forensic report additions. Load-bearing for a non-obvious reason: **there is no pointer to the addendum anywhere else.** The base contract deliberately does not mention it, because that file is also read by the Orchestrator-mode Analyst and a pointer would reintroduce the mode-ambiguity the split exists to remove. The Analyst finds the addendum via its forensic system prompt; the Diagnostician finds it only if `diagnostician_responsibilities.md` and `subagent_invocation.md` name it. Miss this and the Diagnostician builds requests against the base contract alone, never sends `behaviour_spec`, and forensic mode silently never engages.
 4. **Task 6b — `behaviour_spec` under the Analyst**, noting that its presence selects the forensic system prompt, and that the firewall is not breached (it names the explanandum, never an explanation). Also add `sample_id` to the Executor's documented override key list.
 5. **`orchestrator_responsibilities.md:222` lists the supported override keys and does not include `sample_id`.** Outside my allowlist so I left it. Harmless — the Orchestrator simply won't know the key exists — but worth a one-line addition when you are in that file.
 6. **Not verified offline, left for Task 10:** that Inspect's `--sample-id` accepts the ids the target task actually exposes, and that a loaded grader round-trips from a persisted `grader_dir`. Both need a real run.
 
-7. **Audit document access end-to-end, for both modes, before Task 10.** There are now two lead-investigator roles (Orchestrator, Diagnostician) and a sub-agent set that partly overlaps between them, and every document each party reads is governed by a *different* mechanism: system prompts name contracts by path, `RESTRICTED_FILES` denies reads by basename suffix, and `install.sh` decides which files exist at runtime at all. Nothing cross-checks them. Walk the matrix explicitly — for each agent in each mode, confirm that the contract it is told to read exists, is installed, and is the right one; that the delegation/methodology guidance it needs is reachable; and that everything it must *not* see is actually denied. Three specific things to settle:
+7. **Audit document access end-to-end, for both modes, before Task 10.** There are now two lead-investigator roles (Orchestrator, Diagnostician) and a sub-agent set that partly overlaps between them, and every document each party reads is governed by a *different* mechanism: system prompts name contracts by path, `RESTRICTED_FILES` denies reads, and `install.sh` decides which files exist at runtime at all. Nothing cross-checks them. Walk the matrix explicitly — for each agent in each mode, confirm that the contract it is told to read exists, is installed, and is the right one; that the delegation/methodology guidance it needs is reachable; and that everything it must *not* see is actually denied.
 
-   - **The Analyst's `RESTRICTED_FILES` has not kept up with the new mode, and this is a live hole.** It currently blocks only `eval_science_principles.md` and `analyst_delegation_guide.md`. Session A's Mapper, Designer and Critic each additionally block `model_forensics_principles.md` and `candidate-methodology.md`. So the Analyst — the agent whose blinding the whole design turns on — is the *least* blinded of the five, and can read the Diagnostician's full methodological framework including how candidates are adjudicated. `model_forensics_principles.md` is already committed to `.claude/docs/`, so this is not hypothetical. The fix is two entries in `subagents/transcript_analyst/agent.py`; it was left out of Session B because it changes the Orchestrator's Analyst too and wanted an explicit decision.
-   - **The Diagnostician has no equivalent of `analyst_delegation_guide.md`.** The Orchestrator has one, the Analyst is blocked from reading it, and it carries the neutral-topic translation rules. Task 1c's spec cross-references `hypothesis-methodology.md §Neutral Topic Translation`, which lives in the `orchestrate` skill. Decide whether the Diagnostician reuses that file, gets its own, or has the rules restated in `diagnostician_responsibilities.md` — and whichever you choose, make sure the Analyst's blinding list covers it.
+   **The three items below were resolved by the reorganisation (see "What changed before you started"). They are kept because the reasoning still governs the audit, and because the last one names a failure mode that the fix prevents but does not abolish — a document placed outside a denied directory is still invisible to every list.**
+
+   - **The Analyst's `RESTRICTED_FILES` has not kept up with the new mode, and this is a live hole.** It currently blocks only `eval_science_principles.md` and `orchestrator_analyst_guide.md`. Session A's Mapper, Designer and Critic each additionally block `model_forensics_principles.md` and `candidate-methodology.md`. So the Analyst — the agent whose blinding the whole design turns on — is the *least* blinded of the five, and can read the Diagnostician's full methodological framework including how candidates are adjudicated. `model_forensics_principles.md` is already committed to `.claude/docs/`, so this is not hypothetical. The fix is two entries in `subagents/transcript_analyst/agent.py`; it was left out of Session B because it changes the Orchestrator's Analyst too and wanted an explicit decision.
+   - **The Diagnostician has no equivalent of `orchestrator_analyst_guide.md`.** The Orchestrator has one, the Analyst is blocked from reading it, and it carries the neutral-topic translation rules. Task 1c's spec cross-references `hypothesis-methodology.md §Neutral Topic Translation`, which lives in the `orchestrate` skill. Decide whether the Diagnostician reuses that file, gets its own, or has the rules restated in `diagnostician_responsibilities.md` — and whichever you choose, make sure the Analyst's blinding list covers it.
    - **The addendum escapes every blinding list, because it is a new basename.** Four agents — Mapper, Designer, Explorer and Executor — block `analyst_interface_contract.md` in their `RESTRICTED_FILES`. None blocks `analyst_forensic_addendum.md`. `_build_hooks` matches with `file_path.endswith(pattern)`, so splitting the contract into a second file silently opened a hole in lists written to close it. Low severity on its own — the addendum describes measurement, not candidate explanations — but it is the general failure mode worth internalising before Task 9 adds six more files: **every new document is invisible to every existing blinding list until someone adds it.** Decide the policy once (block the pair together, or match on a shared prefix) rather than patching per file.
 
    - **Symmetry across all five sub-agents.** Each system prompt should name its contract the same way, each contract should be installed by Task 9, and each agent should be able to read its own contract (deliberately excluded from its own `RESTRICTED_FILES`, as `environment_explorer/agent.py` documents). Drift here is invisible until an agent is denied a file it was told to read, which surfaces as a confusing mid-run failure rather than a clear error.
@@ -212,7 +237,7 @@ Strictly serial — each task depends on the one before.
 - **Do not commit.** The repo owner commits by hand.
 - **Additive only on shared files.** An Orchestrator investigation must behave identically after your work. This binds hardest in Task 9, where `install.sh` and `uninstall.sh` are shared with a working pipeline.
 - **No new Python dependencies**; everything runs under the existing `uv run --with claude-agent-sdk --with python-dotenv` invocation.
-- **Lint is the gate** — there is no test suite. `uv run ruff check subagents/ scripts/`.
+- **Lint is the gate** — there is no test suite. `ruff` is not installed in this container, so the working invocation is `uv run --with ruff ruff check --select E4,E7,E9,F subagents/ scripts/`, which passes clean across the tree. A bare `uv run ruff check` fails to spawn, and a bare `uv run --with ruff ruff check` additionally reports pre-existing `RUF100` and `ASYNC230` findings that are not yours (see Session A's note below).
 - Interface contracts are the single source of truth for request/report shape; system prompts govern process. Both the Diagnostician and the sub-agent read the contract.
 
 ---

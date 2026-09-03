@@ -15,15 +15,20 @@ DISALLOWED_TOOLS = ["Edit", "Bash", "WebSearch", "WebFetch"]
 # the Orchestrator's: a descriptive agent that has absorbed the investigator's
 # framework starts producing explanations instead of descriptions.
 RESTRICTED_FILES: dict[str, str] = {
-    "model_forensics_principles.md": "Diagnostician-only methodological reference.",
-    "eval_science_principles.md": "Diagnostician-only methodological reference.",
-    "analyst_delegation_guide.md": "Diagnostician-only delegation guide.",
+    # Directory-level denial: everything under investigator/ is lead-agent
+    # material, so documents added there later are blinded automatically
+    # rather than escaping a list of filenames.
+    ".claude/docs/investigator/": (
+        "Diagnostician-only material: methodological principles, pipeline "
+        "responsibilities, delegation guides. The Mapper must describe the "
+        "environment without reasoning about explanations."
+    ),
+    ".claude/skills/": (
+        "Skill definitions and their methodology documents carry the "
+        "Diagnostician's candidate-explanation framework."
+    ),
     "analyst_interface_contract.md": (
         "Analyst-Diagnostician interface contract. Not relevant to this agent."
-    ),
-    "candidate-methodology.md": (
-        "Contains the Diagnostician's candidate-explanation framework. The Mapper "
-        "must describe the environment without reasoning about explanations."
     ),
 }
 
