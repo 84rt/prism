@@ -1,0 +1,7 @@
+# Secrets — never committed. API keys live here and are loaded by the
+# sub-agent launcher; a leaked key outlives any history rewrite.
+.env
+
+# Python bytecode
+__pycache__/
+*.pyc
