@@ -251,6 +251,8 @@ The four-category taxonomy is defined operationally in the contract; the Executo
 6. **Rate limit recovery.** When the process-management wrapper retries a subprocess after a rate-limit failure, it reduces `max_connections` for the retry (`eval_retry(log, max_connections=3)` equivalent). This is handled internally by the wrapper.
 7. **Sandbox network isolation.** `network_mode: none` in the compose file blocks all internet access by default. Tasks that require network access must declare this explicitly in their compose file.
 8. **Async requirements.** All solver and scorer functions must be `async def`; model calls need `await`. Violations fail at preflight and surface as structural.
+9. **Task paths must be relative.** `inspect eval` resolves task files through a glob that rejects absolute paths (observed as `NotImplementedError` during task-file globbing). Pass task files relative to the eval project root and set the working directory accordingly, rather than absolutising the path.
+10. **`--sample-id` conflicts with `--limit`.** Inspect raises `ValueError: You cannot specify both sample_id and limit.` For a sample-pinned invocation, the single-rollout probe is the pinned command itself with `--epochs` omitted — do not add `--limit 1`.
 
 ---
 

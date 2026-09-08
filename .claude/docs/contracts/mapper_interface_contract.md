@@ -146,6 +146,8 @@ Each item names what the Diagnostician must do to resolve it (read a specific fi
 
 **Section headings are markdown, and their text is verbatim.** Emit each report section as a markdown heading at the level shown in the Report Format above (`### Summary`, `### Pipeline Model`, …), using the exact heading text, in the order given. Plain-text section titles are not sufficient: the Diagnostician locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read. This is stated explicitly rather than left to be inferred from the formatting of this document.
 
+**The report is the whole of stdout.** Everything printed is captured verbatim as the saved artefact, so begin directly with the first section heading — no preamble, no narration of readiness, no sign-off, and no horizontal rules outside sections. A leading "here is the report" line becomes a permanent part of a document that downstream agents read by structure.
+
 **File references.** Cite locations as `path/to/file.py:42` or `path/to/file.py:42-58`, relative to the environment path. Every quoted instruction, every scorer claim, and every inventory row carries one.
 
 **Asymmetric error preference.** On defects, couplings, and uncertainty, prefer false positives to false negatives: when unsure whether something is a defect, record it with a note; when unsure whether two surfaces are coupled, declare the coupling; when unsure whether a file matters, catalogue it. The Diagnostician can discard an over-flagged item cheaply and has no way to recover one that was never raised.

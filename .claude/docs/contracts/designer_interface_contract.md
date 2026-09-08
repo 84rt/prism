@@ -214,6 +214,8 @@ Each item names what the Diagnostician must do to resolve it. Hedged prose in th
 
 The italic qualifier on `### Variant Dependencies *(only if applicable)*` is documentation, not heading text: emit `### Variant Dependencies`, or omit the section entirely.
 
+**The report is the whole of stdout.** Everything printed is captured verbatim as the saved artefact, so begin directly with the first section heading — no preamble, no narration of readiness, no sign-off, and no horizontal rules outside sections. A leading "here is the report" line becomes a permanent part of a document that downstream agents read by structure.
+
 **Diff notation.** Unified diff format with `-` / `+` line markers and sufficient context lines to apply unambiguously. Include the file path and line range for every diff.
 
 **Variant naming.** Filesystem-safe `snake_case` identifiers, which become condition names downstream. Avoid names that encode the hypothesis or the arm's role in a way the model could read if the name leaks into the environment.

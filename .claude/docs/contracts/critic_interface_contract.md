@@ -154,6 +154,8 @@ The observation that would count **against** the leading explanation — not mer
 
 **Section headings are markdown, and their text is verbatim.** Emit each report section as a level-3 markdown heading (`### Independent Reading`, `### Blind Spots`, …) using the exact heading text, in the order given for the active mode. Plain-text section titles are not sufficient: the Diagnostician locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read.
 
+**The report is the whole of stdout.** Everything printed is captured verbatim as the saved artefact, so begin directly with the active mode's first section heading — no preamble, no narration of readiness, no sign-off, and no horizontal rules outside sections. A leading "here is the report" line becomes a permanent part of a document that downstream agents read by structure.
+
 **Ordinal predictions only, in every mode.** Wherever the Critic states an expected direction, it states `↑` / `↓` / `↔` / `n/a` and not a number.
 
 **Blocker flag semantics.** Used in `diff_review`. A **Blocker** means the result would be uninterpretable if run as-is. Scope is local: a per-diff Blocker makes that diff unusable; a global Blocker means the round as designed is unviable. There is no Mitigable-vs-Caveat taxonomy; non-Blocker risks are described in prose and the Diagnostician weighs them.
