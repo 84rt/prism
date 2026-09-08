@@ -1,4 +1,16 @@
 #!/bin/bash
-# Ensure scripts remain executable in git, even if the filesystem
-# permission is stripped (e.g., by Claude Code's Write tool).
-git update-index --chmod=+x install.sh uninstall.sh
+# Ensure the install scripts remain executable in git, even if the
+# filesystem permission is stripped (e.g., by Claude Code's Write tool).
+#
+# The mode bit is flipped on the entry already staged, via --cacheinfo with
+# the staged blob. A plain `git update-index --chmod=+x <path>` would also
+# refresh the entry from the working tree — silently re-staging local
+# changes the committer deliberately left unstaged.
+for f in install.sh uninstall.sh; do
+    entry="$(git ls-files --stage -- "$f" | head -n 1)"
+    [ -n "$entry" ] || continue          # not in the index (e.g. being deleted)
+    read -r mode blob _stage _path <<< "$entry"
+    if [ "$mode" != "100755" ]; then
+        git update-index --cacheinfo "100755,$blob,$f"
+    fi
+done
