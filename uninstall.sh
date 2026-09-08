@@ -130,13 +130,35 @@ unlink_file "subagents/transcript_analyst/agent.py"
 unlink_file "subagents/transcript_analyst/main.py"
 unlink_file "subagents/transcript_analyst/system_prompt.py"
 
+unlink_file "subagents/environment_mapper/__init__.py"
+unlink_file "subagents/environment_mapper/agent.py"
+unlink_file "subagents/environment_mapper/main.py"
+unlink_file "subagents/environment_mapper/system_prompt.py"
+
+unlink_file "subagents/variant_designer/__init__.py"
+unlink_file "subagents/variant_designer/agent.py"
+unlink_file "subagents/variant_designer/main.py"
+unlink_file "subagents/variant_designer/system_prompt.py"
+
+unlink_file "subagents/redteam_critic/__init__.py"
+unlink_file "subagents/redteam_critic/agent.py"
+unlink_file "subagents/redteam_critic/main.py"
+unlink_file "subagents/redteam_critic/system_prompt.py"
+
 # .claude/docs
 unlink_file ".claude/docs/investigator/orchestrator_analyst_guide.md"
+unlink_file ".claude/docs/contracts/analyst_forensic_addendum.md"
 unlink_file ".claude/docs/contracts/analyst_interface_contract.md"
+unlink_file ".claude/docs/contracts/critic_interface_contract.md"
+unlink_file ".claude/docs/contracts/designer_interface_contract.md"
+unlink_file ".claude/docs/investigator/diagnostician_analyst_guide.md"
+unlink_file ".claude/docs/investigator/diagnostician_responsibilities.md"
 unlink_file ".claude/docs/investigator/eval_science_principles.md"
 unlink_file ".claude/docs/contracts/executor_interface_contract.md"
 unlink_file ".claude/docs/contracts/explorer_interface_contract.md"
 unlink_file ".claude/docs/references/inspect_reference.md"
+unlink_file ".claude/docs/contracts/mapper_interface_contract.md"
+unlink_file ".claude/docs/investigator/model_forensics_principles.md"
 unlink_file ".claude/docs/investigator/orchestrator_responsibilities.md"
 unlink_file ".claude/docs/references/scout_reference.md"
 unlink_file ".claude/docs/investigator/subagent_invocation.md"
@@ -145,6 +167,11 @@ unlink_file ".claude/docs/investigator/subagent_invocation.md"
 unlink_file ".claude/skills/orchestrate/SKILL.md"
 unlink_file ".claude/skills/orchestrate/experimental-design-patterns.md"
 unlink_file ".claude/skills/orchestrate/hypothesis-methodology.md"
+
+# .claude/skills/diagnose
+unlink_file ".claude/skills/diagnose/SKILL.md"
+unlink_file ".claude/skills/diagnose/candidate-methodology.md"
+unlink_file ".claude/skills/diagnose/perturbation-design-patterns.md"
 
 # .claude/settings.json
 unlink_file ".claude/settings.json"
@@ -174,12 +201,16 @@ for dir in \
     "$TARGET_DIR/subagents/environment_explorer" \
     "$TARGET_DIR/subagents/experiment_executor" \
     "$TARGET_DIR/subagents/transcript_analyst" \
+    "$TARGET_DIR/subagents/environment_mapper" \
+    "$TARGET_DIR/subagents/variant_designer" \
+    "$TARGET_DIR/subagents/redteam_critic" \
     "$TARGET_DIR/subagents" \
     "$TARGET_DIR/.claude/docs/investigator" \
     "$TARGET_DIR/.claude/docs/contracts" \
     "$TARGET_DIR/.claude/docs/references" \
     "$TARGET_DIR/.claude/docs" \
     "$TARGET_DIR/.claude/skills/orchestrate" \
+    "$TARGET_DIR/.claude/skills/diagnose" \
     "$TARGET_DIR/.claude/skills"; do
     if [ -d "$dir" ] && [ -z "$(ls -A "$dir")" ]; then
         rmdir "$dir"

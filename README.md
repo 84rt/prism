@@ -4,13 +4,13 @@
 
 **Prism** is a scaffold for automating science-of-evaluations research in [Inspect AI](https://inspect.aisi.org.uk/) evaluations, built on [Claude Code](https://claude.com/product/claude-code), [Inspect Scout](https://meridianlabs-ai.github.io/inspect_scout/) and the [Claude Agent SDK](https://docs.anthropic.com/en/docs/agents/claude-agent-sdk).
 
-The scaffold has two primary use cases:
+The scaffold has two investigation modes, each launched by its own skill and sharing the same perturb-and-measure machinery:
 
-- **Understanding evaluation dynamics** in frontier evals, e.g.:
+- **Science-of-evals mode (`/orchestrate`)** — the eval is the object of study, e.g.:
   - *"How does feature X in this evaluation setting impact model behaviours?"*
   - *"Please identify any confounds that mean this eval isn't measuring what it claims to measure."*
-- **Stress-testing explanations** for observed model behaviours, e.g.:
-  - *"Is our current interpretation of model behaviour Y the simplest, most robust explanation?"*
+- **Model Forensics mode (`/diagnose`)** — a specific episode of model behaviour is the object of study, e.g.:
+  - *"Why did the model blackmail the engineer in this transcript, rather than complying or escalating?"*
   - *"Which features of the eval are causally relevant for eliciting this particular behaviour?"*
 
 <p align="center">
@@ -29,10 +29,35 @@ When finished, the Orchestrator produces a structured report for the User that s
 
 > **Recommended models.** We observed diminished compliance and less effective use of the scaffold's resources when running the Orchestrator on older models (e.g. Opus 4.5). We therefore recommend running the Orchestrator on the most recent Claude models for the best results.
 
+## Model Forensics mode (`/diagnose`)
+
+Where the Orchestrator studies *evals*, the Diagnostician (launched with the `/diagnose` skill) explains *why a model did X* in one specific episode of one specific eval — the same perturb-and-measure machinery, pointed at a single transcript. Give it a runnable eval and a transcript of the behaviour that needs explaining:
+
+```
+/diagnose investigations/originals/blackmail_run_012.eval — the model emailed the
+engineer's partner about the affair rather than complying with the shutdown or
+escalating to the board
+```
+
+<p align="center">
+  <img src="docs/model-forensics-diagram.png" alt="Model Forensics pipeline: the Diagnostician runs initial scoping (Mapper, Executor resample, Analyst grader), reads the CoT to generate candidate explanations, iterates discriminating experiments (Designer, Executor, Analyst), and predicts-to-test — with a cross-family Red-Teaming Critic attacking the candidate list, reviewing diffs blind, and picking the final prediction" width="500">
+</p>
+
+The pipeline:
+
+1. **Initial scoping** — the *Environment Mapper* triages the eval (what the instructions say, what the scorer actually detects, what could be varied); the *Experiment Executor* resamples the original episode n times; the *Transcript Analyst* builds a validated grader for the behaviour from the original transcript and measures the baseline rate. A behaviour that never recurs terminates the investigation early — that is a finding about reproducibility, not a failure.
+2. **Read the chain-of-thought** — the Diagnostician reads the original and resampled transcripts itself (a deliberate divergence from the Orchestrator's firewall: the candidate explanations *are* the product of that read) and writes a ledger of candidate explanations, each with a discriminating signature stating what manipulation would move it.
+3. **Iterated exploration** — the *Variant Designer* proposes perturbations that *discriminate* between candidates; the Diagnostician pre-registers what every candidate predicts for every variant before anything runs; the Executor runs the variants and the Analyst measures them blind, reusing the same grader every round so rates stay comparable. Candidates are reranked and retired only on pre-registered outcomes.
+4. **Predict to test** — the leading explanation must predict an untested factor's effect before it is trusted, with the prediction derived independently by the Diagnostician and the Critic.
+5. **Output** — an append-only investigation log and a findings report stating the explanation, what remains indistinguishable from it, and what evidence would separate them.
+
+Throughout, a **Red-Teaming Critic** running on a *different model family* attacks the candidate list for blind spots, reviews variant diffs without being told what they test, and supplies the independent prediction — the pipeline's structural defence against the investigation only ever considering explanations its author would think of.
+
 ## Prerequisites
 
 - **[Claude Code](https://claude.com/product/claude-code)** — the Orchestrator skill and its sub-agents run inside Claude Code; the scaffold cannot be used without it.
 - **API keys** — an `ANTHROPIC_API_KEY` (always required, since the Orchestrator and sub-agents run on Claude by default), plus whichever keys your target models need: an `OPENAI_API_KEY` if your eval or its grader uses OpenAI models, and/or an `OPENROUTER_API_KEY` to reach models from any provider through [OpenRouter](https://openrouter.ai/) with a single key.
+- **`OPENROUTER_API_KEY` is a hard prerequisite for `/diagnose`.** The Model Forensics mode's Red-Teaming Critic must run on a non-Claude model family — a same-family critic shares exactly the priors it exists to challenge — and the only cross-family route is OpenRouter. `/diagnose` refuses to start without the key, and an `OPENAI_API_KEY` does not substitute (there is no direct-OpenAI route for sub-agents). See "Using models from any provider" below for the routing mechanics.
 
 ## Quick Start
 
@@ -56,6 +81,8 @@ echo "OPENROUTER_API_KEY=sk-or-..." >> .env  # optional
 
 # Launch Claude Code in the target repo and start an investigation:
 # /orchestrate [your research question]
+# or explain one episode of model behaviour (needs OPENROUTER_API_KEY):
+# /diagnose [transcript path + what the model did that needs explaining]
 
 # To uninstall (remove symlinks and revert target repo changes):
 # /path/to/prism/uninstall.sh .
@@ -100,9 +127,12 @@ prism/
 ├── subagents/
 │   ├── runner.py                  # Shared SDK runner + hooks
 │   ├── cli.py                     # Shared CLI boilerplate
-│   ├── environment_explorer/      # Eval environment analysis
-│   ├── experiment_executor/       # Runs Inspect AI evals
-│   └── transcript_analyst/        # Blinded transcript analysis
+│   ├── environment_explorer/      # Eval environment analysis (Orchestrator)
+│   ├── experiment_executor/       # Runs Inspect AI evals (both modes)
+│   ├── transcript_analyst/        # Blinded transcript analysis (both modes)
+│   ├── environment_mapper/        # Hypothesis-free eval triage (Diagnostician)
+│   ├── variant_designer/          # Discriminating perturbations (Diagnostician)
+│   └── redteam_critic/            # Cross-family adversarial critic (Diagnostician)
 ├── .claude/
 │   ├── docs/
 │   │   ├── investigator/          # Lead-agent only (principles, responsibilities,
@@ -110,12 +140,14 @@ prism/
 │   │   ├── contracts/             # Interface contracts, one per sub-agent
 │   │   └── references/            # Tool references (Inspect, Scout)
 │   ├── skills/orchestrate/       # Orchestrator skill definition
+│   ├── skills/diagnose/          # Diagnostician (Model Forensics) skill definition
 │   └── settings.json              # Claude Code permissions
 ├── scripts/
 │   ├── execute_evals.py           # Parallel eval execution engine
 │   └── openrouter_endpoints.py    # Provider enumeration + pin selection
 ├── docs/
-│   └── scaffold-diagram.png       # Architecture diagram
+│   ├── scaffold-diagram.png       # Orchestrator architecture diagram
+│   └── model-forensics-diagram.png # Diagnostician pipeline diagram
 ├── templates/
 │   └── devcontainer.json          # Devcontainer scaffolded into bare targets
 ├── .githooks/                     # Git hooks for scaffold repo
