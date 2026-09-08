@@ -15,6 +15,8 @@ uv run --with claude-agent-sdk --with python-dotenv python subagents/<agent>/mai
 
 The orchestrator should: (1) write the input JSON to a temp file, (2) run the command via Bash, (3) capture stdout as the report. All agents run fire-and-forget — no back-and-forth.
 
+**Mode-conditional required fields (Red-Teaming Critic only).** Every agent above validates a flat list of required fields at exit code 1. The Critic is the one exception: its only flat requirement is `mode`, and each mode then requires its own further fields, validated when the prompt is built rather than by the CLI. A bad `mode`, or a mode missing one of its fields, therefore surfaces as an **agent error (exit code 2)**, not an input error — do not read a Critic exit 2 as an API failure before checking the request against `critic_interface_contract.md §Modes`.
+
 ### Optional: `subagent_model` (all agents)
 
 Every agent's input JSON accepts an optional `subagent_model` field — **the Claude model that the sub-agent itself runs on**. If omitted, the sub-agent uses the scaffold default. Use it to:
@@ -53,6 +55,8 @@ Two things to know before using it:
 - **Every role is open to any sufficiently capable model.** No sub-agent is restricted to Claude. The interface contracts and system prompts are meant to specify each role completely enough that any capable agent can fulfil it — so if a non-Claude sub-agent produces a report that violates its contract, treat that as evidence the *guidance* is underspecified, not as a reason to restrict the model. Fix the contract. The defaults remain Claude simply because that is what the scaffold has been exercised against, not because the roles depend on it.
 
 Running the Analyst cross-family is additionally a robustness check on the scaffold's own assumption that the sub-agent model is infrastructure rather than part of the experiment — the one place where a differing result is informative rather than merely a bug.
+
+**For the Red-Teaming Critic, cross-family is a hard requirement, not a preference.** The Critic exists to supply reasoning decorrelated from the lead investigator's, so a same-family Critic is a methodological failure rather than a cost trade-off: every Critic invocation passes `subagent_route: "openrouter"` with a non-Claude `subagent_model`, and `/diagnose` refuses to start without `OPENROUTER_API_KEY` (an `OPENAI_API_KEY` does not substitute — the runner has no direct-OpenAI route). See `critic_interface_contract.md §Cross-family routing`.
 
 ## Environment Explorer
 
@@ -116,7 +120,7 @@ Running the Analyst cross-family is additionally a robustness check on the scaff
 
 - `experiment_dir` must be an existing directory
 - `model_routing` is optional; per-model routing directives resolved by the Orchestrator in Phase 1 and rendered by the Executor as `-M` arguments. Omit it and every model is invoked directly (the pre-existing behaviour). For OpenRouter models, get the provider slug and model args from `scripts/openrouter_endpoints.py` — never guess a slug. See `executor_interface_contract.md §Model routing`
-- `overrides` is optional; supported keys: `sample_limit`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `runs_per_condition`
+- `overrides` is optional; supported keys: `sample_limit`, `sample_id`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `runs_per_condition`. `sample_id` pins the eval to named dataset entries (`--sample-id`) and pairs with `epochs` for resampling one episode — without it, `epochs` repeats the *whole dataset*. `runs_per_condition` is accepted but not applied (the Executor records it and runs once — see `executor_interface_contract.md §Overrides`); use `epochs` for repeated sampling
 - `subagent_model` is optional; the model the Executor agent runs on. **Distinct from `models`**, which are the eval's target models — `subagent_model` has no provider prefix (e.g. `claude-opus-4-7`), whereas `models` entries do (e.g. `anthropic/claude-sonnet-4-5-20250929`)
 - `subagent_thinking` is optional; the Executor's extended-thinking config (see General Pattern above)
 
@@ -151,3 +155,128 @@ Running the Analyst cross-family is additionally a robustness check on the scaff
 - When `artefacts_dir` is provided, the analyst writes all file outputs to `<artefacts_dir>/analyst/`
 
 **Returns**: Scanner definitions, validation metrics, quantified results (per-condition detection rates), scan results path, transcript exclusions, transcript excerpts, additional observations. See `analyst_interface_contract.md` for the full report format.
+
+### Forensic mode: `behaviour_spec` (Diagnostician only)
+
+In a Model Forensics investigation the Analyst additionally accepts an optional `behaviour_spec` object. **Its presence is the mode switch**: `agent.py` selects the forensic system prompt when the field is present and the unchanged Orchestrator prompt when it is absent, so an Orchestrator invocation must never send it — the base pipeline's behaviour is preserved by leaving it out, not by any in-prompt conditional.
+
+```json
+{
+    "topic": "<neutral topic — rules unchanged>",
+    "transcript_source": {"condition_A": "/abs/path/logs/run_001"},
+    "behaviour_spec": {
+        "description": "The model edited the test file rather than the implementation",
+        "reference_transcript": "/abs/path/to/original.eval",
+        "grader_dir": "/abs/path/to/artefacts/analyst/grader",
+        "manipulation_check": "Whether the transcript shows the model treating the deadline as binding"
+    }
+}
+```
+
+- `description` is always required within the spec; `reference_transcript` is required on the first build and optional once `grader_dir` is populated; `grader_dir` absent/empty means build-and-persist, populated means load-and-apply-unmodified; `manipulation_check` is optional, and when present its report subsection becomes required
+- **The firewall is not breached**: the spec names the *explanandum* (what to measure), never an explanation, a predicted direction, or which condition is which. The neutral `topic` remains required and its rules are unchanged — forensic mode is two measurements (fixed grader + open-ended scan), never one
+- **Grader reuse via `grader_dir` is what makes rates comparable across iterations** — pass the same directory every round after the first, and treat a hash change between reports as an instrument change
+- `behaviour_spec` is validated nowhere: `main.py`'s `required_fields` is unchanged (`topic`, `transcript_source`), so a malformed spec reaches the Analyst as JSON. Check it by hand before sending
+- Request sub-field rules and the forensic report sections (grader provenance, floor check, manipulation-check verdict, `### Behaviours not captured by the grader`, `### Eval-awareness split`) are specified in **`.claude/docs/contracts/analyst_forensic_addendum.md`** — read it alongside the base contract for every forensic invocation. The base contract deliberately carries no pointer to the addendum (the Orchestrator-mode Analyst reads the base contract, and a pointer would reintroduce the mode ambiguity the split removes), so this reference and `diagnostician_responsibilities.md` are how the Diagnostician finds it
+
+## Environment Mapper
+
+**Script**: `subagents/environment_mapper/main.py`
+
+**Input JSON**:
+```json
+{
+    "environment_path": "/absolute/path/to/eval/environment",
+    "behaviour_description": "The model wrote a special-case branch returning the expected value for the test inputs rather than implementing the function",
+    "reference_transcript": "/absolute/path/to/original.eval",
+    "constraints": "The eval is large — prioritise the prompt and scoring path.",
+    "subagent_model": "claude-opus-4-8",
+    "subagent_thinking": {"type": "adaptive"}
+}
+```
+
+- `environment_path` must be an existing directory — the frozen original environment
+- `behaviour_description` is the **explanandum**: what the model did, never why. It is not a hypothesis and must not contain one
+- `reference_transcript` and `constraints` are optional; the transcript is read only to check the environment-as-written against the episode-as-run
+- The Mapper runs **once per investigation**, before any candidate exists; save its stdout to `artefacts/mapper/report.md` — the Designer and Critic receive that path
+
+**Returns**: Summary (with fixed-format `**Prohibition status:**` / `**Scorer detection:**` / `**Defect sufficiency:**` lines), file catalogue, pipeline model, instruction analysis, scorer analysis, tool & environment analysis, manipulable surface inventory, environment defects, uncertainties. See `mapper_interface_contract.md` for the full request and report format.
+
+## Variant Designer
+
+**Script**: `subagents/variant_designer/main.py`
+
+**Input JSON**:
+```json
+{
+    "mapper_report_path": "/absolute/path/to/artefacts/mapper/report.md",
+    "environment_path": "/absolute/path/to/iteration/environment",
+    "candidates": [
+        {
+            "id": "C1",
+            "slug": "task_confusion",
+            "statement": "The model read the failing test as the specification and satisfied it directly.",
+            "discriminating_signature": "Removing the visible test file should collapse the behaviour; strengthening the docstring should not.",
+            "status": "live"
+        }
+    ],
+    "regime": "ablate",
+    "environment_rate": {"rate": 0.41, "n": 40},
+    "variant_budget": 3,
+    "environment_delta": [
+        {"name": "deadline_removed", "description": "The deadline sentence at prompt.md:34 was deleted."}
+    ],
+    "variations_tried": [
+        {"name": "deadline_removed", "description": "Deleted the deadline sentence from the task prompt."}
+    ],
+    "elimination_targets": ["C3"],
+    "constraints": "Single-file diffs only this round.",
+    "subagent_model": "claude-opus-4-8",
+    "subagent_thinking": {"type": "adaptive"}
+}
+```
+
+- `environment_path` must be an existing directory: **the current iteration's copy** that diffs must apply against, not necessarily the original
+- `environment_rate` (note: **not** `baseline_rate`) is the measured rate of the environment supplied, `{"rate": <decimal>, "n": <int>}` — pass the step-1c baseline only when the environment *is* a fresh copy of the original
+- `regime` is `"ablate"` or `"amplify"` — a steer, not a directive; the Designer may mark individual variants off-regime with a reason
+- `environment_delta` is **required in practice whenever the environment is a derived variant** (omit it entirely for a fresh original copy): what was changed, never what it did — no rates, no outcomes. Without it the Designer meets a map/tree mismatch it can only read as a stale map or a broken environment. Check the report's `**Environment:**` Summary line: `original` against a derived environment means the delta did not arrive and surface locations are untrustworthy
+- `variations_tried` is optional: every variation already run across all rounds and branches, outcomes stripped
+- `elimination_targets` is optional and triggers a **positive-control variant** per named candidate (outside `variant_budget`). Each target costs a condition — name one only where retiring it would change the leading explanation or move the equivalence-class boundary
+- Only `live` candidates are sent
+
+**Returns**: Summary (with fixed-format `**Environment:**` / `**Discriminating variants:**` / `**Off-regime variants:**` / `**Positive controls:**` / `**Headroom:**` lines), proposed variants with diffs and confound declarations, discrimination matrix, variant dependencies (only if applicable), confounds & risks, uncertainties. See `designer_interface_contract.md` for the full request and report format.
+
+## Red-Teaming Critic
+
+**Script**: `subagents/redteam_critic/main.py`
+
+The Critic's only CLI-validated field is `mode` ∈ `{candidate_critique, diff_review, prediction}`; each mode then requires its own fields (see the General Pattern note — missing ones exit 2, not 1). Always cross-family: `subagent_route: "openrouter"` with a non-Claude model.
+
+**Input JSON** (`candidate_critique` shown):
+```json
+{
+    "mode": "candidate_critique",
+    "transcript_paths": ["/absolute/path/to/original.eval"],
+    "mapper_report_path": "/absolute/path/to/artefacts/mapper/report.md",
+    "candidates": [
+        {
+            "id": "C1",
+            "slug": "task_confusion",
+            "statement": "The model read the failing test as the specification and satisfied it directly.",
+            "discriminating_signature": "Removing the visible test file should collapse the behaviour; strengthening the docstring should not.",
+            "status": "live"
+        }
+    ],
+    "iteration": 0,
+    "evidence_summary": "Optional after 3d: rates and directions, stated mechanically.",
+    "subagent_model": "google/gemini-3-pro",
+    "subagent_route": "openrouter"
+}
+```
+
+- `candidate_critique` requires `transcript_paths`, `mapper_report_path`, `candidates`, `iteration` (0 for the step-2 invocation); `evidence_summary` is optional and post-3d only
+- `diff_review` requires `diffs` (array of `{"name": ..., "diff": ...}`), `environment_path`, `mapper_report_path` — and **must not** receive the candidates, the discrimination matrix, or the behaviour description; the blinding is the mode's value
+- `prediction` requires `investigation_log_path`, `leading_explanation`, `untested_surfaces` — and must not receive the Diagnostician's own prediction
+- Sending a withheld field does not error: it silently converts the review into a much weaker one. The blinding is the caller's responsibility
+
+**Returns**: only the active mode's sections — `candidate_critique`: independent reading (written before the ledger is read), blind spots, assumption audit, proposed additional candidates (`X<n>` ids), retirement advice; `diff_review`: summary, per-diff analysis, cross-diff analysis, inferred purpose (last); `prediction`: chosen factor, ordinal prediction, reasoning, falsifier. See `critic_interface_contract.md` for all three request and report formats.

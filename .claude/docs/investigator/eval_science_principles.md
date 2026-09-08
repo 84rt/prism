@@ -6,6 +6,8 @@ The framing of evaluations as a discipline requiring its own scientific standard
 
 Each summary explains what the paper argues, then extracts the principles most relevant to studying evaluations as scientific objects.
 
+Diagnostic and abductive methodology for explaining a *specific episode* of model behaviour lives in the sibling document `model_forensics_principles.md`; the two are siblings rather than one superseding the other, and everything here carries over into forensic work unchanged.
+
 ---
 
 ## 1. Strong Inference
