@@ -31,6 +31,18 @@ RESTRICTED_FILES: dict[str, str] = {
         "Skill definitions and their methodology documents belong to the "
         "lead investigator and carry its hypotheses and candidate framework."
     ),
+    # Investigation runtime state. Created per investigation rather than
+    # installed, so no directory-level denial covers them — and they carry
+    # exactly what the analyst's blinding withholds: the hypothesis or
+    # candidate ledger, the condition mapping, and prior findings.
+    "CANDIDATES.md": (
+        "Candidate-explanation ledger. The analyst must never learn any "
+        "candidate explanation."
+    ),
+    "INVESTIGATION-LOG.md": (
+        "Investigation history: the hypothesis, condition mappings, rates."
+    ),
+    "FINDINGS-REPORT.md": "Investigation synthesis: explanations and evidence.",
 }
 
 

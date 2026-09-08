@@ -27,9 +27,22 @@ RESTRICTED_FILES: dict[str, str] = {
         "Skill definitions and their methodology documents carry the "
         "Diagnostician's candidate-explanation framework."
     ),
+    # The analyst contract and its forensic addendum travel together: both
+    # describe the blinded instrument's interface, and blocking one while the
+    # other stays readable defeats the entry's purpose.
     "analyst_interface_contract.md": (
         "Analyst-Diagnostician interface contract. Not relevant to this agent."
     ),
+    "analyst_forensic_addendum.md": (
+        "Forensic addendum to the analyst contract. Not relevant to this agent."
+    ),
+    # Investigation runtime state. These are created per investigation rather
+    # than installed, so no directory-level denial covers them — and they
+    # carry exactly what the blinding withholds: the candidate ledger, the
+    # iteration history with rates, and the synthesis.
+    "CANDIDATES.md": "Live candidate-explanation ledger. The Mapper is hypothesis-free.",
+    "INVESTIGATION-LOG.md": "Investigation history: candidates, predictions, rates.",
+    "FINDINGS-REPORT.md": "Investigation synthesis: explanations and evidence.",
 }
 
 

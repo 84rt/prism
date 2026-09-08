@@ -20,9 +20,22 @@ RESTRICTED_FILES: dict[str, str] = {
         "responsibilities, delegation guides, invocation reference."
     ),
     ".claude/skills/": "Skill definitions belong to the lead investigator.",
+    # The analyst contract and its forensic addendum travel together: both
+    # describe the blinded instrument's interface, and blocking one while the
+    # other stays readable defeats the entry's purpose.
     "analyst_interface_contract.md": (
         "Analyst-orchestrator interface contract. Not relevant to this agent."
     ),
+    "analyst_forensic_addendum.md": (
+        "Forensic addendum to the analyst contract. Not relevant to this agent."
+    ),
+    # Investigation runtime state. Created per investigation rather than
+    # installed, so no directory-level denial covers them. The Explorer
+    # receives the current hypothesis via its request; the log and ledger
+    # carry the wider history it must not absorb.
+    "CANDIDATES.md": "Candidate-explanation ledger (Model Forensics mode).",
+    "INVESTIGATION-LOG.md": "Investigation history: hypotheses, findings, rates.",
+    "FINDINGS-REPORT.md": "Investigation synthesis: explanations and evidence.",
 }
 
 

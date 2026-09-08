@@ -59,6 +59,18 @@ RESTRICTED_FILES: dict[str, str] = {
         "Skill definitions and their methodology documents carry the "
         "Diagnostician's candidate framework."
     ),
+    # Investigation runtime state — with one deliberate exception. The ledger
+    # arrives via the request in candidate_critique and must stay unseen in
+    # diff_review, so the file itself is denied in every mode. The
+    # investigation log is NOT listed: prediction mode receives
+    # `investigation_log_path` and must read it, and this list is static
+    # across modes — in the other two modes the Diagnostician simply never
+    # sends the path.
+    "CANDIDATES.md": (
+        "Candidate ledger file. candidate_critique receives the ledger via "
+        "its request; diff_review must not see it at all."
+    ),
+    "FINDINGS-REPORT.md": "Investigation synthesis: explanations and evidence.",
 }
 
 

@@ -29,8 +29,31 @@ RESTRICTED_FILES: dict[str, str] = {
         "Skill definitions and their methodology documents carry the "
         "Diagnostician's framework for ranking and retiring candidates."
     ),
+    # The analyst contract and its forensic addendum travel together: both
+    # describe the blinded instrument's interface, and blocking one while the
+    # other stays readable defeats the entry's purpose.
     "analyst_interface_contract.md": (
         "Analyst-Diagnostician interface contract. Not relevant to this agent."
+    ),
+    "analyst_forensic_addendum.md": (
+        "Forensic addendum to the analyst contract. Not relevant to this agent."
+    ),
+    # Investigation runtime state. These are created per investigation rather
+    # than installed, so no directory-level denial covers them. The Designer's
+    # request fields (environment_delta, variations_tried, environment_rate)
+    # deliberately strip outcomes; these files carry the outcomes.
+    "CANDIDATES.md": (
+        "Full candidate ledger with history and evidence. The Designer "
+        "receives live candidates via its request, never the ledger."
+    ),
+    "INVESTIGATION-LOG.md": "Iteration history with rates and prediction outcomes.",
+    "FINDINGS-REPORT.md": "Investigation synthesis: explanations and evidence.",
+    "executor/report.md": (
+        "Past execution reports. The Designer receives no run history."
+    ),
+    "analyst/report.md": (
+        "Past measurement reports with rates. A Designer that has seen which "
+        "edits moved rates designs toward repeating them."
     ),
 }
 
