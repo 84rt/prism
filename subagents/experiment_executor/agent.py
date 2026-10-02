@@ -1,6 +1,8 @@
 """Experiment Executor agent — prompt building and config."""
 
 import json
+import os
+from datetime import datetime, timezone
 from typing import Any
 
 from subagents.experiment_executor.system_prompt import SYSTEM_PROMPT
@@ -42,7 +44,20 @@ RESTRICTED_FILES: dict[str, str] = {
 async def run_experiment_executor(cwd: str | None = None, **data: Any) -> str:
     """Run the experiment executor agent and return its execution report."""
     models = data["models"]
+
+    # Persist the contract request as a file: the batch runner takes it
+    # directly, so the agent never re-types a command or a JSON payload. Keys
+    # the runner does not know (subagent_*) are ignored by it.
+    request_path = _persist_request(data)
+
     prompt = f"""\
+## Request File
+
+`{request_path}`
+
+The request below, saved verbatim. Pass this path to \
+`scripts/execute_evals.py run`; do not rewrite it.
+
 ## Experiment Name
 
 {data["experiment_name"]}
@@ -93,4 +108,28 @@ no `-M` arguments. Never relax or substitute a pin to make a command succeed.
         model=data.get("subagent_model"),
         thinking=data.get("subagent_thinking"),
         route=data.get("subagent_route"),
+        max_turns=data.get("subagent_max_turns"),
     )
+
+
+def _persist_request(data: dict[str, Any]) -> str:
+    """Write the request JSON under the experiment's executor artefacts.
+
+    Parameters
+    ----------
+    data : dict
+        The request as received by the CLI (minus `cwd`).
+
+    Returns
+    -------
+    str
+        Absolute path of the written file, e.g.
+        ``<experiment_dir>/artefacts/executor/request_20260917T120000Z.json``.
+    """
+    out_dir = os.path.join(os.path.abspath(data["experiment_dir"]), "artefacts", "executor")
+    os.makedirs(out_dir, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = os.path.join(out_dir, f"request_{stamp}.json")
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    return path

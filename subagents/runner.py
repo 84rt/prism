@@ -1,6 +1,9 @@
 """Shared Agent SDK runner for all sub-agents."""
 
+import json
 import os
+import sys
+from datetime import datetime, timezone
 from typing import Any
 
 from claude_agent_sdk import (
@@ -39,6 +42,18 @@ DEFAULT_MODEL = "claude-opus-4-8"
 # {"type": "disabled"} or {"type": "enabled", "budget_tokens": N}) the same way
 # `subagent_model` is — e.g. when overriding to a model without adaptive support.
 DEFAULT_THINKING: ThinkingConfig = {"type": "adaptive"}
+
+# Turn cap every sub-agent runs under unless the invocation overrides it via
+# the `subagent_max_turns` input field. 100 is the SDK cap the six-runs
+# analysis saw Analyst invocations die on (D14); the policy for sizing work
+# orders so the cap is not hit lives in the Analyst docs — this is only the
+# mechanism for changing it per invocation.
+DEFAULT_MAX_TURNS = 100
+
+# Where the cost sidecar for the current invocation goes. Set by
+# `scripts/launch_subagent.py` for every launch; when unset the runner only
+# logs the usage line to stderr.
+COST_FILE_ENV = "PRISM_COST_FILE"
 
 # OpenRouter exposes an Anthropic-Messages-compatible endpoint, so the Claude
 # Code CLI the Agent SDK spawns can be pointed at it without a local proxy. This
@@ -296,6 +311,7 @@ async def run_agent(
     model: str | None = None,
     thinking: ThinkingConfig | None = None,
     route: str | None = None,
+    max_turns: int | None = None,
 ) -> str:
     """Run an Agent SDK agent and return its output.
 
@@ -336,6 +352,10 @@ async def run_agent(
             capable model can fulfil it, so a contract violation under a
             non-Claude model is evidence the guidance is underspecified rather
             than a reason to restrict the model.
+        max_turns: Turn cap for this invocation. If None, falls back to
+            DEFAULT_MAX_TURNS. Set per-invocation via the `subagent_max_turns`
+            input field when a work order is known to need more (or fewer)
+            turns than the default.
 
     Returns:
         The agent's output as a string.
@@ -390,7 +410,7 @@ async def run_agent(
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
         permission_mode="bypassPermissions",
-        max_turns=100,
+        max_turns=max_turns or DEFAULT_MAX_TURNS,
         cwd=working_dir,
         **({"env": route_env} if route_env else {}),
         **({"hooks": hooks} if hooks else {}),
@@ -398,9 +418,11 @@ async def run_agent(
 
     try:
         result: str | None = None
+        result_message: ResultMessage | None = None
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, ResultMessage):
                 result = message.result
+                result_message = message
     except CLINotFoundError:
         raise RuntimeError(
             f"{agent_name}: Claude Code CLI not found. "
@@ -411,7 +433,73 @@ async def run_agent(
     except ProcessError as exc:
         raise RuntimeError(f"{agent_name}: process error: {exc}")
 
+    if result_message is not None:
+        _write_cost_sidecar(agent_name, resolved_model, route, result_message)
+
     if not result:
-        raise RuntimeError(f"{agent_name} agent produced no output.")
+        # Say *why* there is no output: a turn-cap exit (`error_max_turns`) and
+        # an API refusal need different recoveries, and the subtype is the only
+        # place the SDK tells them apart.
+        detail = ""
+        if result_message is not None:
+            detail = (
+                f" (subtype={result_message.subtype}, stop_reason={result_message.stop_reason}, "
+                f"num_turns={result_message.num_turns}, max_turns={options.max_turns})"
+            )
+        raise RuntimeError(f"{agent_name} agent produced no output{detail}.")
 
     return result
+
+
+def _write_cost_sidecar(
+    agent_name: str, model: str, route: str | None, message: ResultMessage
+) -> None:
+    """Record the invocation's SDK usage and cost.
+
+    Written to the path in `PRISM_COST_FILE` when set (the launcher sets it per
+    invocation); a one-line summary always goes to stderr so a launch without
+    the sidecar still leaves the figure in the stderr log. `scripts/spend.py`
+    sums the sidecars.
+
+    Parameters
+    ----------
+    agent_name : str
+        Human-readable role name.
+    model : str
+        The resolved sub-agent model.
+    route : str | None
+        The resolved route.
+    message : ResultMessage
+        The SDK's final message for the query.
+    """
+    record = {
+        "prism_cost": 1,
+        "agent": agent_name,
+        "model": model,
+        "route": route or "direct",
+        "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "subtype": message.subtype,
+        "stop_reason": message.stop_reason,
+        "is_error": message.is_error,
+        "num_turns": message.num_turns,
+        "duration_ms": message.duration_ms,
+        "duration_api_ms": message.duration_api_ms,
+        "total_cost_usd": message.total_cost_usd,
+        "usage": message.usage,
+        "model_usage": message.model_usage,
+        "permission_denials": message.permission_denials,
+    }
+    print(
+        f"[cost] agent={agent_name!r} model={model} total_cost_usd={message.total_cost_usd} "
+        f"turns={message.num_turns} subtype={message.subtype}",
+        file=sys.stderr,
+    )
+    path = os.environ.get(COST_FILE_ENV)
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(record, f, indent=2, default=str)
+    except OSError as exc:  # never fail a completed invocation over telemetry
+        print(f"[cost] could not write {path}: {exc}", file=sys.stderr)

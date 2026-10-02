@@ -4,16 +4,29 @@ Sub-agents are invoked as CLI scripts via the Agent SDK. The orchestrator writes
 
 ## General Pattern
 
+**Launch every sub-agent through the detached launcher**, never with a bare `uv run … main.py` in the foreground or a `nohup … &`:
+
 ```bash
-uv run --with claude-agent-sdk --with python-dotenv python subagents/<agent>/main.py <input.json> [--cwd <dir>]
+uv run python scripts/launch_subagent.py launch <role> <input.json> \
+    --investigation investigations/<name> --tag <label> [--artefacts-dir <dir>] [--cwd <dir>]
+uv run python scripts/launch_subagent.py wait <receipt.json> --timeout 540   # exit 0 finished, 3 still running
+uv run python scripts/launch_subagent.py status <receipt.json>
+uv run python scripts/launch_subagent.py list investigations/<name>
 ```
 
-- **Input**: JSON file with agent-specific fields (see below)
-- **Output**: Structured markdown report printed to stdout
-- **Errors**: Printed to stderr
-- **Exit codes**: 0 = success, 1 = input validation error, 2 = agent error
+- **Roles**: `explorer`, `executor`, `analyst`, `mapper`, `designer`, `critic`.
+- **`--tag`**: the iteration or phase label (`00_resample`, `iter1`, `phase4`); the launcher assigns `<n>` so repeated invocations of one role never collide.
+- **`--artefacts-dir`**: where the outputs land; defaults to `investigations/<name>/artefacts`. Pass the iteration's `artefacts/` for iteration-scoped roles.
+- **What the launcher does**: copies the request to `investigations/<name>/requests/<tag>_<role>_<n>.json` (persistent — the session scratchpad is wiped on restart), starts the sub-agent under its own session (`setsid` semantics, so a harness teardown or a Bash timeout cannot kill it), writes stdout to `<artefacts-dir>/<role>/report_<tag>_<role>_<n>.md` and stderr to `stderr_<tag>_<role>_<n>.log`, records the SDK cost sidecar `cost_<tag>_<role>_<n>.json`, and prints a **receipt** JSON (pid, paths, `receipt_<tag>_<role>_<n>.json`) immediately.
+- **Waiting**: `wait` blocks up to `--timeout` seconds (default 540, under the Bash tool's 10-minute cap) and exits 0 when the sub-agent has finished with an exit code recorded in the receipt, 3 if it is still running — call it again. Use absolute paths throughout; the Bash tool's working directory drifts.
+- **Reading the report**: the report file *is* the sub-agent's stdout. There is no separate "save stdout to `report.md`" step; cite the per-invocation path in the log.
+- **Exit codes** (recorded in the receipt): 0 = success, 1 = input validation error, 2 = agent error. `scripts/spend.py investigations/<name>` sums the cost sidecars and eval token usage.
 
-The orchestrator should: (1) write the input JSON to a temp file, (2) run the command via Bash, (3) capture stdout as the report. All agents run fire-and-forget — no back-and-forth.
+The underlying CLI the launcher runs is `uv run --with claude-agent-sdk --with python-dotenv python subagents/<agent>/main.py <input.json> [--cwd <dir>]` — input JSON with agent-specific fields (below), markdown report on stdout, errors on stderr. All agents run fire-and-forget — no back-and-forth.
+
+### Optional: `subagent_max_turns` (all agents)
+
+Every agent's input JSON accepts an optional `subagent_max_turns` field — **the Agent SDK turn cap the sub-agent runs under** (default 100). Raise it for a work order known to need more turns (a many-condition Analyst ladder), or lower it to bound a cheap check. A sub-agent that hits the cap returns no report and the runner's error names it (`subtype=error_max_turns`), so the failure is diagnosable rather than silent. The field is threaded through `runner.py`; each agent's `agent.py` prompt builder must pass it to `run_agent(max_turns=…)` — a builder that does not read the key silently drops it. **Currently honoured by the Executor only**; the Explorer, Analyst, Mapper, Designer and Critic builders do not yet read it (their owning work-packages add the one-liner), so setting it on those roles is a no-op until they do.
 
 **Mode-conditional required fields (Red-Teaming Critic only).** Every agent above validates a flat list of required fields at exit code 1. The Critic is the one exception: its only flat requirement is `mode`, and each mode then requires its own further fields, validated when the prompt is built rather than by the CLI. A bad `mode`, or a mode missing one of its fields, therefore surfaces as an **agent error (exit code 2)**, not an input error — do not read a Critic exit 2 as an API failure before checking the request against `critic_interface_contract.md §Modes`.
 

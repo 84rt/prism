@@ -143,7 +143,9 @@ prism/
 │   ├── skills/diagnose/          # Diagnostician (Model Forensics) skill definition
 │   └── settings.json              # Claude Code permissions
 ├── scripts/
-│   ├── execute_evals.py           # Parallel eval execution engine
+│   ├── execute_evals.py           # Eval batch runner (detached, score-free)
+│   ├── launch_subagent.py         # Detached sub-agent launcher + receipts
+│   ├── spend.py                   # Sums cost sidecars + eval token usage
 │   └── openrouter_endpoints.py    # Provider enumeration + pin selection
 ├── docs/
 │   ├── scaffold-diagram.png       # Orchestrator architecture diagram

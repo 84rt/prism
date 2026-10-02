@@ -107,8 +107,9 @@ Sandbox pool is the most common bottleneck: multiple parallel evals all share th
 
 ### Concurrency heuristics
 
-- **API-only evals (no sandbox)**: `max_parallel` up to the number of condition-model pairs is usually safe; provider rate limits tend to be the binding constraint.
-- **Sandbox-based evals**: start conservative (`max_parallel: 2`) and only increase if a concurrency preflight passes. Sandbox setup takes 10–30s; API-only preflight takes 1–3s — use the preflight duration as a sandbox detector.
+- **The runner's ceiling is the default.** `scripts/execute_evals.py` applies `max_parallel: 1` and `max_connections: 4` unless the request's `overrides` set them. These are sized for a shared host running one Docker sandbox per sample: an unconstrained run once opened 24 containers on a 10-core / 8 GB box and drove free memory to ~65 MB. The request may set either key; the Executor may raise them only via `run --max-parallel N --max-connections M --rationale "..."`, and the rationale is recorded verbatim in the Concurrency Decision.
+- **API-only evals (no sandbox)**: raising `max_parallel` towards the number of condition-model pairs is usually safe; provider rate limits tend to be the binding constraint. Sandbox detection is recorded by the runner from preflight timing (10–30 s per probe suggests sandbox setup; 1–3 s suggests API-only) and from compose/Docker files next to the task.
+- **Sandbox-based evals**: keep the ceiling. Remember the sandbox pool (`--max-sandboxes`, default `2 × cpu_count`) is shared across every parallel eval on the host, including other investigations.
 - **When in doubt**: run sequentially. A slow complete run beats a fast cascade of resource failures.
 
 ---

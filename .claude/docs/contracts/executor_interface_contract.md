@@ -27,8 +27,8 @@ A mapping from condition names (`snake_case`) to per-condition invocation parame
 }
 ```
 
-- `task`: path to the task file relative to `experiment_dir`.
-- `args`: key-value pairs passed as `-T key=value` to the `inspect eval` invocation for that condition.
+- `task`: path to the task file relative to `experiment_dir` (never absolute — Inspect rejects absolute task paths). A condition may also be given as a bare string, which is read as `{"task": "<string>", "args": {}}`.
+- `args`: key-value pairs passed as `-T key=value` to the `inspect eval` invocation for that condition. Non-string values are rendered as JSON.
 
 Patterns A/B/C (parameter-based, separate task files, model variation only) are determined by how the orchestrator populates this mapping. The Executor does not need to classify the pattern.
 
@@ -79,15 +79,18 @@ A mapping of execution-parameter overrides. Supported keys:
 
 | Key | Type | Meaning |
 |---|---|---|
-| `sample_limit` | int | Maps to `--limit` |
+| `sample_limit` | int | Maps to `--limit`. Cannot be combined with `sample_id` (Inspect rejects the pair; the runner refuses the request) |
 | `sample_id` | str | Maps to `--sample-id` (comma-separated ids; runs only those dataset entries) |
 | `epochs` | int | Maps to `--epochs` |
-| `skip_preflight` | bool | If `true`, the Executor does not run preflight and goes straight to full execution |
-| `max_parallel` | int | Upper bound on concurrent eval subprocesses |
-| `max_connections` | int | Maps to `--max-connections` (concurrent API calls within an eval) |
+| `skip_preflight` | bool | If `true`, the runner does not run preflight and goes straight to full execution |
+| `max_parallel` | int | Upper bound on concurrent eval subprocesses. **Default 1** (the runner's ceiling) |
+| `max_connections` | int | Maps to `--max-connections` (concurrent API calls within an eval). **Default 4** |
+| `command_timeout_seconds` | int | Wall-clock limit per `inspect eval` subprocess. Default 14400 (4 h) |
 | `runs_per_condition` | int | Number of full-run repetitions per condition-model pair — **specified but not currently implemented**, see below |
 
-Unrecognised keys are ignored with a note in **Additional Notes**. The Executor may apply other defaults (e.g., `--retry-on-error 3`, `--no-fail-on-error`, `--display plain`, and `--with "openai>=…"` on `openrouter/…` models) without them being in overrides — these are policy, not configuration.
+Unrecognised keys are ignored with a note in **Additional Notes**. Other flags (`--retry-on-error 3`, `--no-fail-on-error`, `--display plain`, and `--with "openai>=…"` on `openrouter/…` models) are applied to every invocation by the runner without being in overrides — these are policy, not configuration.
+
+**The concurrency ceiling is the runner's, not the Executor's.** `max_parallel: 1` / `max_connections: 4` are sized for a shared host running one Docker sandbox per sample (see `inspect_reference.md §Concurrency heuristics`). A caller who knows better sets them in `overrides`. The Executor may raise them only by passing `--max-parallel` / `--max-connections` together with `--rationale` to the runner; the rationale is recorded verbatim in the report's **Concurrency Decision**. Raising them silently is not possible — the runner refuses the flags without a rationale.
 
 **`runs_per_condition` is documented here but has no rendering step in the Executor's system prompt.** `sample_limit`, `sample_id`, `epochs` and `max_connections` each name a flag the Executor is instructed to append; `runs_per_condition` names a *multiplication of commands* that nothing performs. It is also a *recognised* key, so it would not earn the Additional Notes entry that unrecognised keys get — it would simply take no effect while the caller believed it had. The Executor therefore treats it as **accepted-but-not-applied**: it runs the pair once and records the key and its value in **Additional Notes**, naming `epochs` as the alternative. Callers needing repeated sampling should use `epochs` directly; see *Resample runs* below for when the two genuinely differ.
 
@@ -128,6 +131,27 @@ Note that `sample_id` selects which dataset entry runs; it does not alter the ta
 
 ---
 
+## Execution Mechanism
+
+The request is executed by a deterministic batch runner, `scripts/execute_evals.py`, which the Executor drives and supervises. The runner, not the Executor, constructs the `inspect eval` commands, runs preflight, applies the concurrency ceiling, retries transient failures, classifies errors, quarantines preflight logs, reads transcript shape from the logs, and assembles a draft report in the section shape below. It runs the batch **detached** — in its own session, surviving the Executor's own Bash timeout or teardown — and keeps a score-free status file current.
+
+```bash
+uv run python scripts/execute_evals.py run <request.json>              # validate, build commands, launch detached; prints a receipt
+uv run python scripts/execute_evals.py wait <run_dir> --timeout 540    # block until terminal (exit 0) or timeout (exit 3)
+uv run python scripts/execute_evals.py status <run_dir>                # score-free status snapshot
+uv run python scripts/execute_evals.py report <run_dir>                # draft report in this contract's shape
+```
+
+The run directory is `<experiment_dir>/artefacts/executor/runs/<experiment_name>_<timestamp>/`. It holds `request.json`, `plan.json` (the rendered commands), `status.json`, `worker.log`, `draft_report.md`, and a `private/` subtree with each command's raw stdout/stderr and the quarantined preflight logs. **`private/` is score-bearing** (Inspect's plain display prints running metrics) and is never read by the Executor or the orchestrator.
+
+**The Executor's protocol is launch, then report.** (1) Validate the request against this contract and call `run` with the request file as received. (2) Poll with `wait` until the run is terminal. (3) Read the draft report; for anything tagged structural, diagnose from the evidence and, if a fix within the rules exists (a transient cause that exhausted retries, a Docker pool that needed `inspect sandbox cleanup docker`), re-run those pairs once with `run … --only <pair_id,…> --quarantine-existing-logs` and fold the outcome into the report. (4) Emit the final report. The Executor never runs `inspect eval` directly, never edits `plan.json`, and never reads under `private/`.
+
+**Stale logs are refused, not appended to.** If a pair's log directory already holds a `.eval` file, `run` refuses unless `--quarantine-existing-logs` is passed, which moves the stale files to `<experiment_dir>/logs_quarantined/<run_id>/<condition>/`. Appending would silently double the Analyst's pool.
+
+**Log organisation.** One directory per condition, `<experiment_dir>/logs/<condition>/`; when the request names more than one model, one directory per pair, `<experiment_dir>/logs/<condition>/<model-sanitised>/`, so the newest-log lookup is unambiguous.
+
+---
+
 ## Executor → Orchestrator: Report Format
 
 Each report from the Executor to the orchestrator contains the following sections, in order. The summary comes first; the remaining sections provide supporting detail for drill-down. Empty sections display `None.` or `No failures.` — never omitted — so the top-level shape is fixed and scannable.
@@ -137,6 +161,8 @@ Each report from the Executor to the orchestrator contains the following section
 A 3–5 sentence overview of the execution. State: how many condition-model pairs were attempted and their final disposition (completed / completed-with-sample-errors / excluded at preflight / failed during full execution); the chosen `max_parallel` level; and the most decision-critical observation for the orchestrator (e.g., asymmetric exclusions between conditions, unusually high sample-level attrition, notable retry activity). No recommendation — this section conveys information, not next-step advice.
 
 If the orchestrator stops reading here, it should know whether the execution succeeded cleanly and whether any pair needs further investigation.
+
+The Summary ends with one fixed line: **`**Zero-sample pairs:**`** — `none.`, or the list of condition-model pairs whose final log completed **zero samples**. This is an execution outcome (typically a `sample_id` that matches nothing after a `-T` argument changed the sample ids, or a dataset filter that selected nothing) and is distinct from a zero *rate*, which the Executor cannot see. It is a separate line so it cannot be lost in the matrix; the same pairs also appear in the status file's `zero_sample_pairs`.
 
 ### Parent Log Directory
 
@@ -149,7 +175,7 @@ Condition-model pairs that did not proceed to full execution because preflight f
 For each excluded pair:
 
 - **`<condition> / <model>`**
-  - **Reason**: `structural` | `all-samples-deterministic-sample-error`
+  - **Reason**: `structural` | `all-samples-deterministic-sample-error` | `pinned-provider-unavailable (routing)`
   - **Final exit code** (for structural): integer
   - **Command**: the exact `uv run inspect eval ...` invocation attempted
   - **Evidence**:
@@ -254,6 +280,7 @@ Counts recap:
 - **Completed with sample errors**: reached `status=sample-level-errors`
 - **Excluded at preflight**: see Preflight Exclusions
 - **Failed during full execution**: reached `status=failed`
+- **Zero samples completed**: pairs named on the Summary's zero-sample line
 
 ### Additional Notes
 
@@ -296,7 +323,7 @@ Preflight (run via `--limit 1` unless `skip_preflight=true`) is a structural pro
 
 Only the last two outcomes cause exclusion. Transient and sample-specific preflight outcomes are informational — they do not gate execution.
 
-After preflight, the `_preflight/` log subdirectory is deleted. Preflight logs must not appear when the Analyst later ingests the experiment's log directory.
+After preflight, the runner moves the `_preflight/` log subdirectory to the run directory's `private/preflight_logs/`. Preflight logs must not appear when the Analyst later ingests the experiment's log directory; they are quarantined rather than deleted so the evidence behind an exclusion survives.
 
 ---
 
@@ -304,7 +331,7 @@ After preflight, the `_preflight/` log subdirectory is deleted. Preflight logs m
 
 **Each invocation is self-contained.** Every delegation from the orchestrator to the Executor is a single-shot interaction: one request, one report, no follow-up within the same invocation. The Executor has no persistent memory across invocations; it rebuilds its understanding of the experiment from the request each time.
 
-**Stdout-only reporting.** The report is written to stdout and captured by the orchestrator, which saves it to `artefacts/executor/report.md`. Errors (from the wrapping CLI, not from eval subprocesses) go to stderr.
+**Stdout-only reporting.** The report is written to stdout. The detached launcher (`scripts/launch_subagent.py`) captures it to the per-invocation path `<artefacts-dir>/executor/report_<tag>_executor_<n>.md`; there is no separate save step. Errors (from the wrapping CLI, not from eval subprocesses) go to stderr, captured alongside.
 
 **Section headings are markdown, and their text is verbatim.** Emit each report section as a markdown heading at the level shown in the Report Format above (`### Condition-Model Execution Matrix`, `#### Structural`, …), using the exact heading text, in the order given. Plain-text section titles are not sufficient: the orchestrator locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read. This is stated explicitly rather than left to be inferred from the formatting of this document.
 

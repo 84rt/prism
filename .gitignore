@@ -8,3 +8,4 @@ __pycache__/
 
 # Per-machine Claude Code overrides (personal, not shared)
 .claude/settings.local.json
+.pytest_cache/
