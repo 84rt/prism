@@ -106,7 +106,7 @@ Write the explanandum in explicit **"X rather than Y"** form during scoping and 
 
 ### The frozen setting
 
-The eval environment and the target model are **fixed at Phase 0 for the whole investigation**. The baseline is measured once at 1c and never re-measured; every variant is a perturbation *of* that frozen baseline, and every rate in the log is a comparison against it. If either the environment or the model changes, the investigation ends and its report says so — a new investigation starts rather than the baseline being re-measured.
+The eval environment and the target model are **fixed at Phase 0 for the whole investigation**. The baseline is measured once at 1c and never re-measured; every variant is a perturbation *of* that frozen baseline, and it anchors every comparison in the log (the comparator convention in 3a says which arm a given contrast is actually drawn against). If either the environment or the model changes, the investigation ends and its report says so — a new investigation starts rather than the baseline being re-measured.
 
 This is stricter than the Orchestrator's negotiable baseline-drift policy, deliberately: a forensic investigation is about one episode in one setting, so there is no moving target to track and nothing to renegotiate.
 
@@ -119,18 +119,26 @@ The Critic must run on a different model family from the Diagnostician, via `sub
 - **Resolve the Critic's model by cost at scoping.** Run `uv run --no-project python scripts/openrouter_endpoints.py <model-id> --prefer cost` over the documented shortlist (cheapest-first at time of writing: `google/gemini-3-pro`, then `openai/gpt-5` — but the rule is *cheapest non-Claude frontier model that can sustain the role*, verified against live pricing rather than this list). Announce the pick with a one-line rationale and record it in the Agreed Scope.
 - Thinking configuration is left to the runner's default, which disables extended thinking for non-Claude models on the OpenRouter route.
 
+### When the Diagnostician shares the target's family
+
+The cross-family rule is enforced for the Critic and has no counterpart for the agent that generates the candidates. When the Diagnostician's own model is the target's family (a Claude Diagnostician investigating a Claude episode), the CoT read runs on priors shared with the model under study — the local-rationality lens in particular will find the model's construal "reasonable" for the same reasons the model did. Record `Diagnostician family = target family` in the Agreed Scope and apply three mitigations: lower the threshold for a second cross-family Critic at iteration 0 (Phase 2); treat the Critic's `### Independent Reading` and its additions as a primary source for the differential-diagnosis sweep rather than a check on yours; and state the shared-family fact in the report's *Candidate origins* section, where it bears directly on whether the leading explanation came from inside or outside the shared priors. Action-mediated behaviours with near-deterministic graders are least exposed; construal-level explanations of reasoning-mediated behaviour are most.
+
 ### Budget defaults
 
-Proposed starting values, all overridable and all provisional until a real run calibrates them:
+Starting values, all overridable, recorded in the Agreed Scope. They are sized for this mode's economics, which a run measures rather than assumes: an eval episode costs cents (≈ $0.03–0.06 in the investigations so far — record the figure from the resample's log header at 1b), a single sub-agent invocation costs dollars, and a round's Analyst and Critic invocations together dominate the spend. The cheap axis is samples; the binding constraints are power and invocation count. So the defaults **favour n over breadth** — fewer, sharper variants at an n that can resolve the effects the round is after, rather than more variants at an n that leaves every ~20pp effect inconclusive, which is how five of six investigations spent their rounds.
 
 | Parameter | Default | Reasoning |
 |---|---|---|
-| Resample *n* (1b) | **30** | Wilson CI ≈ ±17pp at r ≈ 0.4 — enough to pick a regime confidently at the extremes, ambiguous mid-range. Also needs to yield enough clear negatives for the floor check. |
-| Samples per variant (3b) | **30** | Match the baseline, or between-condition CIs are asymmetric for no reason. |
-| Variants per iteration (3a) | **3** (max 5) | Cost per iteration = variants × 30 samples. Three keeps an iteration comparable in cost to the baseline. |
+| Resample *n* (1b) | **100** (50 when an episode is expensive: over ~$0.10, or minutes of sandbox time at the agreed concurrency) | Wilson CI ≈ ±10pp at r ≈ 0.4 (±14pp at n = 50) — picks a regime confidently except very near the 0.20 boundary, and yields enough clear negatives for the floor check. The baseline is one arm of every later contrast, so its half-width caps the precision of all of them; at the old default of 30 (±17pp) nothing under ~25pp could ever resolve. |
+| Samples per variant (3b) | **match the baseline** | Asymmetric n buys asymmetric CIs for no design reason. An arm carried forward for a re-test at power goes to at least 100. |
+| Sizing rule | Newcombe–Wilson half-width on the difference < the smallest effect the round must resolve | At mid-range rates the half-width on a difference is ≈ ±14pp at n = 100 per arm, ≈ ±19pp at 50, ≈ ±25pp at 30. Size n to the effect you need to see, then buy variants with what is left — never the reverse. |
+| Concurrent control (3b) | **1 per round**, matched n, outside `variant_budget` | The unmodified environment re-run alongside the variants: the comparator for the round's contrasts, the drift check on the frozen baseline, and one more identical-condition draw toward the noise floor (3a, *Comparators and the concurrent control*). |
+| Variants per iteration (3a) | **2–3** (max 4) | Plus the concurrent control and any positive control. Two well-separated variants at n = 100 beat four at n = 30. |
+| Noise-floor draws | **≥ 3 identical draws** of the unmodified condition before any sub-large effect is attributed to its edit | The 1c resample plus each round's concurrent control accumulate these at no extra cost; the spread between them is the floor below which an effect is not attributable (3d step 2). |
 | Iteration cap | **4** | Plus the predict-to-test round. |
+| Spend cap and Phase 4 reserve | user-set; reserve ≈ one round's measured cost | Observed through `scripts/spend.py`, which sums the per-invocation `cost.json` sidecars and per-command eval usage into a running total; the stopping rule's budget exit keys to it. The reserve is held back from the first round so that predict-to-test — the strongest evidence form the pipeline defines — is not the round the budget forfeits. |
 
-Record the values used in the Agreed Scope. `model_forensics_principles.md §2` gives the selection discipline (maximise expected discrimination; apply the will-this-change-the-finding gate) and §5 gives the headroom rule for choosing ablation vs amplification, but neither prescribes a sample size — these numbers are this scaffold's own, the principles doc assumes n≈40 per cell, and the divergence is recorded in the Agreed Scope rather than resolved. They are the first thing a real run should recalibrate.
+Record the values used, the measured per-episode cost, and the reserve in the Agreed Scope. `model_forensics_principles.md §2` gives the selection discipline (maximise expected discrimination; apply the will-this-change-the-finding gate) and §5 gives the headroom rule for choosing ablation vs amplification, but neither prescribes a sample size — these numbers are this scaffold's own, calibrated on six investigations, and the divergence from the principles doc's n≈40 per cell is recorded in the Agreed Scope rather than resolved.
 
 ---
 
@@ -161,6 +169,7 @@ Executor invocation with a **single unmodified `baseline` condition** — the or
 - **`sample_id` is required, not optional, whenever the task has more than one sample.** `--epochs` repeats the *whole dataset*: a *k*-sample task at `epochs: 30` produces 30·*k* transcripts, of which only 30 resample the episode — the rest inflate cost *k*-fold and contaminate the pool the Analyst draws negative controls and borderline cases from with scenarios that were never under investigation. The episode's sample id was identified at Phase 0; pass it here.
 - One model: the frozen target model, on its recorded route.
 - `epochs` is the resample mechanism, not `runs_per_condition` (accepted but not applied — the Executor runs once and notes the key). The one case where they genuinely differ: an eval carrying state that survives across samples within a run (a module-level accumulator, a mutated dataset, a caching solver). There, epochs are not independent draws — and that is a **blocker to raise with the user**, not something any override fixes.
+- **Do not read determinism off the task's configuration.** `temperature=0` and `seed` are silently no-ops on Anthropic endpoints and on most routed providers, so a task that declares itself deterministic still yields run-to-run spread — in one investigation, nine draws of the identical unmodified condition at n = 40 ranged 60–90%, and two nominally identical control arms in the same batch differed by 25pp at nominal significance. Determinism is established empirically or not at all: this resample is the first identical-condition draw, and the noise-floor rule (Budget defaults; 3d step 2) needs at least two more before any sub-large effect is attributed to its edit. If the eval's own design leans on determinism (a fixed-seed shuffle, a cached solver), that is a scoping fact to record, not an assumption to inherit.
 
 Save the report to `artefacts/executor/report.md`. Read it as the Orchestrator reads its step 2e — matrix, error taxonomy, termination metadata — and **do not read log contents or scores**. The score blackout binds from here until the Analyst reports.
 
@@ -210,7 +219,7 @@ With a validated grader, read the measured baseline rate — this is the first s
 | Wilson upper bound < 0.20 but rate > 0 | **Amplify** | No headroom to fall; look for what is sufficient, then show the feature was present in the baseline |
 | Rate = 0 across all *n* resamples | **Terminate (1x)** | Behaviour not reproducible |
 
-Record the rate, its Wilson CI, the regime, and one line of reasoning in the log's Baseline block. This baseline is frozen: it is never re-measured, and every later comparison is against it. (The *Designer* receives whatever the current environment's rate is — `environment_rate`, which equals this baseline only in round one or on a fresh copy; see 3a.)
+Record the rate, its Wilson CI, the regime, and one line of reasoning in the log's Baseline block. This baseline is frozen: it is never re-measured. It fixes the regime and describes the episode's setting; within a round, contrasts are drawn against that round's concurrent control where one exists (3a, *Comparators and the concurrent control*), and the frozen baseline is what that control is checked against for drift. (The *Designer* receives whatever the current environment's rate is — `environment_rate`, which equals this baseline only in round one or on a fresh copy; see 3a.)
 
 The mid-range case (CI straddling 0.20) is a judgement call: pick the regime the point rate favours, note the ambiguity, and expect the Designer — which computes its own Wilson interval on the rate it is handed — to flag headroom trouble if it disagrees.
 
@@ -255,9 +264,9 @@ Also apply **negative-case analysis**: for each emerging explanation, deliberate
 
 **Candidates need not be mutually exclusive.** Aim for candidates that are *discriminable*, not necessarily competing: several may be jointly true as parts of one sufficient recipe (`§6`, INUS). Recording them as a partition would be a modelling error — and it invites the collider artefact: because the whole analysis conditions on "the behaviour occurred", genuinely independent causes are pushed into looking like rivals, so apparent competition between candidates is partly an artefact of the conditioning. The resample pool, which contains negatives, is the structural defence.
 
-**Critic invocation** — `candidate_critique` mode, `iteration: 0`, per `critic_interface_contract.md`. Send the transcript paths, the Mapper report path, and the ledger. What to do with the response:
+**Critic invocation** — `candidate_critique` mode, `iteration: 0`, per `critic_interface_contract.md`. Send the transcript paths, the Mapper report path, and the ledger. **One Critic, by default.** A second cross-family Critic — a different non-Claude family, per-model output paths — doubles the gate's cost, and is worth it only when a decision turns on one Critic's judgement of the *leading* or the *must-exclude* candidate: a retirement of either advised and declined, a Phase 4 factor choice you have reason to distrust, or a Diagnostician that shares the target's family (Phase 0). Not as routine redundancy: the one investigation that ran two at iteration 0 got distinct material from both, at twice the gate cost. What to do with the response:
 
-- **Additions** enter the ledger with their `X<n>` ids intact, marking Critic origin, and are ranked on the same footing as the Diagnostician's own. Origins are never overwritten.
+- **Additions** enter the ledger with their `X<n>` ids intact, marking Critic origin, and are ranked on the same footing as the Diagnostician's own. Origins are never overwritten. Before admitting one, compare its signature against every live candidate's, direction for direction on the manipulations this environment permits: the same movements under the same edits is the same candidate, however different the mechanism story. Merge it into the existing entry, keep both origins in the statement, and say so in the log — a duplicate admitted here costs a column in every table from now on. An `X<n>` id certifies that the candidate is genuinely new.
 - **Retirements are considered but not automatic** — the Critic advises, the Diagnostician decides, and a rejected retirement gets a one-line reason in the log.
 - The `### Independent Reading` section is a datum in its own right: the only record of how the episode reads to someone who has not seen the Diagnostician's framing. If it surfaces a pattern no candidate covers, that is a Blind Spot the Critic may not have connected itself.
 
@@ -279,7 +288,7 @@ Each iteration is one pass of 3a → 3b → 3c → 3d. Iteration directories fol
 - **`environment_delta` — required whenever the environment is not a fresh copy of the original.** The Mapper mapped the original; the Designer is instructed to locate every surface in that map. Hand it a derived tree without the delta and it meets a mismatch whose only available readings are "stale map" or "broken environment" — the likely result being the investigation's own manipulation reported as an environment defect, possibly with a Blocker on a sound variant. List what was changed, never what it did: no rates, no outcomes.
 - `variations_tried` — every variation already run, across all rounds and branches, outcomes stripped. Prevents paying for a measurement the investigation already holds.
 - `elimination_targets` — see the value-of-information gate below. Omit unless this round aims to retire a candidate on absence of evidence.
-- `variant_budget` — per the Agreed Scope.
+- `variant_budget` — per the Agreed Scope. The concurrent control and any positive controls sit outside it.
 
 **On reading the report, check the `**Environment:**` Summary line first.** If it reads `original` when a derived environment was supplied, the delta did not arrive and the report's surface locations are untrustworthy — fix the request and re-invoke rather than salvaging.
 
@@ -287,9 +296,15 @@ Each iteration is one pass of 3a → 3b → 3c → 3d. Iteration directories fol
 
 The same gate governs **`elimination_targets`**, at a higher price: each named target obliges the Designer to add a positive-control condition, over and above the budget, so each name costs a run. Name a candidate only when retiring it would **change the leading explanation or move the equivalence-class boundary** the final report will state. A candidate ranked well below the leader, whose retirement would change nothing the report says, is carried in the equivalence class instead — the certifiable output is the best available account with its alternatives named, not a cleared field. Positive controls calibrate the instrument, not the comparison: they sit outside `variant_budget` and outside the discrimination matrix by contract.
 
-**Pre-register the prediction table before launching the Executor** (D1). The Designer returns a `### Discrimination Matrix` — its view of what each candidate predicts. Do not adopt it wholesale: derive your own prediction for each (variant, candidate) cell — ordinal only, `↑` / `↓` / `↔` / `n/a` — and record the table in the log. Where your derivation differs from the Designer's, the disagreement is itself informative and is noted in the Designer Summary block. **This table is written before any eval runs and is never edited afterwards**; 3d scores results against it. If the completed table has no row where two live candidates differ, this round is uninformative — return to design with a different variant set rather than running it (see the stopping rule).
+**Comparators and the concurrent control.** Every round carries one unmodified arm — the *concurrent control* — at the round's n, run alongside the variants and outside `variant_budget`. It does three jobs at once. It is the **comparator** for the round's contrasts: drawing a variant against a control run in the same batch removes the temporal-drift and served-model confounds a days-old baseline carries (in one investigation the control itself drifted from 18% to 12% across rounds and squeezed the headroom of every ablation, so three of four inconclusive rows were inconclusive for that reason rather than because the factor did nothing). It is the **drift check** on the frozen baseline: a concurrent control that does not reproduce the 1c rate within its CI is a finding about the setting, recorded before any variant is scored. And it is one more **identical-condition draw** toward the noise floor (3d step 2). The frozen baseline stays the anchor — the regime, the episode's description, the number the report leads with — but is not the comparator once a concurrent control exists. Each row of the pre-registered table names its comparator in its own column.
 
-**Specify each variant's manipulation check** (D11). For every variant, write the construal property the perturbation is supposed to shift, in observable terms, and pass it to the Analyst at 3c as `behaviour_spec.manipulation_check`. The Designer proposes one per variant; sanity-check rather than adopt — a check that restates the surface edit (*"the deadline sentence is absent"*) is not a manipulation check, because the question is whether the *model's reading* changed, not whether the text did. The test of a good check is that it could come out negative (`perturbation-design-patterns.md §Designing the manipulation check`).
+A row may instead name a **derived arm** as its comparator — a *chained* variant, perturbing an earlier variant rather than the original (two arms that each take a suite with one wrong expected value and change only whether the defect is knowable are perturbations of the one-wrong-value arm, not of the baseline). A chained comparison is valid when all four hold: the derived arm's rate was measured in this investigation, at matched n, under the same grader hash; the diff applies to the derived arm's tree and `environment_delta` was sent; the regime is re-derived from the derived arm's rate, so an ablate-regime investigation may carry amplify-regime chained rows, stated as such; and the comparator column names the arm. Its cost is inherited: the contrast carries the derived arm's CI width, cannot be pooled with baseline-anchored rows, and is reported against the derived arm rather than the episode's setting.
+
+**Pre-register the prediction table before launching the Executor** (D1). The Designer returns a `### Discrimination Matrix` — its view of what each candidate predicts. Do not adopt it wholesale: derive your own prediction for each (variant, candidate) cell — ordinal only, `↑` / `↓` / `↔` / `n/a` — for every candidate in the *tested* tier (3d step 9; carried candidates get no rows), and record the table in the log. Where your derivation differs from the Designer's, the disagreement is itself informative and is noted in the Designer Summary block. **This table is written before any eval runs and is never edited afterwards**; 3d scores results against it. If the completed table has no row where two live candidates differ, this round is uninformative — return to design with a different variant set rather than running it (see the stopping rule).
+
+**Specify each variant's manipulation check** (D11). For every variant, write the construal property the perturbation is supposed to shift, in observable terms, and pass it to the Analyst at 3c as `behaviour_spec.manipulation_check`. The Designer proposes one per variant; sanity-check rather than adopt — a check that restates the surface edit (*"the deadline sentence is absent"*) is not a manipulation check, because the question is whether the *model's reading* changed, not whether the text did. The test of a good check is that it could come out negative (`perturbation-design-patterns.md §Designing the manipulation check`). Write down, with the check, which contrast(s) must hold for it to count as succeeded — 3d step 1's interpretation rule can lean only on what was pre-registered here.
+
+**Check content invariance on register and framing variants.** Where a variant's declared manipulation is *how* something is said — tone, register, persona, urgency, theatricality — rather than *what*, reading the edited file back confirms only that the edit landed where intended. Also list each stake-bearing proposition of the retained content (what is threatened, to whom, how severely, what is at stake) and confirm each survives at unchanged intensity: the same words, or a paraphrase you would defend as neither softer nor stronger. A presence check cannot catch "destroy my marriage" becoming "end my marriage" under a variant that claims only to flatten delivery — in one investigation only the blind Critic did, and a rate drop would have been read as a tone effect when it was a stakes effect. The Critic's diff review is the backstop, not the check.
 
 **Cross-round interactions are yours, not the Designer's.** The Designer's confound declarations scope non-linear interaction to *its own proposed set* — a one-shot agent holding one rate cannot reason about combinations with earlier rounds' variants. When this iteration's environment is a derived variant, ask of each proposed edit: could its effect differ because of what is already applied? The masking rule (3d step 5) is the formal version.
 
@@ -326,7 +341,9 @@ On receipt, run the Orchestrator's step 2h sanity checks (they carry over: arith
 The analytical core. Sub-steps in order:
 
 1. **Check the auxiliaries first** (D11, `model_forensics_principles.md §8`). Before scoring anything against the prediction table, read the manipulation-check verdict and the grader-provenance line. A failed prediction downweights the *conjunction* of candidate + grader validity + manipulation success, so a `failed` or `ambiguous` manipulation check makes that variant's behavioural result **uninterpretable** — not evidence against the candidate that predicted a change. Mark such rows `void (manipulation failed)` and exclude them from step 2's scoring. Blaming a candidate for a failed manipulation is the single easiest way to eliminate a true explanation.
-2. **Score the surviving results against the pre-registered table.** For each cell: hit, miss, or inconclusive (inconclusive when the Newcombe-Wilson CI on the difference straddles zero). Additionally mark whether the outcome was **severe** for that candidate — did at least one rival predict differently? A hit on a cell where every candidate predicted the same thing is not evidence for anything (`§8`).
+
+   *Interpretation versus override.* The Analyst's verdict is computed by a generic rule, blind to what the check was for. You may re-read an `ambiguous` verdict against the check's purpose — but only when that purpose, including which contrasts had to hold, was written in the pre-registration before results; using only the Analyst's reported rates; recording both the label and the re-reading; and narrowing, never rescuing: the verdict may be read as `succeeded` for a pre-registered load-bearing contrast that resolved cleanly while another did not, and never for the contrast a row's prediction turns on when that is the one that straddled zero. A `failed` verdict is never re-read. Anything outside these bounds is an override of an auxiliary, and goes in the log as a recorded deviation, not as scoring.
+2. **Score the surviving results against the pre-registered table.** For each cell: hit, miss, or inconclusive (inconclusive when the Newcombe-Wilson CI on the difference straddles zero), each drawn against the row's named comparator. Then apply the **noise-floor gate**. A resolved interval is a claim about sampling error under a determinism the endpoint may not honour — `seed` and `temperature=0` are no-ops on Anthropic endpoints, served models drift, routers vary — and identical-condition draws of the unmodified environment (the 1c resample plus every concurrent control) are the only measurement of the spread that actually obtains. The **noise floor** is the largest pairwise difference between those draws so far; record it in the Analyst Findings block each round. Once at least three draws exist, a difference inside the floor is scored `inconclusive (within noise floor)` whatever its p, and a newly characterised floor that swallows an earlier round's resolved row reverses the reordering that row caused — the row is re-recorded as `inconclusive (within noise floor)` in this round's Prediction Scoring block and the reversal written into this round's ledger delta, never by editing the earlier entry. Until three draws exist, score as written but tag any hit or miss whose difference is under twice the Newcombe-Wilson half-width `[floor uncharacterised]`: such a row cannot on its own carry an elimination, an eager exit, or a Full Success. An effect inside the floor is reported as *not attributable to its edit*, not as a null; the headline effects of a sound investigation sit well outside it (0/40 against 78% does; 15pp at n = 40 does not). Additionally mark whether the outcome was **severe** for that candidate — did at least one rival predict differently? A hit on a cell where every candidate predicted the same thing is not evidence for anything (`§8`).
 3. **Apply the reordering rule: only severe, pre-registered prediction outcomes reorder the ledger.** An argument for why a candidate still works despite a missed prediction goes in the log as reasoning and does not move it up.
 4. **Tag what each result licenses** (`§5`), in the causal vocabulary rather than loose necessity talk:
    - *Ablation that removes the behaviour* → a lower bound on the **probability of necessity** (PN) for this context.
@@ -336,8 +353,12 @@ The analytical core. Sub-steps in order:
 5. **Apply the masking rule before eliminating on a null** (D10, `§6`). A factor showing no effect in isolation is **not** eliminated — it is re-tested after the dominant factor is ablated. The source literature has the case in hand: a variable with no main effect (65% → 59%) produced a 16pp drop once a second cue was removed. Record the re-test as a carried-forward obligation if budget defers it.
 6. **Eliminate on the INUS rule, not the pairwise one** (D9), and only on *disconfirming* evidence (D14). A candidate is retired only when it is neither necessary on its own *nor* a member of any surviving sufficient recipe. Before eliminating, enumerate the confounds that could produce the disconfirming result without the candidate being false; if a follow-up could settle it and budget allows, run that first. **Absence of supporting evidence never retires a candidate** — unproven is not disproved, and rejecting the unproven is self-sealing because you then stop looking for what would have supported it. To eliminate on a negative result, the positive control from 3a (D13) must have shown the test would have fired had the candidate been true; without it, mark the candidate `live (untested)` and move on.
 7. **Harvest new candidates from the open-ended scan** (D8). Read `### Behaviours not captured by the grader`. A behaviour the grader does not model is the most common route to an explanation that fits the episode better than anything currently in the ledger (`§9`). Any candidate this yields enters with origin `analyst-surfaced iter N`. Also read `### Eval-awareness split`: a graded rate that differs between eval-aware and non-aware transcripts, or an awareness rate that moved with the perturbation, is a confound to resolve before trusting the round's comparisons (`§1`, `§12`).
-8. **Close with a second Critic `candidate_critique` invocation**, now carrying `evidence_summary` — what the round showed, stated mechanistically (rates and directions, never conclusions), plus this iteration's number and the updated ledger.
-9. **Update `CANDIDATES.md` and write the iteration's ledger delta into the log** per §State Management. The delta must be complete enough to replay.
+8. **Close with a second Critic `candidate_critique` invocation**, now carrying `evidence_summary` — what the round showed, stated mechanistically (rates and directions, never conclusions), plus this iteration's number and the updated ledger. Its additions pass the same signature comparison as at Phase 2 before any `X<n>` id is assigned.
+9. **Triage the ledger.** The admission bar keeps the ledger honest; this keeps it affordable. Every generator adds candidates and only severe outcomes remove them, at roughly one per round, so an untriaged ledger grows monotonically — 12 → 25 live, with prediction tables twenty-two columns wide, in one investigation — and every Critic critique and every per-cell derivation grows with it. Three moves, in order:
+   - **Merge by signature.** Two live candidates that predict the same direction on every manipulation available in this environment are one candidate, however different their mechanism stories: merge, keep both origins in the statement, record the merge in the delta.
+   - **Inertness sweep.** A candidate for which no *unrun* manipulation in the Mapper's inventory yields a prediction some rival disputes is `inert` — parked, unranked, absent from the table, revived the moment a variant makes it testable. A candidate whose every separator *has* run and left it unmoved is not inert; it is a member of the equivalence class.
+   - **Assign tiers.** The **tested** tier is the top-*k* ranked live candidates (default k = 6, agreed at Phase 0), plus the must-exclude candidate always, plus any candidate next round's variants directly target. Every other live candidate is **carried**: it keeps its entry and its rank and is sent to the Critic (which must see the whole ledger to avoid re-proposing it), but carries no prediction rows and is not sent to the Designer. A carried candidate cannot be reordered or eliminated on evidence it was not predicted on — that is the price of the tier, and the right one: the certifiable output is the best available account with its alternatives named, and a candidate ranked ninth whose retirement would change nothing the report says is carried in the equivalence class rather than paid for every round. Promotion is by rank, or by relevance — include it in the Designer's `candidates` for a round that targets it; demotion is by rank only; both are recorded in the delta.
+10. **Update `CANDIDATES.md` and write the iteration's ledger delta into the log** per §State Management. The delta must be complete enough to replay.
 
 ### Stopping rule
 
@@ -345,15 +366,21 @@ Stated as an explicit procedure (D6, D12):
 
 - **Quiet exit:** terminate the loop when two *consecutive informative* iterations produce no reordering and no elimination. An iteration is informative iff its pre-registered table contained at least one row where two live candidates differed **and** at least one such row produced a non-inconclusive, non-void outcome. An uninformative iteration does not reset the count and does not count toward it — concluding on a quiet iteration that was quiet because its experiments were uninformative is Anti-Pattern #10.
 - **Eager exit:** leave the loop early when the leading candidate has at least two confirmed pre-registered predictions that discriminated it from the current runner-up, the runner-up has at least one disconfirmed prediction, and no live candidate is inert. *(This threshold is a proposal, recorded as provisional in the plan; recalibrate after the first real run.)*
-- **Budget exit:** iteration cap or spend cap reached. Report the equivalence class as it stands rather than forcing a verdict (`§8`).
+- **Budget exit:** iteration cap reached, or the next round would cross the spend cap. **The spend half fires as a decision, never as an interruption.** Before designing each round, and again before Phase 4, run `scripts/spend.py` and write the running total against the cap into the `### Decision` block, with a projection for the round ahead: arms × n × the measured per-episode cost, plus the round's sub-agent invocations at their measured per-invocation cost (a Designer, a Critic twice, an Analyst, an Executor). If total + projection exceeds cap − reserve, degrade the round first, in this order — drop variants (never the concurrent control, never a positive control an elimination needs), then any optional Critic redundancy, then n down to the sizing rule's minimum — and if it still does not fit, the budget exit fires *now*, recorded as such. A run stopped from outside mid-round has not exited on budget; it has been interrupted, and its executed-but-ungraded arms are handled as deferred scoring against the immutable table, which remains a genuine test for as long as the table is unedited. Report the equivalence class as it stands rather than forcing a verdict (`§8`).
 
-Every exit proceeds to Phase 4 before Phase 5, budget permitting; a budget exit with nothing left to spend goes straight to Phase 5 as a Constrained Termination.
+**Termination precondition — the must-exclude candidate.** No exit fires until the dangerous candidate in the must-exclude slot has either had a **clean test** — a pre-registered row on a variant that targets its own signature (the ablation of the cue it names, or its stake amplification), with a succeeded manipulation check and, where the outcome was a null, a positive control — or is explicitly recorded as **carried untested-dangerous**. From iteration 1 on, each 3a asks whether this round gives it that test and, if not, which round will; a design whose every variant is an addition chosen to separate the cue-specific accounts never tests it, and two full rounds went that way in one investigation while the candidate accrued misses on rows that did not bear on it. The eager exit does not fire while it is untested; the quiet and budget exits may, but only by carrying the untested-dangerous line into the report's primary finding.
+
+Every exit proceeds to Phase 4 before Phase 5. The Phase 4 reserve agreed at Phase 0 is what makes "budget permitting" normally true — it is spent on nothing else. A budget exit that has already consumed the reserve, or an interruption that leaves nothing to spend, goes straight to Phase 5 as a Constrained Termination.
 
 ---
 
 ## Phase 4: Predict to Test
 
-The strongest available evidence is a confirmed prediction on an untested factor (`model_forensics_principles.md §1`, `§8`). One round:
+The strongest available evidence is a confirmed prediction on an untested factor (`model_forensics_principles.md §1`, `§8`). One round.
+
+**What it is for.** Phase 3 discriminates among candidates on factors chosen to split them, so the leading account has been *fitted* to those rows. Phase 4 makes that account, as stated, risk something on a factor nobody chose for it — and both outcomes are informative. Confirmed, it is the strongest single evidence the pipeline produces (a single-digit change to one expected output moving 40% → 88%; a progress line removed with a validated check showing the model stopped tracking it while the rate held). Failed, it localises what the statement is missing: in one investigation the leader survived four confirmed predictions and lost the fifth to a candidate ranked thirteenth; in another both derivations agreed and both were wrong, which forced "explicit licence, not absence of prohibition". A failed Phase 4 that downgrades Full Success to Constrained is the pipeline working, and the miss is scored as written.
+
+**When it beats another Phase 3 round.** Run Phase 4 when the leader holds at least two severe confirmed predictions and the remaining Phase 3 separators would only move the equivalence-class boundary among non-leading candidates — and record the trade: which separator was not run, and what the report's equivalence class costs for it. Run another Phase 3 round instead when the lead is tied (a prediction from "the leading explanation" that is three candidates is underspecified before it starts), when the must-exclude candidate lacks its clean test, or when a masking re-test is outstanding. After a mixed or failed Phase 4, return to Phase 3 only if the successor hypothesis can be tested by a discriminating round of the current shape; if it needs a different design (a dose-response where the run has binaries), name it as untested in the report and stop. This guidance governs the *choice* to leave Phase 3; once an exit has fired, Phase 4 runs on the reserve regardless, and a tied lead is resolved by predicting from the top-ranked candidate alone, stated as such.
 
 1. **Critic invocation** — `prediction` mode: the full investigation log path, the leading explanation (statement + discriminating signature as JSON), and the untested surfaces (the Mapper's inventory minus everything varied so far). **Withhold the Diagnostician's own prediction** — the two derivations must be independent.
 2. **Independently derive your own prediction for the Critic's chosen factor before reading its prediction**, and record both in the log, in that order.
@@ -362,7 +389,9 @@ The strongest available evidence is a confirmed prediction on an untested factor
    - *Agree, test run, prediction correct* → the explanation has predictive power on an untested factor. Record as the strongest single piece of evidence in the investigation.
    - *Agree, test run, prediction incorrect* → evidence against. If budget remains, return to Phase 3 with the failed prediction recorded explicitly in the log as new evidence. If not, characterise how the prediction differed from what was observed and terminate with a Constrained Termination.
 
-The test itself runs through the ordinary 3a–3c machinery (one variant, pre-registered, manipulation-checked, same grader).
+The test itself runs through the ordinary 3a–3c machinery (one variant, pre-registered, manipulation-checked, same grader, concurrent control).
+
+**Without a Critic.** The factor's independence from your current fit is the point, so the fallback order is: a second cross-family route (`subagent_invocation.md §subagent_route`); then a **pre-committed rule** written into the Agreed Scope at Phase 0, before any evidence exists — by default the highest-listed surface in the Mapper's inventory not yet varied — with the round labelled `Phase 4 (factor by pre-committed rule)`; and last, a self-chosen factor, labelled `substitute for Phase 4`, which the report does not present as a discharged predict-to-test. In every fallback the two-derivation agreement check is lost; you still write your prediction and its falsifier before anything runs.
 
 ---
 
@@ -372,7 +401,7 @@ Complete the `INVESTIGATION-LOG.md` (every iteration's blocks filled, final deci
 
 Required report sections:
 
-1. **Primary finding**, in exactly one of three forms, named as such: *Early Termination* (behaviour not reproducible — 1x), *Constrained Termination* (no compelling explanation within budget — say what the leading candidate was and what evidence was missing), *Full Success* (explanation X, with evidence).
+1. **Primary finding**, in exactly one of three forms, named as such: *Early Termination* (behaviour not reproducible — 1x), *Constrained Termination* (no compelling explanation within budget — say what the leading candidate was and what evidence was missing), *Full Success* (explanation X, with evidence). In the same paragraph, the **must-exclude candidate's status**: eliminated (by which row, with which positive control), survived its clean test (in which case no benign Full Success is claimed), or *carried untested-dangerous*.
 2. **The explanation and its discriminating signature**, stated against the **contrast class** fixed at Phase 0 ("X rather than Y"). An explanation that does not name its contrast is underspecified.
 3. **Evidence table** — per iteration: variant, pre-registered predictions, observed rates with CIs, manipulation-check verdict, severity, PN/PS tag, outcome. Void rows appear as void.
 4. **What the evidence licenses** (`§5`) — the causal-strength statement, kept honest: ablations give lower bounds on necessity, amplifications give sufficiency, and both are bounds rather than point estimates absent a monotonicity argument. Flag the **token-vs-type inference** explicitly: every instrument produced population rates, while the explanandum is one episode, so the single-episode claim is an inference from type-level evidence and is labelled as such.
@@ -417,6 +446,7 @@ State lives in **two** files, and the split is deliberate. A full ledger entry r
 - *Evidence against*: <same>
 - *Confounds not yet excluded*: <list, or "none">
 - *Recipe membership*: <standalone | part of recipe R1 with C3>
+- *Tier*: <tested | carried> — <by rank | must-exclude slot | targeted this round>
 
 ## Live but untested
 <candidates no experiment has yet borne on, and candidates for which no
@@ -449,7 +479,9 @@ variant may make them testable. Not rankable.>
 - Eval environment: <path> — FROZEN for this investigation
 - Models: <list> — FROZEN  |  Model routes: <per model, as Orchestrator>
 - Critic model + route: <model, family, route, and cost rationale for the pick>
-- Budget: <iteration cap, resample n, samples/variant, variants/iteration, spend cap>
+- Budget: <iteration cap, resample n, samples/variant, variants/iteration, tested-tier k, spend cap, Phase 4 reserve>
+- Cost basis: <$/episode from the 1b log header; $/invocation per sub-agent role from cost.json once measured>
+- Diagnostician family = target family? <no | yes — mitigations per Phase 0>  |  Phase 4 pre-committed factor rule: <e.g. "highest-listed unvaried Mapper surface">
 - User-supplied leads: <verbatim, marked "no special status">
 
 ## Phase 1: Initial Scoping
@@ -473,14 +505,15 @@ variant may make them testable. Not rankable.>
 
 ## Iteration N
 ### Pre-registered Predictions
-| Variant | Kind | C1 | C2 | C3 | X1 | Separates |
-|---|---|---|---|---|---|---|
-| `no_deadline` | binary | ↔ | ↓ | ↓↓ | ↔ | C1/X1 vs C2/C3 |
-*(Written before execution. Never edited. ↑ up, ↓ down, ↔ unchanged, n/a no commitment.)*
+| Variant | Kind | Comparator | C1 | C2 | C3 | X1 | Separates |
+|---|---|---|---|---|---|---|---|
+| `no_deadline` | binary | concurrent control | ↔ | ↓ | ↓↓ | ↔ | C1/X1 vs C2/C3 |
+*(Written before execution. Never edited. ↑ up, ↓ down, ↔ unchanged, n/a no commitment. Tested tier only; carried this round: <ids>.)*
 ### Designer Summary
 - Environment sent: <original | derived (delta names)>  |  Environment line acknowledged: <original | derived>
 - Variants proposed: <count>  |  Off-regime: <names or "none">  |  Positive controls: <n, targets>  |  Blockers: <summary or "none">
 - Where my derivation differed from the Designer's matrix: <list, or "nowhere">
+- Manipulation checks: <variant → construct; load-bearing contrast(s)>
 ### Critic — Diff Review
 - Confounds raised: <summary>  |  Inferred purpose landed? <yes/no>
 ### Executor Results
@@ -490,7 +523,9 @@ variant may make them testable. Not rankable.>
 - Grader: loaded from <grader_dir>, hash <hash> (unchanged? yes/no)
 - Manipulation check per variant: <succeeded | failed | ambiguous>, with rates
 - Per-variant behaviour rates: <table with Wilson CIs and floor/ceiling markers>
-- Between-condition differences: <Newcombe-Wilson CIs, Fisher's exact p>
+- Concurrent control: <rate> vs frozen baseline <rate> — drift? <no | yes: …>
+- Identical-condition draws so far: <k> — <rates>; noise floor: <max pairwise difference, or "uncharacterised (k < 3)">
+- Between-condition differences: <Newcombe-Wilson CIs, Fisher's exact p, against each row's named comparator>
 - Eval-aware / simulation-aware rates: <per condition; graded rate split by awareness>
 - Behaviours not captured by the grader: <summary, or "none surfaced">
 ### Prediction Scoring
@@ -498,7 +533,7 @@ variant may make them testable. Not rankable.>
 |---|---|---|---|---|---|
 | `no_deadline` | C2 | ↓ | 41%→39%, CI [−9,+13] | yes (C1 said ↔) | miss |
 | `no_deadline` | C3 | ↓↓ | — | — | void (manipulation failed) |
-*(Void rows are excluded from ledger updates — see 3d step 1.)*
+*(Void rows are excluded from ledger updates — see 3d step 1. Other outcome tags: `hit [floor uncharacterised]`, `inconclusive (within noise floor)` — see 3d step 2.)*
 ### Critic — Candidate Critique
 - Blind spots raised: <summary>  |  Candidates added: <ids>  |  Retirements advised: <ids, and whether accepted with reason>
 ### Ledger Delta
@@ -507,11 +542,16 @@ variant may make them testable. Not rankable.>
 - Eliminated: `C4` — by <severe outcome>; confounds considered: <list>
 - Added: `X2` (origin: Critic iter N) — <statement, signature>
 - Recipes changed: `R1 = C1 ∧ C3` added — <evidence>
+- Merged: `X5 → C2` — <same signature: which manipulations, which directions>; origins retained
+- Tier changes: `C7: tested → carried` (rank) · `X2: carried → tested` (targeted next round) · `C9 → inert` (no unrun separator)
 - Carried-forward obligations: <e.g. "re-test C5 after ablating the dominant factor (masking)">
 - Unchanged: <ids> — <one line why the evidence didn't touch them>
+### Deviation *(only when a component was substituted this iteration)*
+- Component: <role>  |  Substitute: <model / route / runner / none — paused>  |  Lost: <what>  |  Continuity evidence: <e.g. 1c pool re-graded at 84%, hash unchanged>
 ### Iteration Informative?
 - <yes | no> — <did any row separate two live candidates severely, and did it resolve?>
 ### Decision
+- Spend: <running total from scripts/spend.py> / <cap> (reserve <r>)  |  Next-round projection: <x> — <fits | degraded to … | does not fit>
 - <continue | eager exit | budget exit | quiet exit> — <reasoning>
 ```
 
@@ -530,8 +570,17 @@ Update the log incrementally as each block becomes fillable, exactly as the Orch
 
 `orchestrator_responsibilities.md §Sub-Agent Failure Handling` carries over in full — triage transient vs deterministic, keep the sub-agent in the loop, the recovery preference order, quarantine rather than delete. Two mode-specific notes:
 
-- **The Analyst bypass rule is unchanged and binds harder here.** The Diagnostician may read transcripts for candidate generation, but *measuring rates* is the Analyst's alone: grading transcripts yourself, with the candidate ledger in your head, is contaminated by construction. If the Analyst fails, work around within the pipeline or escalate.
-- **A Critic failure is a gate failure, not a degradation.** Running an iteration without the Critic's critique, or with a same-family stand-in, silently removes the one decorrelated component. Prefer switching the Critic's model within the non-Claude shortlist; if no cross-family route works, pause and escalate rather than proceeding without it.
+- **The Analyst bypass rule is unchanged and binds harder here.** The Diagnostician may read transcripts for candidate generation, but *measuring rates* is the Analyst's alone: grading transcripts yourself, with the candidate ledger in your head, is contaminated by construction. If the Analyst fails, work around within the pipeline or escalate; *running* the frozen, hash-verified grader is the one sanctioned exception (degraded-mode policy below), and building anything is not.
+- **A Critic failure is a gate failure, not a degradation.** Running an iteration without the Critic's critique, or with a same-family stand-in, silently removes the one decorrelated component. Prefer switching the Critic's model within the non-Claude shortlist; if no cross-family route works, the degraded-mode policy below says what may continue and what must pause.
+
+### Degraded-mode policy
+
+"Run to conclusion" governs decisions inside an intact pipeline; a lost component is a fork the autonomy agreement did not cover, and the two rules have conflicted whenever a credential cap took a gate agent mid-run. This resolves it by component. Every substitution is recorded in a `### Deviation` block in the log (component, substitute, what is lost, continuity evidence) and restated in the report's Limitations; none is silent.
+
+- **Substitutable, no pause.** The model or route any sub-agent runs on — including a cross-family swap of the Analyst *agent* — provided the frozen grader is re-run on the 1c pool under the new configuration and reproduces its rate before any new number is trusted (four re-grades across two families returning 84% each time is what that evidence looks like). The route failover in `subagent_invocation.md §subagent_route`, per role, recorded. The Executor, replaced by the sanctioned batch runner (`scripts/execute_evals.py`), which is score-blind by construction.
+- **Substitutable with a labelled substitute; the round is downgraded.** Designer lost → variants designed by the Diagnostician with self-declared confounds, the round marked *reduced independence*. Analyst lost with a persisted, hash-verified grader → the grader may be *run* (hash checked before and after every scan; the 1c populations must reproduce) but nothing new may be built: manipulation checks fall back to deterministic proxies marked `[provisional]` — written into the pre-registration at 3a alongside the Designer's check, never built after the arms have run, since voiding a row is not evidence-neutral — used only to void rows, and there is no open-ended scan, so no analyst-surfaced candidates that round. Critic `diff_review` lost → the round runs unreviewed and says so.
+- **Pause-forcing.** The Critic at a gate that *decides*: a round whose design the Critic already reviewed may still be executed and scored — an immutable, pre-registered experiment is not wasted by pausing after it — but no elimination is finalised, no candidate retired, and no Full Success declared on evidence from a Critic-less round until a Critic has critiqued the resulting ledger; hold them as `pending critique`. Phase 4 factor selection follows its own fallback. The Analyst with no persisted grader (1c cannot be substituted). The target model or the environment (the frozen setting: the investigation ends).
+- **Deferral is the cheap option, and often the right one.** With the table immutable, leaving a round's arms ungraded until the component returns costs nothing in validity — one investigation graded 270 episodes days after they ran, against the frozen table, and the concurrent control reproduced the baseline. Prefer it to any substitute that would weaken the report.
 
 ---
 
@@ -559,3 +608,7 @@ Ways a competent investigation goes wrong. The first eleven are structural; the 
 18. **Premature closure on the first plausible explanation** — the most-documented diagnostic error there is. The Critic and the multi-lens generation step exist against it; skipping either because the answer "seems obvious" is the failure, not a shortcut past it.
 19. **Over-attributing disposition from a single act.** Traits predict aggregates well and single acts poorly. One episode licenses a claim about what this context elicited, not about what the model is like.
 20. **Letting aggregate rates silence the transcript reading.** If the numbers say nothing changed and the transcripts read very differently, that conflict is a finding to chase, not noise to round off.
+21. **Trusting a sub-noise-floor effect because its CI excluded zero.** A resolved interval assumes a determinism the endpoint may not honour; identical draws of the unmodified condition are the only measure of the spread that actually obtains. An effect inside that spread is "not attributable to its edit", however small its p.
+22. **Carrying the ledger flat.** Predicting every cell for every live candidate every round buys derivation, Critic and table cost for candidates whose retirement would change nothing the report says. Merge by signature, park the inert, tier the rest.
+23. **Continuing through a lost gate as if nothing changed.** A missing Critic, Designer or Analyst is a recorded deviation with a stated substitute and a stated loss — or a pause. Never an unlabelled round whose report reads as intact.
+24. **Terminating with the must-exclude candidate never cleanly tested, unsaid.** Misses on rows that do not target its signature are not a test. Either build the test or write "carried untested-dangerous" into the primary finding.

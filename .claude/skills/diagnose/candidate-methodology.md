@@ -11,6 +11,8 @@ Every ledger entry has four load-bearing parts:
 - **Origin** — where it came from: `CoT read iter 0`, `user-supplied`, `Critic iter N`, `analyst-surfaced iter N`, `evidence-suggested iter N`. Never overwritten.
 - **Status** — `live` (ranked), `live (untested)`, `inert`, or `eliminated`.
 
+Live candidates additionally carry a **tier** — `tested` (in this round's prediction table) or `carried` (listed, ranked, critiqued, but not predicted on) — assigned initially at the Phase 2 ranking and thereafter at 3d step 9, orthogonal to status. See *Ledger economics* below.
+
 **Worked example 1** (mundane, admissible):
 
 ```markdown
@@ -84,6 +86,8 @@ Two candidates with the same discriminating signature are one candidate. Before 
 
 How to tell whether a distinction is real: ask what edit the two statements *disagree* about. If every answer is "none we can run", the distinction is metaphysics for this investigation, and the honest form is the merged candidate plus an equivalence-class entry in the final report naming the manipulation that was missing (`§9`).
 
+The comparison runs again every time a candidate is proposed — by the Critic, by the open-ended scan, by evidence — *before* an id is assigned, and it is direction-for-direction on the available manipulations, not story-for-story: two statements that narrate different mechanisms but would move the same way under every edit this environment permits are one candidate here. A merged entry keeps both origins in its statement. The strictness is deliberate — a duplicate admitted at Critic time costs a column in every prediction table and a paragraph in every critique from then on.
+
 ## The ACH reordering rules
 
 The ledger is a ledger, not an oracle (`§2` — no arithmetic over the matrix is the conclusion):
@@ -92,7 +96,15 @@ The ledger is a ledger, not an oracle (`§2` — no arithmetic over the matrix i
 - **Diagnosticity is what counts.** Evidence consistent with every live candidate has no value regardless of volume; rank by what is *inconsistent* with each candidate.
 - **Only severe, pre-registered outcomes move ranks** — severe meaning at least one rival predicted differently (D12). Arguments go in the log as reasoning and move nothing.
 - **Elimination requires confound enumeration first**, disconfirming evidence always, and — when the evidence is an absence — a positive control showing the test would have fired (D13, D14). Unproven is not disproved; a candidate lacking support stays `live (untested)`.
-- **A candidate predicting nothing for any available manipulation is `inert`** — parked, not ranked, not eliminated; a later variant may make it testable (`§8`).
+- **A candidate predicting nothing for any available manipulation is `inert`** — parked, not ranked, not eliminated; a later variant may make it testable (`§8`). The sweep runs every round over the *unrun* manipulations: a candidate whose every separator has already run and left it unmoved is not inert but a member of the equivalence class.
+
+## Ledger economics
+
+Generation outruns elimination structurally — four generators add, and only severe pre-registered outcomes remove, at roughly one per round — and the cost of a round scales with the ledger: every live candidate is a column in the prediction table, a derivation per cell, and a paragraph in every Critic critique. Left alone, ledgers of 12 grow to 18–25 with most candidates never resolved. Three disciplines, applied at 3d step 9 of `diagnostician_responsibilities.md`, keep the ledger affordable without lowering the admission bar:
+
+- **Merge by signature**, strictly, at every admission (above).
+- **Sweep for inertness** every round (above).
+- **Tier the live candidates.** The *tested* tier — the top-*k* by rank (default k = 6, agreed at Phase 0), the must-exclude candidate always, and anything a round's variants directly target — carries full prediction rows. The rest are *carried*: still live, still ranked, still sent to the Critic, but with no rows and not sent to the Designer. A carried candidate cannot move on evidence it was not predicted on; it is promoted by rank or by being targeted, and demoted by rank only. The trade is explicit: the report's certifiable output is the best account with its alternatives named, and a candidate whose retirement would change nothing the report says belongs in the equivalence class, not in every table.
 
 ## Necessary vs sufficient
 
