@@ -80,7 +80,12 @@ def test_launch_persists_request_names_per_invocation_and_records_exit(tmp_path)
 def test_launch_cli_round_trip_and_wait_exit_codes(tmp_path):
     inv = tmp_path / "investigations" / "demo"
     req = make_request(tmp_path)
-    entry = stub_entry(tmp_path, sleep=2.0)
+    # The stub must still be running when the first `wait --timeout 0.5`
+    # subprocess checks it. 2s was too tight once earlier tests leave detached
+    # workers loading the host (intermittent failures after the Wave 1 merges);
+    # 10s keeps the window wide without weakening the assertion. The second
+    # wait (timeout 60) still covers the stub's full run.
+    entry = stub_entry(tmp_path, sleep=10.0)
     r = ls.launch("executor", req, str(inv), "00_resample", artefacts_dir=str(inv / "iterations" / "00_resample" / "artefacts"), entry=entry)
     assert r["report"].endswith("iterations/00_resample/artefacts/executor/report_00_resample_executor_1.md")
     script = str(ROOT / "scripts" / "launch_subagent.py")
