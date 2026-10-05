@@ -162,9 +162,11 @@ link_file() {
 echo "Creating symlinks..."
 
 # scripts
+link_file "scripts/dump_transcripts.py"
 link_file "scripts/execute_evals.py"
 link_file "scripts/launch_subagent.py"
 link_file "scripts/spend.py"
+link_file "scripts/lint_log.py"
 link_file "scripts/openrouter_endpoints.py"
 link_file "scripts/ledger_to_json.py"
 link_file "scripts/check_report.py"
@@ -247,9 +249,11 @@ GITIGNORE_ENTRIES=(
     ""
     "# $SCAFFOLD_NAME scaffold (symlinks managed by $SCAFFOLD_NAME/install.sh)"
     "subagents/"
+    "scripts/dump_transcripts.py"
     "scripts/execute_evals.py"
     "scripts/launch_subagent.py"
     "scripts/spend.py"
+    "scripts/lint_log.py"
     "scripts/openrouter_endpoints.py"
     "scripts/ledger_to_json.py"
     "scripts/check_report.py"

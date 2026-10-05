@@ -472,6 +472,15 @@ variant may make them testable. Not rankable.>
 
 ```markdown
 # Investigation Log: <Investigation Name>
+<!-- Append-only discipline. One block per heading, written once, under the
+     `## Iteration N` / `## Phase N` it belongs to. Material that arrives late
+     (a check specified after its round closed, a re-run, a correction) goes
+     under the *current* heading with a one-line pointer from where it belongs
+     — never a pasted copy, never a second heading of the same name. Before
+     each Decision block, run
+     `uv run --no-project python scripts/lint_log.py INVESTIGATION-LOG.md`
+     (duplicate headings, verbatim duplicate blocks, iteration-N sections
+     stranded under another iteration or Phase 4/5) and fix by appending. -->
 
 ## Agreed Scope
 - Explanandum: <the behaviour, in "X rather than Y" contrast form>
