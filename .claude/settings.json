@@ -134,6 +134,8 @@
       "Bash(uv run python scripts/spend.py *)",
       "Bash(uv run --no-project python scripts/spend.py *)",
       "Bash(uv run --with claude-agent-sdk --with python-dotenv python subagents/*)",
+      "Bash(uv run --no-project python scripts/ledger_to_json.py *)",
+      "Bash(uv run --no-project python scripts/check_report.py *)",
       "Bash(uv pip *)",
       "Bash(uv --version)"
     ],

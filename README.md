@@ -147,7 +147,9 @@ prism/
 │   ├── execute_evals.py           # Eval batch runner (detached, score-free)
 │   ├── launch_subagent.py         # Detached sub-agent launcher + receipts
 │   ├── spend.py                   # Sums cost sidecars + eval token usage
-│   └── openrouter_endpoints.py    # Provider enumeration + pin selection
+│   ├── openrouter_endpoints.py    # Provider enumeration + pin selection
+│   ├── ledger_to_json.py          # CANDIDATES.md -> Designer/Critic candidates JSON
+│   └── check_report.py            # Sub-agent report conformance check (headings, signatures)
 ├── docs/
 │   ├── scaffold-diagram.png       # Orchestrator architecture diagram
 │   └── model-forensics-diagram.png # Diagnostician pipeline diagram

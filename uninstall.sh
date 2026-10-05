@@ -111,6 +111,8 @@ unlink_file "scripts/execute_evals.py"
 unlink_file "scripts/launch_subagent.py"
 unlink_file "scripts/spend.py"
 unlink_file "scripts/openrouter_endpoints.py"
+unlink_file "scripts/ledger_to_json.py"
+unlink_file "scripts/check_report.py"
 
 # subagents
 unlink_file "subagents/__init__.py"

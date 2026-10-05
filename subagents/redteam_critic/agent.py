@@ -1,6 +1,7 @@
 """Red-Teaming Critic agent — prompt building and config."""
 
 import json
+import os
 from typing import Any
 
 from subagents.redteam_critic.system_prompt import SYSTEM_PROMPT
@@ -10,6 +11,48 @@ ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
 DISALLOWED_TOOLS = ["Edit", "Write", "Bash", "WebSearch", "WebFetch"]
 
 VALID_MODES = ("candidate_critique", "diff_review", "prediction")
+
+# The contract's absolute path, resolved from the scaffold root rather than
+# the working directory. In an installed target this module is reached
+# through a gitignored symlink; `realpath` follows it back to the scaffold
+# checkout, where the contract always exists, so the path injected into the
+# prompt is valid whatever `--cwd` the Critic was launched with. A
+# cwd-relative path failed twice in one run (the agent searched for it under
+# the investigation directory, and searches skip gitignored symlinks).
+# TODO(wave 3): the same injection belongs in all six sub-agents.
+_SCAFFOLD_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+)
+CONTRACT_PATH = os.path.join(
+    _SCAFFOLD_ROOT, ".claude", "docs", "contracts", "critic_interface_contract.md"
+)
+
+# The report headings of each mode, verbatim and in order, as fixed by
+# `critic_interface_contract.md §Report Format`. Rendered into every request
+# as a checklist so a non-Claude model has the exact strings in front of it,
+# and duplicated in `scripts/check_report.py`, which verifies the saved
+# report (a test asserts the two copies agree).
+REPORT_HEADINGS: dict[str, tuple[str, ...]] = {
+    "candidate_critique": (
+        "Independent Reading",
+        "Blind Spots",
+        "Assumption Audit",
+        "Proposed Additional Candidates",
+        "Candidates I Would Retire",
+    ),
+    "diff_review": (
+        "Summary",
+        "Per-Diff Analysis",
+        "Cross-Diff Analysis",
+        "Inferred Purpose",
+    ),
+    "prediction": (
+        "Chosen Factor",
+        "Prediction",
+        "Reasoning",
+        "What Would Falsify This",
+    ),
+}
 
 # Fields each mode requires beyond `mode` itself. Mode-conditional
 # requirements cannot be expressed in AgentCLIConfig.required_fields, which
@@ -90,8 +133,9 @@ def _build_prompt(data: dict[str, Any]) -> str:
     Raises
     ------
     RuntimeError
-        If ``mode`` is not one of ``VALID_MODES``, or if a field required by
-        the active mode is absent. Mode-conditional requirements cannot be
+        If ``mode`` is not one of ``VALID_MODES``, if a field required by
+        the active mode is absent, or if the contract file is not where the
+        scaffold root says it is. Mode-conditional requirements cannot be
         expressed in ``AgentCLIConfig.required_fields``, so they are checked
         here and surfaced as an agent error (exit code 2) by ``run_cli``.
     """
@@ -105,9 +149,22 @@ def _build_prompt(data: dict[str, Any]) -> str:
         if field not in data:
             raise RuntimeError(f"mode {mode!r} requires field: {field}")
 
+    # A Critic that cannot find its contract fails as a gate, not as a
+    # degradation, so a missing contract is an agent error before any spend.
+    if not os.path.isfile(CONTRACT_PATH):
+        raise RuntimeError(f"Critic contract not found at {CONTRACT_PATH}")
+
     # The active mode is stated first so the agent can select the right
-    # section of its system prompt before reading anything else.
-    sections = [f"## Active Mode\n\n`{mode}`"]
+    # section of its system prompt before reading anything else; the
+    # contract's absolute path follows so the read-first instruction in the
+    # system prompt has a path that resolves from any working directory.
+    sections = [
+        f"## Active Mode\n\n`{mode}`",
+        "## Contract\n\n"
+        f"Read `{CONTRACT_PATH}` with a direct Read of that exact absolute path "
+        "before doing anything else. Do not search for it and do not read a "
+        "relative path; the file is where this path says it is.",
+    ]
 
     if mode == "candidate_critique":
         # Ordering is load-bearing, not cosmetic: the transcripts are listed
@@ -125,6 +182,19 @@ def _build_prompt(data: dict[str, Any]) -> str:
         sections.append(
             "## Candidate Explanations\n\n"
             f"```json\n{json.dumps(data['candidates'], indent=2)}\n```"
+        )
+        # Re-proposals are merged by signature on receipt, so they cost the
+        # Critic a proposal slot and contribute nothing; said at the point of
+        # use, next to the ledger, rather than only in the contract.
+        sections.append(
+            "## Before Proposing\n\n"
+            "Every candidate above is already in the ledger. Do not re-propose one "
+            "of them under a new id, and do not propose a candidate whose "
+            "discriminating signature is the same as an existing one — the "
+            "Diagnostician merges proposals by signature on receipt, so such a "
+            "proposal is recorded as a duplicate and counts as no contribution. "
+            "If an existing candidate is mis-stated, or should be split or merged, "
+            "say so under `### Candidates I Would Retire`."
         )
         if data.get("evidence_summary"):
             sections.append(f"## Evidence So Far\n\n{data['evidence_summary']}")
@@ -152,6 +222,31 @@ def _build_prompt(data: dict[str, Any]) -> str:
             + "\n".join(f"- {s}" for s in data["untested_surfaces"])
         )
 
+    # The verbatim-heading checklist, mode-specific, at the end where it is
+    # closest to the act of writing. The saved report is checked against
+    # exactly these strings by `scripts/check_report.py`.
+    sections.append(
+        "## Report Headings\n\n"
+        "Your report consists of exactly these level-3 markdown headings, in "
+        "this order, with this exact text (nothing before the first, nothing "
+        "after the last section, no other headings at level 3 or shallower):\n\n"
+        + "\n".join(f"- `### {h}`" for h in REPORT_HEADINGS[mode])
+        + "\n\nThese headings are checked mechanically. A report with a "
+        "substituted, merged, or reworded heading is sent back once with the "
+        "defects listed, and a second failure is recorded against the Critic."
+    )
+
+    # A one-time re-ask carries the previous attempt's defects verbatim.
+    if data.get("conformance_defects"):
+        sections.append(
+            "## Re-ask: Conformance Defects In Your Previous Report\n\n"
+            "This is the one re-ask for this request. Your previous report failed "
+            "the conformance check with the defects below. Produce the complete "
+            "report again from the start — not a patch or an apology — with every "
+            "defect fixed:\n\n"
+            + "\n".join(f"- {d}" for d in data["conformance_defects"])
+        )
+
     return "\n\n".join(sections) + "\n"
 
 
@@ -166,7 +261,9 @@ async def run_redteam_critic(cwd: str | None = None, **data: Any) -> str:
         Fields from the invocation JSON. Always required: ``mode``.
         Mode-conditional requirements are documented in
         `.claude/docs/contracts/critic_interface_contract.md` and enforced in
-        :func:`_build_prompt`. The shared ``subagent_model`` /
+        :func:`_build_prompt`. Optional in every mode: ``conformance_defects``,
+        a list of strings from ``scripts/check_report.py`` that turns the
+        invocation into the contract's one re-ask. The shared ``subagent_model`` /
         ``subagent_thinking`` / ``subagent_route`` infrastructure fields apply
         as they do to every sub-agent; the Critic is routed cross-family by
         default, so callers pass ``subagent_route="openrouter"`` and a

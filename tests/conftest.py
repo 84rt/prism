@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = ROOT  # alias used by the Critic/ledger tests
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -31,15 +32,17 @@ sys.dont_write_bytecode = True
 
 # --- Forensics corpus (container-local; see the module docstring) ---
 
-CASES_ROOT = "/workspaces/forensics-cases"
+# A Path, so `CASES_ROOT / "case-…"` works; it also formats cleanly inside
+# f-strings and is accepted by `os.path.exists`.
+CASES_ROOT = Path("/workspaces/forensics-cases")
 
 
-def requires_cases(path: str = CASES_ROOT):
+def requires_cases(path: str | Path = CASES_ROOT):
     """Skip marker for tests that need the on-disk forensics corpus.
 
     Parameters
     ----------
-    path : str
+    path : str | Path
         A path that must exist for the test to run.
 
     Returns
@@ -47,6 +50,40 @@ def requires_cases(path: str = CASES_ROOT):
     pytest.MarkDecorator
     """
     return pytest.mark.skipif(not os.path.exists(path), reason=f"forensics corpus not present at {path}")
+
+
+def case_path(relative: str) -> Path:
+    """Resolve a path inside the forensics corpus, skipping if it is missing.
+
+    The in-test counterpart of `requires_cases`, for tests that only learn
+    which fixture they need at run time (e.g. parametrised over reports).
+
+    Parameters
+    ----------
+    relative : str
+        Path relative to ``/workspaces/forensics-cases``.
+
+    Returns
+    -------
+    Path
+        The absolute path, guaranteed to exist.
+    """
+    path = CASES_ROOT / relative
+    if not path.exists():
+        pytest.skip(f"forensics corpus fixture not present: {path}")
+    return path
+
+
+@pytest.fixture
+def repo_root() -> Path:
+    """The scaffold checkout under test.
+
+    Returns
+    -------
+    Path
+        Absolute path to the repository root.
+    """
+    return REPO_ROOT
 
 
 # --- Execution-layer fixtures (scored logs for the blackout tests) ---
