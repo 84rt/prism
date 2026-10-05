@@ -144,7 +144,9 @@ prism/
 │   └── settings.json              # Claude Code permissions
 ├── scripts/
 │   ├── execute_evals.py           # Parallel eval execution engine
-│   └── openrouter_endpoints.py    # Provider enumeration + pin selection
+│   ├── openrouter_endpoints.py    # Provider enumeration + pin selection
+│   ├── ledger_to_json.py          # CANDIDATES.md -> Designer/Critic candidates JSON
+│   └── check_report.py            # Sub-agent report conformance check (headings, signatures)
 ├── docs/
 │   ├── scaffold-diagram.png       # Orchestrator architecture diagram
 │   └── model-forensics-diagram.png # Diagnostician pipeline diagram

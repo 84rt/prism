@@ -42,7 +42,7 @@ An unknown mode, or a mode missing one of its required fields, is an **agent err
 
 - **`transcript_paths`** (required) — an array of absolute paths to the transcripts of the episode under investigation.
 - **`mapper_report_path`** (required) — absolute path to the Mapper's briefing, saved at `artefacts/mapper/report.md`.
-- **`candidates`** (required) — the candidate ledger as JSON: each entry with `id`, `slug`, `statement`, `discriminating_signature`, `status`.
+- **`candidates`** (required) — the candidate ledger as JSON: each entry with `id`, `slug`, `statement`, `discriminating_signature`, `status`. **Produce it with `scripts/ledger_to_json.py`** (`uv run --no-project python scripts/ledger_to_json.py investigations/<name>/CANDIDATES.md -o <request dir>/candidates.json`), never by hand: it serialises the ledger's live sections and refuses, with the defects listed, to emit any live candidate whose *Statement* or *Discriminating signature* field is missing. A candidate written as prose otherwise reaches the Critic as two empty strings, and the Critic then critiques a blank — which has happened, and produced retirement advice that rested on the emptiness rather than the candidate. A refusal means the ledger entry needs rewriting in the §State Management field format before the request is sent.
 - **`iteration`** (required) — integer. `0` for the step-2 invocation, then the iteration number.
 - **`evidence_summary`** (optional) — for post-3d invocations: what the last round of experiments showed, stated mechanistically (rates and directions, not conclusions).
 
@@ -64,11 +64,17 @@ The Diagnostician can rely on the Critic reading the transcripts and writing `##
 
 **The Diagnostician withholds its own prediction.** The two derive independently from the same stated explanation, and the comparison is the point: agreement checks that the explanation is specific enough to generate a prediction at all, and disagreement localises where it is underspecified.
 
+### Optional in every mode
+
+- **`conformance_defects`** — an array of strings: the defect lines printed by `scripts/check_report.py` for the previous attempt at this same request. Its presence makes the invocation the contract's **one re-ask** (see §Conventions, *Conformance is checked mechanically*); the request is otherwise identical to the failed one. Never sent on a first attempt.
+
+The request the Critic receives also carries, in every mode, the contract's absolute path (resolved from the scaffold root, so it is valid from any working directory) and a verbatim checklist of the active mode's report headings. Neither is a request field the Diagnostician supplies; the agent's prompt builder adds both.
+
 ---
 
 ## Critic → Diagnostician: Report Format
 
-Emit **only the active mode's sections**, as level-3 markdown headings with verbatim text, in the order given below. A report carrying sections from a mode that was not requested is malformed, not thorough.
+Emit **only the active mode's sections**, as level-3 markdown headings with verbatim text, in the order given below. A report carrying sections from a mode that was not requested is malformed, not thorough. The headings below are the strings the request's checklist carries and the strings `scripts/check_report.py` verifies.
 
 **`candidate_critique` sections**
 
@@ -90,7 +96,9 @@ Assumptions the candidate list treats as settled — typically about the chain-o
 
 Each in the ledger's own format, with an `X<n>` id marking Critic origin: id, slug, statement, discriminating signature.
 
-**The discriminating signature is required**, the same admissibility bar the Diagnostician is held to. A candidate stating no manipulation that would move it cannot be the subject of diagnostic evidence, so it can never be retired and will sit in the ledger indefinitely.
+**The discriminating signature is required**, the same admissibility bar the Diagnostician is held to. A candidate stating no manipulation that would move it cannot be the subject of diagnostic evidence, so it can never be retired and will sit in the ledger indefinitely. `scripts/check_report.py` checks that every proposal in this section carries one; a proposal without a signature is a conformance defect and triggers the re-ask.
+
+**Proposals are merged by signature on receipt.** The Critic is sent the ledger and must not re-propose a candidate already on it, under a new id or a new slug; the request says so next to the ledger. The Diagnostician, on merging, compares each proposal's signature with every live candidate's and records a match as a duplicate of that candidate (one line in the log, no new entry) rather than admitting it. A proposal that is a genuine sharpening of an existing candidate is handled the same way, with the sharpened wording folded into the existing entry and the Critic credited in its *Origin* field.
 
 Returned empty and explicitly marked as empty when there is nothing to add.
 
@@ -152,7 +160,9 @@ The observation that would count **against** the leading explanation — not mer
 
 **Read-only, stdout-only.** The Critic never modifies, creates, or deletes files. Its report goes to stdout and is captured by the Diagnostician.
 
-**Section headings are markdown, and their text is verbatim.** Emit each report section as a level-3 markdown heading (`### Independent Reading`, `### Blind Spots`, …) using the exact heading text, in the order given for the active mode. Plain-text section titles are not sufficient: the Diagnostician locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read.
+**Section headings are markdown, and their text is verbatim.** Emit each report section as a level-3 markdown heading (`### Independent Reading`, `### Blind Spots`, …) using the exact heading text, in the order given for the active mode. Plain-text section titles are not sufficient: the Diagnostician locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read. The request carries the active mode's headings as a checklist, so the exact strings are always in front of the Critic when it writes.
+
+**Conformance is checked mechanically, with one re-ask.** Before reading a Critic report, the Diagnostician runs `uv run --no-project python scripts/check_report.py critic <saved report> --mode <mode>`. It verifies the headings above (present, verbatim, level 3, in order, nothing substituted) and, in `candidate_critique`, that every proposed candidate carries a discriminating signature; a non-zero exit lists the defects. On failure the Diagnostician re-invokes the Critic **once**, with the identical request plus `conformance_defects` set to those lines, and saves the second report under its own name. If the second report also fails, the Diagnostician does not ask again: it reads the report structurally from the first recognisable heading, records the non-conformance in the log as evidence that the guidance is underspecified for that model (per `subagent_invocation.md`), and — for a proposal still lacking a signature — either drops the proposal or authors the signature itself and records that authorship in the candidate's *Origin*, since a Diagnostician-authored falsifier partly undoes the decorrelation the Critic exists to provide and must not pass as the Critic's own.
 
 **The report is the whole of stdout.** Everything printed is captured verbatim as the saved artefact, so begin directly with the active mode's first section heading — no preamble, no narration of readiness, no sign-off, and no horizontal rules outside sections. A leading "here is the report" line becomes a permanent part of a document that downstream agents read by structure.
 

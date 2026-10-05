@@ -127,6 +127,8 @@
       "Bash(uv run ruff *)",
       "Bash(uv run inspect *)",
       "Bash(uv run --no-project python scripts/openrouter_endpoints.py *)",
+      "Bash(uv run --no-project python scripts/ledger_to_json.py *)",
+      "Bash(uv run --no-project python scripts/check_report.py *)",
       "Bash(uv pip *)",
       "Bash(uv --version)"
     ],

@@ -164,6 +164,8 @@ echo "Creating symlinks..."
 # scripts
 link_file "scripts/execute_evals.py"
 link_file "scripts/openrouter_endpoints.py"
+link_file "scripts/ledger_to_json.py"
+link_file "scripts/check_report.py"
 
 # subagents
 link_file "subagents/__init__.py"
@@ -244,6 +246,8 @@ GITIGNORE_ENTRIES=(
     "subagents/"
     "scripts/execute_evals.py"
     "scripts/openrouter_endpoints.py"
+    "scripts/ledger_to_json.py"
+    "scripts/check_report.py"
     ".claude/docs/investigator/orchestrator_analyst_guide.md"
     ".claude/docs/contracts/analyst_forensic_addendum.md"
     ".claude/docs/contracts/analyst_interface_contract.md"
