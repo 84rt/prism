@@ -143,7 +143,9 @@ prism/
 │   ├── skills/diagnose/          # Diagnostician (Model Forensics) skill definition
 │   └── settings.json              # Claude Code permissions
 ├── scripts/
+│   ├── dump_transcripts.py        # .eval logs -> plain-text per-sample dumps for sub-agents
 │   ├── execute_evals.py           # Parallel eval execution engine
+│   ├── lint_log.py                # Investigation-log lint (duplicate/stranded blocks)
 │   └── openrouter_endpoints.py    # Provider enumeration + pin selection
 ├── docs/
 │   ├── scaffold-diagram.png       # Orchestrator architecture diagram

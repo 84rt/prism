@@ -58,6 +58,21 @@ Running the Analyst cross-family is additionally a robustness check on the scaff
 
 **For the Red-Teaming Critic, cross-family is a hard requirement, not a preference.** The Critic exists to supply reasoning decorrelated from the lead investigator's, so a same-family Critic is a methodological failure rather than a cost trade-off: every Critic invocation passes `subagent_route: "openrouter"` with a non-Claude `subagent_model`, and `/diagnose` refuses to start without `OPENROUTER_API_KEY` (an `OPENAI_API_KEY` does not substitute — the runner has no direct-OpenAI route). See `critic_interface_contract.md §Cross-family routing`.
 
+### Transcript handoff: dump `.eval` logs to text before any sub-agent reads them
+
+`.eval` logs are zip archives. A sub-agent that receives a `.eval` path *to read* — the Mapper's `reference_transcript`, the Critic's `transcript_paths` — gets bytes, not a transcript, and the failure is silent: the read succeeds, the agent reasons over nothing, and the report comes back empty or built on the file name alone. Three of six forensic runs hit this and each reinvented the same workaround mid-investigation.
+
+The rule: **never pass a `.eval` path to a sub-agent as something to read. Dump first, pass the dump paths.**
+
+```bash
+uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
+```
+
+- **Layout.** One text file per sample. For a directory input the log's relative path is mirrored, so `iterations/01/logs --out iterations/01/transcripts` yields `transcripts/<condition>/<log>/<sample_id>_epoch_<n>.txt` and a whole condition can be handed over as one directory. Blocks longer than 2,500 characters are truncated at both ends (`--cap 0` for none); reasoning is rendered in full where the provider exposes it and as the provider summary where it is encrypted. `--sample-id` / `--epoch` select within a log.
+- **Scores are omitted by default.** Pass `--with-scores` only for logs whose scores the Diagnostician is already entitled to see: the reference episode, or logs the Analyst has reported on. Dumping this round's logs for the Critic *before* the Analyst reports is exactly when the default matters — it keeps a convenience tool from becoming a score-blackout leak.
+- **Where it applies.** The Mapper's `reference_transcript` (dump the original episode once at Phase 0, to `artefacts/reference/`, and send that path). The Critic's `transcript_paths` in `candidate_critique` mode (the original plus the resample selection at step 2; the round's transcripts at 3d). Any other field that hands a sub-agent a log to read. **The Analyst is the exception**: its `transcript_source` and `behaviour_spec.reference_transcript` take `.eval` paths, because it reads logs through Scout and the Inspect API, never as text.
+- The Diagnostician's own transcript reading (Phase 2, 3d step 7) is unaffected — read the dumps or the logs via the Inspect API, whichever is convenient. The rule is about what *sub-agents* receive.
+
 ## Environment Explorer
 
 **Script**: `subagents/environment_explorer/main.py`
@@ -197,7 +212,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
 
 - `environment_path` must be an existing directory — the frozen original environment
 - `behaviour_description` is the **explanandum**: what the model did, never why. It is not a hypothesis and must not contain one
-- `reference_transcript` and `constraints` are optional; the transcript is read only to check the environment-as-written against the episode-as-run
+- `reference_transcript` and `constraints` are optional; the transcript is read only to check the environment-as-written against the episode-as-run. Pass a **plain-text dump**, not the `.eval` (see §Transcript handoff)
 - The Mapper runs **once per investigation**, before any candidate exists; save its stdout to `artefacts/mapper/report.md` — the Designer and Critic receive that path
 
 **Returns**: Summary (with fixed-format `**Prohibition status:**` / `**Scorer detection:**` / `**Defect sufficiency:**` lines), file catalogue, pipeline model, instruction analysis, scorer analysis, tool & environment analysis, manipulable surface inventory, environment defects, uncertainties. See `mapper_interface_contract.md` for the full request and report format.
@@ -274,7 +289,7 @@ The Critic's only CLI-validated field is `mode` ∈ `{candidate_critique, diff_r
 }
 ```
 
-- `candidate_critique` requires `transcript_paths`, `mapper_report_path`, `candidates`, `iteration` (0 for the step-2 invocation); `evidence_summary` is optional and post-3d only
+- `candidate_critique` requires `transcript_paths`, `mapper_report_path`, `candidates`, `iteration` (0 for the step-2 invocation); `evidence_summary` is optional and post-3d only. `transcript_paths` are **plain-text dumps**, never `.eval` files (see §Transcript handoff)
 - `diff_review` requires `diffs` (array of `{"name": ..., "diff": ...}`), `environment_path`, `mapper_report_path` — and **must not** receive the candidates, the discrimination matrix, or the behaviour description; the blinding is the mode's value
 - `prediction` requires `investigation_log_path`, `leading_explanation`, `untested_surfaces` — and must not receive the Diagnostician's own prediction
 - Sending a withheld field does not error: it silently converts the review into a much weaker one. The blinding is the caller's responsibility

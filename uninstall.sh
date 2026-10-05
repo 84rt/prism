@@ -107,7 +107,9 @@ reverse_localizations() {
 echo "Removing symlinks..."
 
 # scripts
+unlink_file "scripts/dump_transcripts.py"
 unlink_file "scripts/execute_evals.py"
+unlink_file "scripts/lint_log.py"
 unlink_file "scripts/openrouter_endpoints.py"
 
 # subagents
