@@ -129,7 +129,8 @@ prism/
 │   ├── cli.py                     # Shared CLI boilerplate
 │   ├── environment_explorer/      # Eval environment analysis (Orchestrator)
 │   ├── experiment_executor/       # Runs Inspect AI evals (both modes)
-│   ├── transcript_analyst/        # Blinded transcript analysis (both modes)
+│   ├── transcript_analyst/        # Blinded transcript analysis (both modes);
+│   │                              #   forensic_checks.py = deterministic forensic stats
 │   ├── environment_mapper/        # Hypothesis-free eval triage (Diagnostician)
 │   ├── variant_designer/          # Discriminating perturbations (Diagnostician)
 │   └── redteam_critic/            # Cross-family adversarial critic (Diagnostician)

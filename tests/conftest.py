@@ -5,6 +5,11 @@ forensics runs used and never touch the case directories' venvs. Run with::
 
     uv run --with "inspect_ai==0.3.263" --with "inspect-scout==0.5.2" \
         --with claude-agent-sdk --with python-dotenv --with pytest pytest tests/
+
+The scaffold has no package install, so the repo root (for `subagents.*`) and
+`scripts/` are put on `sys.path` here. Regression tests over the persisted
+forensics corpus are skipped (not failed) when the corpus is absent — it is
+container-local and never committed.
 """
 
 from __future__ import annotations
@@ -19,6 +24,32 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
+
+# Never write bytecode into the read-only corpus when a test imports a persisted
+# grader module from a case directory.
+sys.dont_write_bytecode = True
+
+# --- Forensics corpus (container-local; see the module docstring) ---
+
+CASES_ROOT = "/workspaces/forensics-cases"
+
+
+def requires_cases(path: str = CASES_ROOT):
+    """Skip marker for tests that need the on-disk forensics corpus.
+
+    Parameters
+    ----------
+    path : str
+        A path that must exist for the test to run.
+
+    Returns
+    -------
+    pytest.MarkDecorator
+    """
+    return pytest.mark.skipif(not os.path.exists(path), reason=f"forensics corpus not present at {path}")
+
+
+# --- Execution-layer fixtures (scored logs for the blackout tests) ---
 
 
 def write_fixture_log(
