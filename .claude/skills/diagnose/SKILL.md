@@ -127,7 +127,9 @@ Before Phase 1, explicitly agree with the user:
 - **Early stopping**: whether the eager exit may fire autonomously, or findings are presented first
 - **Candidate autonomy**: whether new candidates (Critic-proposed, analyst-surfaced) may enter the ledger mid-investigation without a check-in — the default is yes, since the log records every addition with origin
 - **Scope of modifications**: variants are applied to fresh iteration copies as a matter of course; anything touching the original environment or the frozen model is out of bounds entirely
-- **Parallelism and spend**: `max_parallel` preferences, and the spend ceiling that backs the budget-exit rule
+- **Parallelism and spend**: `max_parallel` preferences; the spend ceiling that backs the budget-exit rule, observed through `scripts/spend.py`; and the **Phase 4 reserve** held back from it (≈ one round's measured cost)
+- **Degraded-mode autonomy**: which substitutions from the degraded-mode policy (`diagnostician_responsibilities.md §Sub-Agent Failure Handling`) may be made without a check-in — default: the no-pause class only; anything that downgrades a round or pauses is surfaced
+- **Ledger tier size**: how many ranked candidates carry prediction rows each round (default k = 6, plus the must-exclude candidate and anything a round targets)
 
 Record the agreement in the log. When in doubt, default to pausing.
 
