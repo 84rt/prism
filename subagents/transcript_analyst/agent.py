@@ -5,6 +5,8 @@ from typing import Any
 
 from subagents.runner import run_agent
 from subagents.transcript_analyst.system_prompt import (
+    CONSTRUAL_CHECKS_RULE,
+    FORENSIC_WORK_ORDER,
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_FORENSIC,
 )
@@ -46,6 +48,64 @@ RESTRICTED_FILES: dict[str, str] = {
 }
 
 
+def normalise_construal_checks(spec: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Split a behaviour spec into the grader part and the construal-check set.
+
+    The contract's default shape is `construal_checks`: a list of de-identified
+    checks, each built as its own scanner and rated across every condition
+    (combined-blind delivery, D30). The older single-string `manipulation_check`
+    is accepted as a one-element set so requests written to the previous shape
+    keep working; both together is an error rather than a guess.
+
+    Parameters
+    ----------
+    spec : dict
+        The request's `behaviour_spec`, as sent.
+
+    Returns
+    -------
+    tuple[dict, list[dict]]
+        `(grader_spec, checks)` — the spec with both check fields removed, and
+        the checks as `[{"id": "M1", "property": "..."}, ...]` (possibly empty).
+
+    Raises
+    ------
+    ValueError
+        On both fields present, a non-list `construal_checks`, an entry with no
+        `property`, or duplicate ids — each of which would otherwise reach the
+        Analyst as an ambiguous request.
+
+    Examples
+    --------
+    >>> normalise_construal_checks({"description": "d", "manipulation_check": "x"})[1]
+    [{'id': 'M1', 'property': 'x'}]
+    """
+    grader_spec = {k: v for k, v in spec.items() if k not in ("construal_checks", "manipulation_check")}
+    raw = spec.get("construal_checks")
+    legacy = spec.get("manipulation_check")
+
+    if raw is not None and legacy is not None:
+        raise ValueError("behaviour_spec carries both construal_checks and manipulation_check; send one")
+    if raw is None:
+        raw = [legacy] if legacy else []
+    if not isinstance(raw, list):
+        raise ValueError("behaviour_spec.construal_checks must be a list")
+
+    checks: list[dict[str, str]] = []
+    for i, item in enumerate(raw, start=1):
+        # A bare string is a property with an assigned id; a dict may carry its own.
+        if isinstance(item, str):
+            item = {"property": item}
+        if not isinstance(item, dict) or not str(item.get("property", "")).strip():
+            raise ValueError(f"construal check #{i} has no non-empty 'property'")
+        checks.append({"id": str(item.get("id") or f"M{i}"), "property": str(item["property"]).strip()})
+
+    ids = [c["id"] for c in checks]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"construal check ids are not unique: {ids}")
+    return grader_spec, checks
+
+
 async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
     """Run the transcript analyst agent and return its analysis report."""
     sections = [
@@ -66,10 +126,29 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
     # this field behaves exactly as before, which is what keeps the
     # Orchestrator's pipeline unchanged.
     if data.get("behaviour_spec"):
+        # `run_cli` maps RuntimeError → exit 2 (agent error); a bare ValueError
+        # would escape as a traceback with exit 1 and be misread as an SDK crash.
+        try:
+            grader_spec, checks = normalise_construal_checks(data["behaviour_spec"])
+        except ValueError as exc:
+            raise RuntimeError(f"Transcript analyst: malformed behaviour_spec — {exc}") from exc
         sections.append(
             "## Behaviour Spec\n\n"
-            f"```json\n{json.dumps(data['behaviour_spec'], indent=2)}\n```"
+            f"```json\n{json.dumps(grader_spec, indent=2)}\n```"
         )
+        # The construal checks are rendered as their own section, never inside
+        # the spec, so there is exactly one place the analyst reads them from
+        # and the no-verdict rule sits next to the set it applies to.
+        if checks:
+            sections.append(
+                "## Construal Checks\n\n"
+                f"```json\n{json.dumps(checks, indent=2)}\n```\n\n"
+                f"{CONSTRUAL_CHECKS_RULE}"
+            )
+        # The work order is restated per request, not only in the system
+        # prompt: an explicit request-level ordering is what recovered the
+        # runs whose Analyst spent its turns on open-ended scanners first.
+        sections.append(f"## Work Order\n\n{FORENSIC_WORK_ORDER}")
 
     if data.get("artefacts_dir"):
         sections.append(f"## Artefacts Directory\n\n{data['artefacts_dir']}")

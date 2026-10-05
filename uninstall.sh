@@ -127,6 +127,7 @@ unlink_file "subagents/experiment_executor/system_prompt.py"
 
 unlink_file "subagents/transcript_analyst/__init__.py"
 unlink_file "subagents/transcript_analyst/agent.py"
+unlink_file "subagents/transcript_analyst/forensic_checks.py"
 unlink_file "subagents/transcript_analyst/main.py"
 unlink_file "subagents/transcript_analyst/system_prompt.py"
 
