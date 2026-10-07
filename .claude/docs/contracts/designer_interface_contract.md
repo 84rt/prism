@@ -10,7 +10,7 @@ The Designer runs once per investigation iteration, after the Environment Mapper
 
 ### Mapper report path (required)
 
-An absolute path to the Mapper's briefing, saved by the Diagnostician at `artefacts/mapper/report.md`.
+An absolute path to the Mapper's briefing, written by the launcher at `artefacts/mapper/report_<tag>_mapper_1.md`.
 
 The briefing is passed **by path, not inlined**, so the Designer reads the whole thing rather than a summary of it. The two sections it depends on most are `### Manipulable Surface Inventory` (the space of available edits, with their couplings) and `### Pipeline Model` (what each edit actually reaches). A variant at a surface the Designer cannot locate in the pipeline model is a variant it does not understand.
 

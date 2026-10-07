@@ -224,3 +224,70 @@ def test_cli_writes_valid_json(tmp_path: Path, capsys, cli_flag: list[str]) -> N
     payload = json.loads(out.read_text() if cli_flag else captured.out)
     assert [c["id"] for c in payload] == ["C1", "X1", "C3"]
     assert "3 live candidate(s)" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Tiers (3d step 9): `--tested-only` for the Designer, whole ledger for the Critic
+# ---------------------------------------------------------------------------
+
+TIERED_LEDGER = textwrap.dedent(
+    """\
+    # Candidate Explanations: demo
+
+    ## Live candidates (ranked)
+
+    ### C1 — `leader` — rank 1
+    - *Statement*: s1
+    - *Discriminating signature*: g1
+    - *Tier*: tested — by rank
+
+    ### C2 — `ninth` — rank 9
+    - *Statement*: s2
+    - *Discriminating signature*: g2
+    - *Tier*: carried — by rank
+
+    ### C3 — `pre_tier_entry` — rank 3
+    - *Statement*: s3
+    - *Discriminating signature*: g3
+    """
+)
+
+
+def test_tier_is_read_but_never_forwarded() -> None:
+    result = l2j.parse_ledger(TIERED_LEDGER)
+    assert [c.tier for c in result.candidates] == ["tested", "carried", None]
+    # The contract shape is unchanged: no tier key reaches a sub-agent.
+    expected_keys = {"id", "slug", "statement", "discriminating_signature", "status"}
+    assert all(set(c.to_json()) == expected_keys for c in result.candidates)
+
+
+def test_tested_only_drops_carried_and_keeps_untiered_with_warning() -> None:
+    kept, warnings = l2j.select_tested(l2j.parse_ledger(TIERED_LEDGER).candidates)
+    assert [c.id for c in kept] == ["C1", "C3"]
+    assert len(warnings) == 1 and "C3" in warnings[0]
+
+
+def test_cli_default_sends_whole_ledger_and_flag_sends_tested(tmp_path: Path, capsys) -> None:
+    ledger = tmp_path / "CANDIDATES.md"
+    ledger.write_text(TIERED_LEDGER)
+
+    assert l2j.main([str(ledger)]) == 0
+    assert [c["id"] for c in json.loads(capsys.readouterr().out)] == ["C1", "C2", "C3"]
+
+    assert l2j.main([str(ledger), "--tested-only"]) == 0
+    captured = capsys.readouterr()
+    assert [c["id"] for c in json.loads(captured.out)] == ["C1", "C3"]
+    assert "1 carried candidate(s) omitted" in captured.err
+
+
+def test_carried_entries_are_still_defect_checked(tmp_path: Path) -> None:
+    """The Critic still receives carried candidates, so a blank one fails even under --tested-only."""
+    ledger = tmp_path / "CANDIDATES.md"
+    ledger.write_text(TIERED_LEDGER.replace("- *Statement*: s2\n", ""))
+    assert l2j.main([str(ledger), "--tested-only"]) == 1
+
+
+def test_unrecognised_tier_value_warns_and_is_untiered() -> None:
+    result = l2j.parse_ledger(TIERED_LEDGER.replace("tested — by rank", "maybe"))
+    assert result.candidates[0].tier is None
+    assert any("neither `tested` nor `carried`" in w for w in result.warnings)

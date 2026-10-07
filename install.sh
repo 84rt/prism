@@ -397,6 +397,10 @@ echo "      (required by /diagnose, whose cross-family Critic will not run witho
 step=$((step + 1))
 echo "  $step. (Optional) create .claude/settings.local.json for local overrides"
 step=$((step + 1))
+echo "  $step. Open the target repo in Claude Code once and accept the workspace-trust"
+echo "      prompt: Claude Code applies the scaffold's permission allow-list only in a"
+echo "      trusted workspace (deny rules apply either way)"
+step=$((step + 1))
 echo "  $step. Launch the orchestrator in Claude Code: /orchestrate [research question]"
 echo "      or the model-forensics diagnostician: /diagnose [transcript + behaviour]"
 echo ""

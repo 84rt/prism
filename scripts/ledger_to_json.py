@@ -36,11 +36,23 @@ Management`)::
 Field values may wrap onto following lines (any non-blank line that does not
 start another field, heading, or section continues the current field).
 
+Tiers
+-----
+Each live entry may carry a ``- *Tier*: tested | carried — <reason>`` line
+(the ledger-triage step, 3d step 9). The tier is read but never forwarded.
+The Critic must see the whole live ledger, so its request uses the default
+output. The Designer designs only for the candidates this round tests, so its
+request uses ``--tested-only``, which drops ``carried`` entries. An entry with
+no tier line — any ledger written before tiers existed — is kept, with a
+warning: over-sending costs a column in the Designer's matrix, whereas
+under-sending would hide a candidate from the design.
+
 Usage
 -----
 ::
 
-    uv run --no-project python scripts/ledger_to_json.py CANDIDATES.md
+    uv run --no-project python scripts/ledger_to_json.py CANDIDATES.md              # Critic
+    uv run --no-project python scripts/ledger_to_json.py CANDIDATES.md --tested-only # Designer
     uv run --no-project python scripts/ledger_to_json.py CANDIDATES.md -o candidates.json
 
 Writes the JSON array to stdout (or to ``-o``) and a one-line-per-candidate
@@ -102,6 +114,11 @@ LIVE_SECTION_PREFIXES = ("live candidates", "live but untested")
 # and marks the entry as not to be sent.
 NOT_LIVE_TRAILER = re.compile(r"\b(eliminated|retired|merged|withdrawn)\b", re.I)
 
+# The tier label is read (for `--tested-only`) but not forwarded; its value
+# opens with one of these words, e.g. `carried — by rank`.
+TIER_LABEL = "tier"
+TIER_VALUE = re.compile(r"^\s*(tested|carried)\b", re.I)
+
 
 @dataclass
 class Candidate:
@@ -119,6 +136,9 @@ class Candidate:
         1-based line number of the heading, for error messages.
     fields : dict[str, str]
         Forwarded field values keyed by JSON field name.
+    tier : str | None
+        ``"tested"`` or ``"carried"`` from the entry's *Tier* line, or None
+        when the entry has no (parseable) tier line.
     """
 
     id: str
@@ -126,6 +146,7 @@ class Candidate:
     trailer: str
     line: int
     fields: dict[str, str] = field(default_factory=dict)
+    tier: str | None = None
 
     def to_json(self) -> dict[str, str]:
         """Render the entry in the sub-agent contract shape.
@@ -252,7 +273,20 @@ def parse_ledger(text: str) -> ParseResult:
         # --- Field lines and continuations --------------------------------
         m = FIELD_LINE.match(line)
         if m:
-            key = FORWARDED_LABELS.get(_normalise_label(m.group("label")))
+            label = _normalise_label(m.group("label"))
+            if label == TIER_LABEL:
+                # Bookkeeping that controls `--tested-only`; never forwarded.
+                current_field = None
+                tm = TIER_VALUE.match(m.group("value"))
+                if tm:
+                    current.tier = tm.group(1).lower()
+                else:
+                    result.warnings.append(
+                        f"line {lineno}: {current.id} *Tier* value {m.group('value')!r} "
+                        "is neither `tested` nor `carried`; treated as untiered"
+                    )
+                continue
+            key = FORWARDED_LABELS.get(label)
             if key is None:
                 current_field = None  # a bookkeeping field: ends any continuation
                 continue
@@ -316,6 +350,40 @@ def find_defects(candidates: list[Candidate]) -> list[str]:
     return defects
 
 
+def select_tested(candidates: list[Candidate]) -> tuple[list[Candidate], list[str]]:
+    """Keep the candidates the Designer should see this round.
+
+    Parameters
+    ----------
+    candidates : list[Candidate]
+        Live candidates from :func:`parse_ledger`.
+
+    Returns
+    -------
+    tuple[list[Candidate], list[str]]
+        ``(kept, warnings)``. ``carried`` entries are dropped; untiered
+        entries are kept and each produces a warning, because over-sending is
+        the safe direction (see the module docstring).
+
+    Examples
+    --------
+    A ledger with C1 tested, C2 carried and C3 untiered keeps C1 and C3 and
+    warns once, about C3.
+    """
+    kept: list[Candidate] = []
+    warnings: list[str] = []
+    for c in candidates:
+        if c.tier == "carried":
+            continue
+        if c.tier is None:
+            warnings.append(
+                f"{c.id} `{c.slug}` (line {c.line}): no *Tier* line; sent to the "
+                "Designer as if tested — add `- *Tier*: tested | carried` at 3d step 9"
+            )
+        kept.append(c)
+    return kept, warnings
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point.
 
@@ -339,6 +407,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="Write the JSON array here instead of stdout",
+    )
+    parser.add_argument(
+        "--tested-only",
+        action="store_true",
+        help="Drop `carried`-tier candidates (for the Designer's request); "
+        "untiered entries are kept with a warning",
     )
     args = parser.parse_args(argv)
 
@@ -370,7 +444,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {d}", file=sys.stderr)
         return 1
 
-    payload = [c.to_json() for c in result.candidates]
+    # Defects are checked on the whole live ledger first, carried entries
+    # included: the Critic still receives those, so they must be well-formed
+    # whichever request is being built.
+    selected = result.candidates
+    if args.tested_only:
+        selected, tier_warnings = select_tested(result.candidates)
+        for w in tier_warnings:
+            print(f"warning: {w}", file=sys.stderr)
+        dropped = len(result.candidates) - len(selected)
+        print(f"--tested-only: {dropped} carried candidate(s) omitted", file=sys.stderr)
+
+    payload = [c.to_json() for c in selected]
     rendered = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     if args.output is not None:
         args.output.write_text(rendered)

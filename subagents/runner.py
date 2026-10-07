@@ -19,6 +19,64 @@ from claude_agent_sdk import (
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# The scaffold checkout itself, resolved through symlinks. In an installed
+# target every scaffold file is a gitignored symlink: `abspath` gives the
+# target-side path (which Glob/search skip), while `realpath` follows the link
+# back to the checkout, where the docs always exist. Used to hand each
+# sub-agent the absolute paths of the documents it must read first, so a
+# `--cwd` elsewhere can never leave it unable to find its own contract (a
+# Critic failed as a gate this way twice in one run).
+SCAFFOLD_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+
+
+def scaffold_doc(relpath: str) -> str:
+    """Absolute path of a scaffold document, resolved from the checkout.
+
+    Parameters
+    ----------
+    relpath : str
+        Path relative to the scaffold root, e.g.
+        ``".claude/docs/contracts/mapper_interface_contract.md"``.
+
+    Returns
+    -------
+    str
+        The absolute path inside the scaffold checkout.
+    """
+    return os.path.join(SCAFFOLD_ROOT, relpath)
+
+
+def contract_section(*relpaths: str) -> str:
+    """Render the prompt section naming the documents to read first.
+
+    Parameters
+    ----------
+    *relpaths : str
+        Scaffold-relative paths, in reading order (contract first).
+
+    Returns
+    -------
+    str
+        A ``## Contract`` markdown section listing each absolute path.
+
+    Raises
+    ------
+    RuntimeError
+        If any document is missing — a sub-agent without its contract fails as
+        a gate, so this surfaces as an agent error (exit 2) before any spend.
+    """
+    paths = [scaffold_doc(p) for p in relpaths]
+    missing = [p for p in paths if not os.path.isfile(p)]
+    if missing:
+        raise RuntimeError(f"scaffold document(s) not found: {', '.join(missing)}")
+    listing = "\n".join(f"- `{p}`" for p in paths)
+    return (
+        "## Contract\n\n"
+        "Read these with a direct Read of each exact absolute path before doing "
+        "anything else. Do not search for them and do not substitute a relative "
+        "path; each file is where its path says it is.\n\n" + listing
+    )
+
 # Model every sub-agent runs on unless the invocation overrides it via the
 # `subagent_model` input field. Kept as a single default so the override is the
 # only thing that ever varies (e.g. a less refusal-prone model on a

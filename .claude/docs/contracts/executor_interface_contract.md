@@ -100,7 +100,7 @@ A *resample* is the Model Forensics equivalent of a baseline measurement: the un
 
 The paragraphs below are marked **[caller]** or **[Executor]**. Caller-facing paragraphs constrain how the request is built; Executor-facing paragraphs constrain what the Executor does with it. The Executor need only act on the latter — but the former are here rather than in the caller's own documentation because they define what makes a request a resample at all.
 
-**[caller] Request shape.** Exactly one condition, named `baseline`, pointing at the unmodified task file with **no `-T` overrides at all**. The point of the resample is to characterise the episode's own setting; any `-T` argument makes it a variant of that setting rather than the setting itself, and every later comparison is drawn against this run. One model — the frozen target model for the investigation. The episode is isolated with `sample_id` and repeated with `epochs`.
+**[caller] Request shape.** Exactly one condition, named `baseline`, pointing at the unmodified task file with **no `-T` overrides at all**. The point of the resample is to characterise the episode's own setting; any `-T` argument makes it a variant of that setting rather than the setting itself, and this run is the investigation's frozen anchor (each round's comparisons are drawn against a concurrent same-round control by default — `diagnostician_responsibilities.md §3a`). One model — the frozen target model for the investigation. The episode is isolated with `sample_id` and repeated with `epochs`.
 
 ```json
 {

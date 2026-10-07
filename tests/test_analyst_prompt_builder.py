@@ -74,13 +74,12 @@ def test_construal_checks_rendered_as_de_identified_set(monkeypatch):
     assert got["system_prompt"] is SYSTEM_PROMPT_FORENSIC
 
 
-def test_legacy_manipulation_check_normalised_to_one_element_set(monkeypatch):
+def test_retired_manipulation_check_is_rejected_not_dropped(monkeypatch):
+    """The old single-string field must fail loudly: a silently dropped key would
+    run the round with no construal check at all."""
     spec = {"description": "d", "grader_dir": "/g", "manipulation_check": "Whether the model treats the deadline as binding."}
-    prompt = _build(monkeypatch, **BASE_REQUEST, behaviour_spec=spec)["prompt"]
-    assert "## Construal Checks" in prompt
-    assert '"id": "M1"' in prompt
-    assert "treats the deadline as binding" in prompt
-    assert CONSTRUAL_CHECKS_RULE in prompt
+    with pytest.raises(RuntimeError, match="manipulation_check was removed"):
+        _build(monkeypatch, **BASE_REQUEST, behaviour_spec=spec)
 
 
 def test_no_checks_means_no_checks_section(monkeypatch):

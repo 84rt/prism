@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from subagents.runner import run_agent
+from subagents.runner import contract_section, run_agent
 from subagents.transcript_analyst.system_prompt import (
     CONSTRUAL_CHECKS_RULE,
     FORENSIC_WORK_ORDER,
@@ -51,11 +51,12 @@ RESTRICTED_FILES: dict[str, str] = {
 def normalise_construal_checks(spec: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Split a behaviour spec into the grader part and the construal-check set.
 
-    The contract's default shape is `construal_checks`: a list of de-identified
+    The contract's only shape is `construal_checks`: a list of de-identified
     checks, each built as its own scanner and rated across every condition
-    (combined-blind delivery, D30). The older single-string `manipulation_check`
-    is accepted as a one-element set so requests written to the previous shape
-    keep working; both together is an error rather than a guess.
+    (combined-blind delivery, D30). The retired single-string
+    `manipulation_check` field is rejected outright rather than ignored — an
+    unread key would otherwise be dropped silently and the round would run
+    with no check at all.
 
     Parameters
     ----------
@@ -71,23 +72,25 @@ def normalise_construal_checks(spec: dict[str, Any]) -> tuple[dict[str, Any], li
     Raises
     ------
     ValueError
-        On both fields present, a non-list `construal_checks`, an entry with no
-        `property`, or duplicate ids — each of which would otherwise reach the
-        Analyst as an ambiguous request.
+        On the retired `manipulation_check` field, a non-list
+        `construal_checks`, an entry with no `property`, or duplicate ids —
+        each of which would otherwise reach the Analyst as an ambiguous or
+        silently degraded request.
 
     Examples
     --------
-    >>> normalise_construal_checks({"description": "d", "manipulation_check": "x"})[1]
+    >>> normalise_construal_checks({"description": "d", "construal_checks": ["x"]})[1]
     [{'id': 'M1', 'property': 'x'}]
     """
-    grader_spec = {k: v for k, v in spec.items() if k not in ("construal_checks", "manipulation_check")}
+    if "manipulation_check" in spec:
+        raise ValueError(
+            "behaviour_spec.manipulation_check was removed; send the round's checks as "
+            "behaviour_spec.construal_checks (a list, one entry per check)"
+        )
+    grader_spec = {k: v for k, v in spec.items() if k != "construal_checks"}
     raw = spec.get("construal_checks")
-    legacy = spec.get("manipulation_check")
-
-    if raw is not None and legacy is not None:
-        raise ValueError("behaviour_spec carries both construal_checks and manipulation_check; send one")
     if raw is None:
-        raw = [legacy] if legacy else []
+        raw = []
     if not isinstance(raw, list):
         raise ValueError("behaviour_spec.construal_checks must be a list")
 
@@ -153,6 +156,17 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
     if data.get("artefacts_dir"):
         sections.append(f"## Artefacts Directory\n\n{data['artefacts_dir']}")
 
+    # Absolute paths of the documents to read first. The forensic addendum is
+    # named only in forensic mode, so an Orchestrator-mode analyst is never
+    # pointed at it (the base contract deliberately carries no pointer either).
+    docs = [
+        ".claude/docs/contracts/analyst_interface_contract.md",
+        ".claude/docs/references/scout_reference.md",
+    ]
+    if data.get("behaviour_spec"):
+        docs.insert(1, ".claude/docs/contracts/analyst_forensic_addendum.md")
+    sections.insert(0, contract_section(*docs))
+
     prompt = "\n\n".join(sections) + "\n"
 
     # Model Forensics investigations get an extended system prompt. The two
@@ -181,4 +195,5 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
         model=data.get("subagent_model"),
         thinking=data.get("subagent_thinking"),
         route=data.get("subagent_route"),
+        max_turns=data.get("subagent_max_turns"),
     )

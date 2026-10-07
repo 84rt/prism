@@ -1,6 +1,6 @@
 # Sub-Agent Invocation Reference
 
-Sub-agents are invoked as CLI scripts via the Agent SDK. The orchestrator writes a JSON input file, runs the script via Bash, and captures the report from stdout.
+Sub-agents are invoked as CLI scripts via the Agent SDK, always through the detached launcher below. The lead agent (Orchestrator or Diagnostician) writes a JSON input file and launches it; the launcher persists the request and writes the report — the sub-agent's stdout — to a per-invocation file.
 
 ## General Pattern
 
@@ -26,7 +26,7 @@ The underlying CLI the launcher runs is `uv run --with claude-agent-sdk --with p
 
 ### Optional: `subagent_max_turns` (all agents)
 
-Every agent's input JSON accepts an optional `subagent_max_turns` field — **the Agent SDK turn cap the sub-agent runs under** (default 100). Raise it for a work order known to need more turns (a many-condition Analyst ladder), or lower it to bound a cheap check. A sub-agent that hits the cap returns no report and the runner's error names it (`subtype=error_max_turns`), so the failure is diagnosable rather than silent. The field is threaded through `runner.py`; each agent's `agent.py` prompt builder must pass it to `run_agent(max_turns=…)` — a builder that does not read the key silently drops it. **Currently honoured by the Executor only**; the Explorer, Analyst, Mapper, Designer and Critic builders do not yet read it (their owning work-packages add the one-liner), so setting it on those roles is a no-op until they do.
+Every agent's input JSON accepts an optional `subagent_max_turns` field — **the Agent SDK turn cap the sub-agent runs under** (default 100). Raise it for a work order known to need more turns (a many-condition Analyst ladder), or lower it to bound a cheap check. A sub-agent that hits the cap returns no report and the runner's error names it (`subtype=error_max_turns`), so the failure is diagnosable rather than silent. The field is threaded through `runner.py`; each agent's `agent.py` prompt builder must pass it to `run_agent(max_turns=…)` — a builder that does not read the key silently drops it. The Mapper, Designer, Executor, Analyst and Critic builders read it (a test pins this, so a builder that forgets it fails the suite); the Explorer's does not yet, so setting it on the Explorer is a no-op.
 
 **Mode-conditional required fields (Red-Teaming Critic only).** Every agent above validates a flat list of required fields at exit code 1. The Critic is the one exception: its only flat requirement is `mode`, and each mode then requires its own further fields, validated when the prompt is built rather than by the CLI. A bad `mode`, or a mode missing one of its fields, therefore surfaces as an **agent error (exit code 2)**, not an input error — do not read a Critic exit 2 as an API failure before checking the request against `critic_interface_contract.md §Modes`.
 
@@ -205,7 +205,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
 ```
 
 - `description` is always required within the spec; `reference_transcript` is required on the first build and optional once `grader_dir` is populated; `grader_dir` absent/empty means build-and-persist, populated means load-and-apply-unmodified
-- `construal_checks` is optional: **one de-identified set per round** — every variant's check, each with an opaque id (`M<n>`) and no indication of which condition it bears on. `agent.py` renders the set as its own `## Construal Checks` request section with the no-verdict rule attached; the Analyst validates each as its own scanner, rates each across **every** condition, reports the full pairwise difference matrix and a scorability label per check, and states **no** `succeeded`/`failed`/`ambiguous` verdict. The Diagnostician derives the verdicts from its private check→variant mapping and intended directions (`diagnostician_analyst_guide.md §Deriving the verdicts`). A single-string `manipulation_check` is still accepted and normalised to a one-element set (`M1`); sending both fields is an input error (exit 2)
+- `construal_checks` is optional: **one de-identified set per round** — every variant's check, each with an opaque id (`M<n>`) and no indication of which condition it bears on. `agent.py` renders the set as its own `## Construal Checks` request section with the no-verdict rule attached; the Analyst validates each as its own scanner, rates each across **every** condition, reports the full pairwise difference matrix and a scorability label per check, and states **no** `succeeded`/`failed`/`ambiguous` verdict. The Diagnostician derives the verdicts from its private check→variant mapping and intended directions (`diagnostician_analyst_guide.md §Deriving the verdicts`). The retired single-string `manipulation_check` field is rejected as an input error (exit 2), never silently dropped
 - `agent.py` also appends a `## Work Order` section to every forensic request — grader → construal checks → eval-awareness split → open-ended scan — restating the addendum's order so that a turn-starved invocation leaves the open-ended half thin rather than the auxiliaries unvalidated. Large workloads (roughly > 24 scanner×condition passes, or > 8 conditions) are split **by check group, never by condition** (addendum §Work order → *Split protocol*); this pairs with the runner's turn cap (`subagent_max_turns`, once threaded through `runner.py`), which is the other lever
 - **The firewall is not breached**: the spec names the *explanandum* (what to measure), never an explanation, a predicted direction, or which condition is which. The neutral `topic` remains required and its rules are unchanged — forensic mode is two measurements (fixed grader + open-ended scan), never one
 - **Grader reuse via `grader_dir` is what makes rates comparable across iterations** — pass the same directory every round after the first, and treat a hash change between reports as an instrument change
@@ -233,7 +233,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
 - `environment_path` must be an existing directory — the frozen original environment
 - `behaviour_description` is the **explanandum**: what the model did, never why. It is not a hypothesis and must not contain one
 - `reference_transcript` and `constraints` are optional; the transcript is read only to check the environment-as-written against the episode-as-run. Pass a **plain-text dump**, not the `.eval` (see §Transcript handoff)
-- The Mapper runs **once per investigation**, before any candidate exists; save its stdout to `artefacts/mapper/report.md` — the Designer and Critic receive that path
+- The Mapper runs **once per investigation**, before any candidate exists; its briefing lands at `artefacts/mapper/report_<tag>_mapper_1.md` (written by the launcher) — the Designer and Critic receive that path
 
 **Returns**: Summary (with fixed-format `**Prohibition status:**` / `**Scorer detection:**` / `**Defect sufficiency:**` lines), file catalogue, pipeline model, instruction analysis, scorer analysis, tool & environment analysis, manipulable surface inventory, environment defects, uncertainties. See `mapper_interface_contract.md` for the full request and report format.
 
@@ -244,7 +244,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
 **Input JSON**:
 ```json
 {
-    "mapper_report_path": "/absolute/path/to/artefacts/mapper/report.md",
+    "mapper_report_path": "/absolute/path/to/artefacts/mapper/report_00_triage_mapper_1.md",
     "environment_path": "/absolute/path/to/iteration/environment",
     "candidates": [
         {
@@ -292,7 +292,7 @@ The Critic's only CLI-validated field is `mode` ∈ `{candidate_critique, diff_r
 {
     "mode": "candidate_critique",
     "transcript_paths": ["/absolute/path/to/original.eval"],
-    "mapper_report_path": "/absolute/path/to/artefacts/mapper/report.md",
+    "mapper_report_path": "/absolute/path/to/artefacts/mapper/report_00_triage_mapper_1.md",
     "candidates": [
         {
             "id": "C1",
@@ -313,5 +313,6 @@ The Critic's only CLI-validated field is `mode` ∈ `{candidate_critique, diff_r
 - `diff_review` requires `diffs` (array of `{"name": ..., "diff": ...}`), `environment_path`, `mapper_report_path` — and **must not** receive the candidates, the discrimination matrix, or the behaviour description; the blinding is the mode's value
 - `prediction` requires `investigation_log_path`, `leading_explanation`, `untested_surfaces` — and must not receive the Diagnostician's own prediction
 - Sending a withheld field does not error: it silently converts the review into a much weaker one. The blinding is the caller's responsibility
+- `conformance_defects` is optional in every mode and is used only for the **one re-ask**: when `scripts/check_report.py critic <report> --mode <mode>` exits non-zero, re-send the same request with its printed defect lines as this array (strings). The Critic is told what was non-conformant and returns a corrected report; a second failure is read structurally and recorded, not re-asked again (`critic_interface_contract.md §Report Format`)
 
 **Returns**: only the active mode's sections — `candidate_critique`: independent reading (written before the ledger is read), blind spots, assumption audit, proposed additional candidates (`X<n>` ids), retirement advice; `diff_review`: summary, per-diff analysis, cross-diff analysis, inferred purpose (last); `prediction`: chosen factor, ordinal prediction, reasoning, falsifier. See `critic_interface_contract.md` for all three request and report formats.

@@ -19,7 +19,9 @@ VALID_MODES = ("candidate_critique", "diff_review", "prediction")
 # prompt is valid whatever `--cwd` the Critic was launched with. A
 # cwd-relative path failed twice in one run (the agent searched for it under
 # the investigation directory, and searches skip gitignored symlinks).
-# TODO(wave 3): the same injection belongs in all six sub-agents.
+# The other five sub-agents get the same injection via
+# `runner.contract_section`; the Critic keeps its own constant because its
+# tests and its mode-specific section ordering reference it directly.
 _SCAFFOLD_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 )
@@ -292,4 +294,5 @@ async def run_redteam_critic(cwd: str | None = None, **data: Any) -> str:
         model=data.get("subagent_model"),
         thinking=data.get("subagent_thinking"),
         route=data.get("subagent_route"),
+        max_turns=data.get("subagent_max_turns"),
     )

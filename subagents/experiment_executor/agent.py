@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from subagents.experiment_executor.system_prompt import SYSTEM_PROMPT
-from subagents.runner import run_agent
+from subagents.runner import contract_section, run_agent
 
 ALLOWED_TOOLS = ["Bash", "Read", "Glob", "Grep"]
 DISALLOWED_TOOLS = ["Edit", "WebSearch", "WebFetch"]
@@ -92,6 +92,17 @@ no `-M` arguments. Never relax or substitute a pin to make a command succeed.
 {json.dumps(data.get("overrides") or {}, indent=2)}
 ```
 """
+    # Absolute paths for the contract and the Inspect reference first, so the
+    # read-first instruction resolves from any working directory.
+    prompt = (
+        contract_section(
+            ".claude/docs/contracts/executor_interface_contract.md",
+            ".claude/docs/references/inspect_reference.md",
+        )
+        + "\n\n"
+        + prompt
+    )
+
     # Memory is disabled for the Executor: each invocation is self-contained,
     # per the interface contract. Within-investigation execution learnings
     # flow through the contract's `overrides` channel; cross-investigation

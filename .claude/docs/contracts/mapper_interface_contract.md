@@ -142,7 +142,7 @@ Each item names what the Diagnostician must do to resolve it (read a specific fi
 
 **Each invocation is self-contained.** Every delegation from the Diagnostician to the Mapper is a single-shot interaction: one request, one report, no follow-up within the same invocation. The Mapper has no persistent memory across invocations; it builds its understanding of the environment from scratch each time.
 
-**Read-only, stdout-only.** The Mapper never modifies, creates, or deletes files. Its report is written to stdout and captured by the Diagnostician, which saves it to `artefacts/mapper/report.md`. Downstream agents receive that path and read the report themselves, so the report must stand alone.
+**Read-only, stdout-only.** The Mapper never modifies, creates, or deletes files. Its report is written to stdout and captured by the launcher, which writes it to `artefacts/mapper/report_<tag>_mapper_1.md`. Downstream agents receive that path and read the report themselves, so the report must stand alone.
 
 **Section headings are markdown, and their text is verbatim.** Emit each report section as a markdown heading at the level shown in the Report Format above (`### Summary`, `### Pipeline Model`, …), using the exact heading text, in the order given. Plain-text section titles are not sufficient: the Diagnostician locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read. This is stated explicitly rather than left to be inferred from the formatting of this document.
 

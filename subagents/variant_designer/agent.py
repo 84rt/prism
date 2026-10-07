@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from subagents.runner import run_agent
+from subagents.runner import contract_section, run_agent
 from subagents.variant_designer.system_prompt import SYSTEM_PROMPT
 
 ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
@@ -169,6 +169,10 @@ The measured rate of the target behaviour in the environment supplied above.
     if constraints:
         prompt += f"\n## Constraints\n\n{constraints}\n"
 
+    # Absolute contract path first, so the read-first instruction resolves from
+    # any working directory (see runner.contract_section).
+    prompt = contract_section(".claude/docs/contracts/designer_interface_contract.md") + "\n\n" + prompt
+
     # Memory is disabled: each design round is self-contained, per the
     # contract. Continuity across rounds arrives through the candidate ledger
     # and the `constraints` field, both supplied by the Diagnostician. This
@@ -186,4 +190,5 @@ The measured rate of the target behaviour in the environment supplied above.
         model=data.get("subagent_model"),
         thinking=data.get("subagent_thinking"),
         route=data.get("subagent_route"),
+        max_turns=data.get("subagent_max_turns"),
     )

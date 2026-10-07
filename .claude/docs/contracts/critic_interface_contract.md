@@ -40,8 +40,8 @@ An unknown mode, or a mode missing one of its required fields, is an **agent err
 
 ### Fields for `candidate_critique`
 
-- **`transcript_paths`** (required) — an array of absolute paths to the transcripts of the episode under investigation.
-- **`mapper_report_path`** (required) — absolute path to the Mapper's briefing, saved at `artefacts/mapper/report.md`.
+- **`transcript_paths`** (required) — an array of absolute paths to **plain-text** transcripts of the episode under investigation, produced by `scripts/dump_transcripts.py`. Never an `.eval` file: those are zip archives, and a Critic handed one reads nothing.
+- **`mapper_report_path`** (required) — absolute path to the Mapper's briefing, written by the launcher at `artefacts/mapper/report_<tag>_mapper_1.md`.
 - **`candidates`** (required) — the candidate ledger as JSON: each entry with `id`, `slug`, `statement`, `discriminating_signature`, `status`. **Produce it with `scripts/ledger_to_json.py`** (`uv run --no-project python scripts/ledger_to_json.py investigations/<name>/CANDIDATES.md -o <request dir>/candidates.json`), never by hand: it serialises the ledger's live sections and refuses, with the defects listed, to emit any live candidate whose *Statement* or *Discriminating signature* field is missing. A candidate written as prose otherwise reaches the Critic as two empty strings, and the Critic then critiques a blank — which has happened, and produced retirement advice that rested on the emptiness rather than the candidate. A refusal means the ledger entry needs rewriting in the §State Management field format before the request is sent.
 - **`iteration`** (required) — integer. `0` for the step-2 invocation, then the iteration number.
 - **`evidence_summary`** (optional) — for post-3d invocations: what the last round of experiments showed, stated mechanistically (rates and directions, not conclusions).
