@@ -46,6 +46,15 @@ If you are running the analyst on transcripts from a single condition (e.g., onl
 
 ---
 
+### Writing construal checks
+
+A construal check asks whether a manipulation changed the model's *reading* of its situation, not merely the text it saw. Without one, a null on the measured behaviour cannot tell "the manipulated property does not matter" apart from "the model never registered the edit" — and a large effect cannot tell "this exact edit matters" from "something coarser that the edit happened to change matters". In one archived run, moving a warning into a tool description took a behaviour from 84% to 0%; the check showed the model never read tool descriptions at all, so the result was that the warning's *presence* mattered, not its location. Specify one check for each condition whose interpretation depends on a construal shifting, and send the round's checks as one `construal_checks` set on the round's Analyst invocation (`analyst_interface_contract.md §Construal checks`).
+
+- **The test of a good check is that it could come out negative.** "The warning text is present in the prompt" cannot fail and is worthless; "the model's reasoning refers to the warning when deciding what to do" can.
+- **Avoid the two scorability failures** the Analyst will label: a near-universal property pins at ceiling in every condition and cannot move; a property no transcript expresses pins at floor. Rate what the reasoning *concludes*, not whether reasoning *occurs*.
+- **The firewall trade-off is real, so bound it.** De-identification hides which check belongs to which condition, but a check's wording names the construct a manipulation targets, so the Analyst learns roughly what the investigation is probing. Phrase each check as a neutral construal question, exactly as you would the topic — never the hypothesis, never a predicted direction — and record in the Phase 3 caveats that construal checks were used and what they named.
+- **Record the private mapping before sending:** beside the condition-label mapping in the log, the check → condition table with each check's intended direction (which rate should rise or fall, in which condition, against which control). The verdicts are derived from it after the report arrives.
+
 ## Before delegating: pre-checks on execution data
 
 Before sending transcripts to the analyst, review the Experiment Executor's execution report for issues that affect transcript quality.
@@ -92,6 +101,20 @@ Before interpreting the analyst's findings, check:
 **Could a metadata imbalance explain the finding?** If condition_A and condition_B happen to use different models, different *routes to the same model*, different tasks, or different prompt lengths, the analyst's findings might reflect these differences rather than the intended manipulation. Route imbalance is the easiest of these to miss because both conditions name the same model — check the Executor's Route column, not just the model string. Check whether the analyst reported any metadata correlations with condition labels.
 
 **Could the scanner design explain the finding?** If the scanner question is phrased in a way that is more likely to trigger on certain kinds of transcripts for reasons unrelated to the target signal (e.g., longer transcripts, transcripts with more reasoning tokens), the finding may be an artefact. Consider whether a differently-phrased scanner would produce the same result.
+
+**Is any headline condition flagged `[precision drift]`?** The per-condition precision audit hand-reads each headline scanner's positives in every condition. A drift flag means the scanner over-fires in that condition, so its rate there is inflated. Work out which way that cuts for the comparison: drift in the condition you expected to be higher inflates the effect and weakens the finding; drift in the other condition shrinks it and the finding survives conservatively. Say which, in §2i and the report. The audit is the analyst's own reading, so a clean audit rules out gross drift only.
+
+### Deriving the construal-check verdicts
+
+The analyst reports each check's rate in every condition, the pairwise difference matrix, and a scorability label — never a verdict. Derive one verdict per condition from the private table you recorded before sending:
+
+- **`succeeded`** — the Newcombe-Wilson 95% CI on (condition − its control) excludes zero, with the intended sign.
+- **`failed`** — the CI excludes zero with the opposite sign, or the check is `not scorable [constant]` (the construal could not be read).
+- **`ambiguous`** — the CI straddles zero.
+- **`void (check unvalidated)`** — the scanner failed validation; distinct from `failed`, because nothing was measured.
+- **`void (edit did not arrive)`** — a `[provisional]` surface proxy shows the condition's edit is absent from what the model saw. This is the only use of a proxy.
+
+A condition whose verdict is anything but `succeeded` has an **uninterpretable** behavioural result: a null there is not evidence the manipulated property does not matter, and an effect there is not evidence it does. Two further reads the set makes possible: a check that moved in a condition it was not assigned to is a confound on that condition; a check that moved in every condition relative to control is measuring something other than the targeted construal. Record each verdict in the log's Analyst Findings block.
 
 ### Using transcript excerpts
 

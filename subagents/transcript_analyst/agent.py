@@ -109,6 +109,27 @@ def normalise_construal_checks(spec: dict[str, Any]) -> tuple[dict[str, Any], li
     return grader_spec, checks
 
 
+def _construal_checks_section(checks: list[dict[str, str]]) -> str:
+    """Render a normalised check set as the request's `## Construal Checks` section.
+
+    Parameters
+    ----------
+    checks : list[dict[str, str]]
+        Output of :func:`normalise_construal_checks`, e.g.
+        ``[{"id": "M1", "property": "..."}]``.
+
+    Returns
+    -------
+    str
+        The section, with the no-verdict rule attached so it travels with the set.
+    """
+    return (
+        "## Construal Checks\n\n"
+        f"```json\n{json.dumps(checks, indent=2)}\n```\n\n"
+        f"{CONSTRUAL_CHECKS_RULE}"
+    )
+
+
 async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
     """Run the transcript analyst agent and return its analysis report."""
     sections = [
@@ -123,6 +144,25 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
         sections.append(
             f"## Constraints\n\n```json\n{json.dumps(data['constraints'], indent=2)}\n```"
         )
+
+    # --- Construal checks: one renderer, one place per mode ---
+    # Orchestrator mode sends them as a top-level `construal_checks` list;
+    # forensic mode keeps them inside `behaviour_spec` (normalised below). A
+    # set in the wrong place for its mode is an error rather than a guess,
+    # because an unread key would silently run the round with no check.
+    top_level_checks = data.get("construal_checks")
+    if top_level_checks is not None and data.get("behaviour_spec"):
+        raise RuntimeError(
+            "Transcript analyst: in forensic mode construal checks go inside "
+            "behaviour_spec.construal_checks, not at the top level"
+        )
+    if top_level_checks is not None:
+        try:
+            _, orch_checks = normalise_construal_checks({"construal_checks": top_level_checks})
+        except ValueError as exc:
+            raise RuntimeError(f"Transcript analyst: malformed construal_checks — {exc}") from exc
+        if orch_checks:
+            sections.append(_construal_checks_section(orch_checks))
 
     # Model Forensics mode: a fixed grader for a named behaviour, applied
     # across all conditions. Additive and optional — an invocation without
@@ -143,11 +183,7 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
         # the spec, so there is exactly one place the analyst reads them from
         # and the no-verdict rule sits next to the set it applies to.
         if checks:
-            sections.append(
-                "## Construal Checks\n\n"
-                f"```json\n{json.dumps(checks, indent=2)}\n```\n\n"
-                f"{CONSTRUAL_CHECKS_RULE}"
-            )
+            sections.append(_construal_checks_section(checks))
         # The work order is restated per request, not only in the system
         # prompt: an explicit request-level ordering is what recovered the
         # runs whose Analyst spent its turns on open-ended scanners first.

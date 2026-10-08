@@ -115,6 +115,35 @@ def test_orchestrator_mode_prompt_carries_no_forensic_text(monkeypatch):
     assert FORENSIC_WORK_ORDER not in got["system_prompt"]
 
 
+def test_orchestrator_mode_construal_checks_render_without_forensic_text(monkeypatch):
+    """Orchestrator mode sends checks at the top level; they render, and nothing forensic leaks in."""
+    got = _build(monkeypatch, **BASE_REQUEST, construal_checks=CHECKS)
+    assert got["system_prompt"] is SYSTEM_PROMPT
+    assert "## Construal Checks" in got["prompt"]
+    assert CONSTRUAL_CHECKS_RULE in got["prompt"]
+    for c in CHECKS:
+        assert c["property"] in got["prompt"]
+    for marker in ("## Behaviour Spec", "## Work Order", "Forensic mode"):
+        assert marker not in got["prompt"]
+
+
+def test_top_level_checks_in_forensic_mode_are_rejected(monkeypatch):
+    """One place per mode: a forensic request must carry its checks inside behaviour_spec."""
+    with pytest.raises(RuntimeError, match="inside behaviour_spec.construal_checks"):
+        _build(monkeypatch, **BASE_REQUEST, behaviour_spec={"description": "d", "grader_dir": "/g"}, construal_checks=CHECKS)
+
+
+def test_malformed_top_level_checks_are_an_agent_error(monkeypatch):
+    with pytest.raises(RuntimeError, match="malformed construal_checks"):
+        _build(monkeypatch, **BASE_REQUEST, construal_checks="not a list")
+
+
+def test_base_prompt_carries_precision_audit_and_check_rules():
+    """Both modes inherit the audit and the no-verdict check handling from the shared prompt."""
+    for phrase in ("Per-condition precision audit", "[precision drift]", "state no verdict", "not scorable [constant"):
+        assert phrase in SYSTEM_PROMPT
+
+
 def test_malformed_spec_surfaces_as_runtime_error_for_exit_2(monkeypatch):
     """`run_cli` converts RuntimeError to exit 2; a ValueError would escape as exit 1."""
     spec = {"description": "d", "construal_checks": CHECKS, "manipulation_check": "x"}

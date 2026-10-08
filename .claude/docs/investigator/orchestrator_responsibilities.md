@@ -148,6 +148,8 @@ The report structure is defined in `explorer_interface_contract.md §Report Form
    - Respecting Variant Dependencies — if the Explorer recorded that Variant A at Site 1 requires Variant B at Site 2, do not construct a condition that pairs them otherwise.
    - Naming each condition in filesystem-safe `snake_case` (e.g., `control`, `treatment_explicit_goal`).
    - Deciding factorial vs. selected design: if the hypothesis concerns a single IV, control + treatment at the relevant site(s) suffices. If the hypothesis concerns an interaction between multiple IVs, run all coherent combinations of variants. Cost and iteration-budget constraints may require pruning; prune by scientific relevance, not by convenience.
+   - **Adding a positive control whenever a null would be load-bearing.** If a plausible outcome of this iteration is "no effect", and that outcome would be reported as a finding — *the eval is robust to X*, *feature Y does not matter* — add one condition in which the effect is present by construction: an exaggerated version of the manipulation, or one that makes the target behaviour plainly available or plainly instructed. It must move **the same measurement in the same setting**; a control that moves a different scanner, or works only in a different environment, does not show this instrument could have varied here. Without one, a null is reported as *no detectable effect, instrument unverified* (Step 2h). It costs one condition, and only when a null is a headline.
+   - **Specifying a construal check for each condition whose interpretation depends on the model's reading shifting** — whether it registered the edit, not whether the text changed. Write it as an observable property that could come out negative, with its intended direction, per `orchestrator_analyst_guide.md §Writing construal checks`. It goes to the Analyst at Step 2g as one de-identified set.
 
 **Additional methodological checks:**
 
@@ -332,6 +334,7 @@ This is the orchestrator's most important cognitive task. The Transcript Analyst
    - **Topic**: The neutral topic from Step 2f.
    - **Transcript source**: A mapping from opaque condition labels to log directory paths (e.g., `{"condition_A": "<iteration_dir>/logs/control/", "condition_B": "<iteration_dir>/logs/treatment/"}`). Randomise the mapping between condition labels and actual conditions.
    - **Scanning model** (optional): Override the default scanning model if needed.
+   - **Construal checks** (when Step 2b specified any): the round's checks as one de-identified `construal_checks` list with opaque ids (`M1`, `M2`, …) and no indication of which condition each bears on. The check → condition mapping and intended directions stay in the log, beside the label mapping.
    - **Constraints** (optional): Limit transcript count, concurrency, etc.
    - **Artefacts directory**: Pass `<iteration_dir>/artefacts/` so the analyst writes its outputs to `<iteration_dir>/artefacts/analyst/`.
 
@@ -369,11 +372,17 @@ Run lightweight consistency checks before interpreting findings. See `orchestrat
 
 4. **Check for floor/ceiling exposure on apparent nulls — hard gate.** Per-condition rates are tagged `[floor]` (upper Wilson CI < 0.20) or `[ceiling]` (lower Wilson CI > 0.80) in the analyst's report. A between-condition null where one or both conditions carry such a tag is **not** evidence of construct equivalence — it is evidence the elicitation regime has no headroom to register the effect under that condition. Degrade any such finding to *uninformative-due-to-floor/ceiling* in §2i and Phase 3. Treat the next-iteration decision (§2j) as a metric / manipulation-strength / elicitation-regime question, not a hypothesis question — there is no point varying H when the metric cannot move. Floor/ceiling exposure also applies to between-condition differences that *do* clear the CI gate: a 90% → 70% drop and a 30% → 10% drop are both 20pp, but the headroom asymmetry shapes the interpretation, so surface the markers in §2i either way.
 
-5. **Engage with the multiple-comparisons count.** If the analyst reports > 5 between-condition tests across all scanners and pairs, read the Bonferroni-corrected p-values. Any "would not survive multiplicity correction" flag means the finding is hypothesis-generating, not evidence — degrade your interpretation accordingly. Persistent failure to survive Bonferroni across iterations is itself a signal that the investigation is generating noise rather than findings.
+5. **A null needs its positive control — hard gate.** A between-condition null that clears the floor/ceiling gate is still not evidence of *no effect* unless the iteration's positive control (Step 2b) moved the same scanner in the same setting. If it did, the instrument demonstrably could vary here and the null is informative. If there was no positive control, or it did not move, report the null as *no detectable effect, instrument unverified* in §2i and Phase 3 — never as robustness or equivalence.
 
-6. **Check the reliability flag per Summary scanner.** Scanners tagged `marginal` (0.4 ≤ κ < 0.6) should not anchor your interpretation in §2i; treat them as supporting context for `reliable` findings (κ ≥ 0.6), not as headline evidence in their own right.
+6. **Read every `[precision drift]` flag.** The analyst audits each headline scanner's precision per condition. A drifted condition's rate is inflated; work out which way that cuts for each affected comparison (`orchestrator_analyst_guide.md §Checking for confounds`) and carry it into §2i.
 
-7. **Check for differential attrition.** Are transcript exclusion counts balanced across conditions?
+7. **Read the construal checks' scorability labels, then derive the verdicts** (`orchestrator_analyst_guide.md §Deriving the construal-check verdicts`) before interpreting anything else. A condition whose check verdict is not `succeeded` has an uninterpretable behavioural result, in either direction.
+
+8. **Engage with the multiple-comparisons count.** If the analyst reports > 5 between-condition tests across all scanners and pairs, read the Bonferroni-corrected p-values. Any "would not survive multiplicity correction" flag means the finding is hypothesis-generating, not evidence — degrade your interpretation accordingly. Persistent failure to survive Bonferroni across iterations is itself a signal that the investigation is generating noise rather than findings.
+
+9. **Check the reliability flag per Summary scanner.** Scanners tagged `marginal` (0.4 ≤ κ < 0.6) should not anchor your interpretation in §2i; treat them as supporting context for `reliable` findings (κ ≥ 0.6), not as headline evidence in their own right.
+
+10. **Check for differential attrition.** Are transcript exclusion counts balanced across conditions?
 
 ---
 
@@ -487,11 +496,11 @@ These questions don't have mechanical answers. They require judgement — the ki
 
 **Orchestrator work:**
 
-1. **Write the standalone findings report.** Before presenting to the user, write the final synthesis to `investigations/<investigation_name>/FINDINGS-REPORT.md` as an independent document. This is distinct from `INVESTIGATION-LOG.md`: the log is the cumulative per-iteration state; the findings report is the final standalone synthesis. *Do not append the findings report to the log.* A reader should be able to open `FINDINGS-REPORT.md` and understand the investigation's conclusions without consulting the log. The structure of the report follows steps 2–6 below.
+1. **Write the standalone findings report.** Before presenting to the user, write the final synthesis to `investigations/<investigation_name>/FINDINGS-REPORT.md` as an independent document. This is distinct from `INVESTIGATION-LOG.md`: the log is the cumulative per-iteration state; the findings report is the final standalone synthesis. *Do not append the findings report to the log.* A reader should be able to open `FINDINGS-REPORT.md` and understand the investigation's conclusions without consulting the log. The structure of the report follows steps 2–6 below. If construal checks were used, the caveats (step 4) say so and name the constructs they referred to — the checks' wording told the Analyst roughly what was being probed, and a reader should know that.
 
 2. **Headline finding (1-2 sentences).** What was the research question, and what did you find? State the effect direction and magnitude. If the result is null, say so directly.
 
-3. **Evidence summary (brief).** Per-iteration: what was manipulated, what changed, key numbers. Use a table if there were multiple iterations. Do not relay the full analyst report — summarise the 2-3 strongest signals with their per-condition rates and validation metrics.
+3. **Evidence summary (brief).** Per-iteration: what was manipulated, what changed, key numbers. Use a table if there were multiple iterations. Do not relay the full analyst report — summarise the 2-3 strongest signals with their per-condition rates and validation metrics. Include each condition's construal-check verdict, and report any null without a moving positive control as *no detectable effect, instrument unverified*.
 
 4. **Caveats and limitations.** What could undermine these findings? Include: sample size adequacy, baseline variance across iterations, scanner precision/recall, differential attrition, confounds not controlled for, **and provider-family coverage** — if the model set was single-provider *and* the headline finding is a construct-level claim (i.e. about a behaviour or eval property meant to generalise, not about a specific model's behaviour), the construct-validity is tested against one operationalisation; state that explicitly with a one-line provider-sensitivity caveat. When the headline is intentionally model-specific (e.g. *"Opus 4.7 exhibits behaviour X under condition Y"*), the multi-provider caveat does not apply — the claim is already scoped to that model. (See `eval_science_principles.md` §3, Q4 corollary.) Be specific — "more work is needed" is not a caveat.
 
@@ -544,7 +553,8 @@ Research scope unchanged since iteration 1.
 - Open questions resolved: <list, if any>
 
 ### Conditions Constructed
-- <list of named conditions with variant choices per site>
+- <list of named conditions with variant choices per site; mark the positive control, if any>
+- Construal checks (private — never sent with this mapping): <check id → condition, intended direction, against which control>
 
 ### Modifications Applied
 - Experiment directory: <path>
@@ -560,6 +570,8 @@ Research scope unchanged since iteration 1.
 ### Analyst Findings
 - Scan results path: <path>
 - Key patterns: <summary>
+- Construal-check verdicts (derived): <per condition: succeeded / failed / ambiguous / void — with the check's scorability label>
+- Precision drift: <none, or affected condition(s) and which way it cuts>
 - Supports/contradicts/ambiguous: <assessment>
 
 ### Surprises
@@ -721,3 +733,7 @@ If Model A succeeded but Model B failed entirely, the orchestrator can still sen
 11. **Silently changing how a model is reached.** A model's route is part of the measurement instrument, not a delivery detail. Re-pinning to a different upstream provider, dropping a pin to get a failing command through, or letting one condition run unpinned while another is pinned all mean the conditions were measured on different instruments — and unlike a changed model, nothing in the model string reveals it. If a route changes for any reason, everything already run against that model becomes non-comparable: say so in the log, decide explicitly whether to re-run or discard, and carry it into the report's limitations. The Executor will never re-pin on its own precisely so that this stays your decision.
 
 12. **Silently swapping the hypothesis between iterations, or within an iteration.** Each iteration tests exactly one hypothesis, named in its `### Hypothesis this iteration → Statement` field and locked for the duration of that iteration. *Between iterations:* if iteration N+1 tests something even subtly different from iteration N, the new hypothesis must be written into iteration N+1's Statement field as part of the Step 2j Option 2 decision, not retrofitted later. *Within an iteration:* follow-ups, alternative angles, or more exciting avenues that the Analyst's findings or the *Surprises* section surface mid-flight go into the *next* iteration's block — never appended to this iteration's Statement, and never quietly tested by tweaking conditions or scanner questions partway through. A change that goes unnamed cannot be audited, cannot be retracted, and cannot be re-tested. "No change" is a valid answer; "silently different" is not.
+
+13. **Reporting a null as robustness without a positive control.** "No effect" means the manipulated property does not matter only when a positive control showed this measurement, in this setting, could have moved. Otherwise the honest finding is *no detectable effect, instrument unverified*.
+
+14. **Reading a behavioural result whose construal check did not succeed.** If the model never registered the edit, neither a null nor an effect tells you what the edit was meant to test. A `failed`, `ambiguous` or `void` check makes that condition's result uninterpretable in both directions.

@@ -50,6 +50,19 @@ Enforceable: maximum number of transcripts to scan (maps to `--limit`), maximum 
 
 Best-effort: budget limits on API calls, specific scanner types to use or avoid, or preferences about scanning granularity. The analyst should respect these but there is no mechanism that enforces them at the tooling level.
 
+### Construal checks (optional)
+
+A list of observable properties of the model's **construal** of its situation — whether its *reading* shifted, not merely whether the text it saw did — sent as `construal_checks`, each entry a string or `{"id": "M1", "property": "..."}`:
+
+```json
+"construal_checks": [
+    {"id": "M1", "property": "Whether the model's reasoning refers to the warning about its actions"},
+    {"id": "M2", "property": "Whether the model treats the stated deadline as binding"}
+]
+```
+
+The set is **de-identified**: it never says which check bears on which condition, ids are opaque, and every check is rated across every condition. The analyst builds and validates one scanner per check, reports per-condition rates and the full pairwise difference matrix, labels each check's scorability, and states **no** `succeeded` / `failed` / `ambiguous` verdict — the orchestrator derives verdicts from its private check→condition mapping. A property is phrased as a neutral construal question exactly as the topic is: it may name the construct a manipulation targets, but never the hypothesis or a predicted direction.
+
 ### Artefacts directory (optional)
 
 A path to a shared artefacts directory for the investigation. When provided, the analyst creates an `analyst/` subdirectory within it and writes all file outputs there (scripts, scan results, validation sets, reports). This keeps all investigation artefacts co-located. If not provided, the analyst writes to the current working directory.
@@ -73,6 +86,8 @@ Tag each headline scanner with a one-word reliability flag based on its chance-a
 **Surface floor/ceiling exposure in the Summary.** If any per-condition rate underlying a headline finding is tagged `[floor]` or `[ceiling]` per §Quantified Results, name it on the headline line for that finding (e.g. "condition_B − condition_A: 1pp [−6, +9pp] (Newcombe-Wilson 95% CI; Fisher's exact p = 0.81); condition_A and condition_B both at floor"). Between-condition equivalence claims are uninformative when one or both arms lack headroom — the marker tells the orchestrator the null may be a property of the elicitation regime, not of the hypothesis.
 
 State the total number of between-condition statistical tests performed (across all scanners and condition pairs) so the reader can judge multiplicity. When this count exceeds 5, Bonferroni-corrected p-values are reported in §Quantified Results.
+
+**Carry the instrument flags onto the Summary line.** Any `[precision drift]` flag (§Validation metrics) is named on the headline line of the finding it affects. When a construal-check set was supplied, each check's scorability label (`scorable`, `not scorable [unvalidated]`, `not scorable [constant: …]`) appears in the Summary — labels only, never a verdict.
 
 ### Scanner definitions
 
@@ -105,6 +120,8 @@ For each scanner, computed against a labelled validation set of **at least 50 tr
 
 If a scanner has not been validated at all, this must be stated explicitly. Unvalidated scanner results are confined to the "Provisional" subsection in §Quantified Results.
 
+**Per-condition precision audit (required for every headline scanner).** A validation set pooled across conditions can hide a scanner that over-fires in one condition. For each scanner whose between-condition difference is a Summary headline, report precision per condition from a hand-read audit sample of that condition's positives (all of them if ten or fewer, otherwise at least ten at random), with its Wilson 95% interval, beside the validation-set precision. Flag a condition whose audit interval lies wholly below the validation precision as `[precision drift]`. The audit labels are the analyst's own reading, so state that the audit is a model-judged spot check: it catches gross drift, not subtle drift.
+
 ### Quantified results
 
 Detection rates, distributions, and breakdowns by condition label and any other relevant metadata dimensions. Results should be presented as structured data (DataFrames or tabular summaries) that the orchestrator can further analyse, not as narrative prose.
@@ -128,6 +145,8 @@ Format: `r [scanner-adjusted: a–b] (Wilson 95% CI: c–d), n=N [floor|ceiling]
 These are the headline statistics for the hypothesis test — the rates themselves are supporting detail.
 
 **Multiple-comparisons accounting.** Count the total number of between-condition Fisher's exact tests performed (across all scanners × condition pairs). When the count exceeds 5, also report Bonferroni-corrected p-values (raw p × test count). Flag any tests where raw p < 0.05 but Bonferroni-corrected p ≥ 0.05 as "would not survive multiplicity correction."
+
+**Construal checks (required when a set was supplied).** For each check: its per-condition rates in the boolean format above, the full matrix of pairwise between-condition differences (Newcombe-Wilson CI and Fisher's exact p for every pair, counted in the multiple-comparisons total), and its scorability label. No condition is singled out as a reference arm and no verdict is stated.
 
 **Overall counts.** Total transcripts scanned, total per condition, any transcripts excluded and why.
 

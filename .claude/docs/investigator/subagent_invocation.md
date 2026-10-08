@@ -181,6 +181,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 - `subagent_model` is optional; the model the Analyst agent runs on. **Distinct from `scanning_model`**, which is the model Scout uses for LLM scanners — `subagent_model` changes which model *does the analysis*, `scanning_model` changes which model the scanners *call*
 - `subagent_thinking` is optional; the Analyst's extended-thinking config (see General Pattern above)
 - When `artefacts_dir` is provided, the analyst writes all file outputs to `<artefacts_dir>/analyst/`
+- `construal_checks` is optional (**Orchestrator mode only**): a de-identified list of construal properties — strings or `{"id": "M1", "property": "..."}` — each built as its own validated scanner and rated across every condition, with no verdict stated (see `analyst_interface_contract.md §Construal checks`). Keep the check→condition mapping in the investigation log, never in the request. In forensic mode the set goes inside `behaviour_spec` instead, and sending it at the top level there is an agent error (exit 2)
 
 **Returns**: Scanner definitions, validation metrics, quantified results (per-condition detection rates), scan results path, transcript exclusions, transcript excerpts, additional observations. See `analyst_interface_contract.md` for the full report format.
 
