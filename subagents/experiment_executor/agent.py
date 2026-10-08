@@ -9,7 +9,13 @@ from subagents.experiment_executor.system_prompt import SYSTEM_PROMPT
 from subagents.runner import contract_section, run_agent
 
 ALLOWED_TOOLS = ["Bash", "Read", "Glob", "Grep"]
-DISALLOWED_TOOLS = ["Edit", "WebSearch", "WebFetch"]
+# Write is disallowed outright, not merely left off ALLOWED_TOOLS: sub-agents
+# run under bypassPermissions, so an unlisted tool is still offered, and the
+# runner's write hook then blocks every call to it (no memory file). The
+# Executor never needs to write a file — the prompt builder persists the
+# request before the agent starts — so offering Write only invited blocked
+# calls (an older prompt's "write an input JSON" wording produced exactly that).
+DISALLOWED_TOOLS = ["Edit", "Write", "WebSearch", "WebFetch"]
 
 # Files this agent must not read. Mapping of filename pattern → reason.
 # The Executor must read its own contract (executor_interface_contract.md);

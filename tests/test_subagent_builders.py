@@ -136,8 +136,7 @@ def _requests(tmp_path) -> dict:
     }
 
 
-# The Explorer (Orchestrator-only) joins this list in the Science-of-Evals commit.
-ROLES = ["mapper", "designer", "executor", "analyst", "critic"]
+ROLES = ["explorer", "mapper", "designer", "executor", "analyst", "critic"]
 
 
 # --- Invariants ----------------------------------------------------------------

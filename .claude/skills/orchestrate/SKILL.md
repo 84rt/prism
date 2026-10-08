@@ -38,18 +38,18 @@ The pipeline is not optional and is not a default you may opt out of when the ev
 | Agent | Receives | Returns |
 |-------|----------|---------|
 | Environment Explorer | Hypothesis, experiment description, environment path, optional constraints | Structured briefing: environment summary, pipeline model, modification sites with diffs, variant dependencies, risk assessment, open questions. See `explorer_interface_contract.md` |
-| Experiment Executor | Experiment name, experiment dir, conditions, models, model routing, overrides | Log paths, route used, status per condition-model pair, errors, retry flags |
+| Experiment Executor | Experiment name, experiment dir, conditions, models, model routing, overrides | Execution report: matrix, error taxonomy, termination metadata, concurrency decision, zero-sample pairs — never scores |
 | Transcript Analyst | **Neutral topic** (never the hypothesis), transcript source (condition→path mapping), scanning model?, constraints? | Scanner definitions, validation metrics, quantified results, scan results path, transcript exclusions, excerpts |
 
 **Critical rule:** The Transcript Analyst must NEVER receive the hypothesis. It receives only a neutral topic that you construct. This is the primary safeguard against confirmation bias. See `hypothesis-methodology.md` for detailed guidance on neutral topic translation.
 
-**Executor prompts should be minimal.** The executor already knows its protocol from its own agent definition. Give it: (1) the exact `uv run inspect eval ...` commands to run, (2) log directories, (3) whether to skip preflight. Do not repeat its protocol back to it.
+**Executor requests are declarative.** Send the contract's request JSON — conditions, models, routing, overrides — and nothing else. Its batch runner builds the `inspect eval` commands, log directories and preflight itself; do not write commands for it or repeat its protocol back to it.
 
 **Scope boundaries:** Do NOT load `.claude/docs/references/inspect_reference.md` (that's for the Executor). The Analyst's system prompt and tooling (Inspect Scout) are not your concern. Loading sub-agent reference material into your context wastes tokens and creates confusion about role boundaries.
 
-**Run sub-agents via Bash.** Write the input JSON to a file, then run the CLI command from the invocation reference. Capture stdout as the report.
+**Run sub-agents through the detached launcher.** Write the input JSON to a file and launch it with `scripts/launch_subagent.py launch <role> …`, then poll with `wait` (see the invocation reference's §General Pattern). Never run a sub-agent's CLI in the foreground: the Executor now runs for as long as the evals do, which outlasts the Bash tool's 10-minute cap, and a foreground or `nohup … &` launch dies with the session.
 
-**Artefacts management.** Create an `artefacts/` directory within each iteration directory at `investigations/<investigation_name>/<iteration_name>/artefacts/`. Save Explorer and Executor stdout reports to `artefacts/explorer/report.md` and `artefacts/executor/report.md` respectively. Pass the `artefacts/` path to the Transcript Analyst via the `artefacts_dir` input field — it writes its own outputs to `artefacts/analyst/`. This keeps all iteration outputs co-located.
+**Artefacts management.** Create an `artefacts/` directory within each iteration directory at `investigations/<investigation_name>/<iteration_name>/artefacts/` and pass it to the launcher as `--artefacts-dir`, with the iteration name as `--tag`. The launcher writes each report to `artefacts/<role>/report_<tag>_<role>_<n>.md` — there is no separate save step; cite that path in the log. Pass the same `artefacts/` path to the Transcript Analyst via its `artefacts_dir` input field — it writes its own outputs to `artefacts/analyst/`. This keeps all iteration outputs co-located.
 
 ## Pipeline
 

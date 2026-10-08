@@ -115,10 +115,10 @@ The request and report formats for the Explorer are defined in `explorer_interfa
 
 **Orchestrator work:**
 - **Precondition: write the `### Hypothesis this iteration` block before launching the Explorer.** The iteration's hypothesis must be named in the investigation log's per-iteration *Hypothesis this iteration → Statement* field before the Explorer is invoked, and the hypothesis string passed to the Explorer must match the Statement field exactly. If you find yourself about to pass a different hypothesis to the Explorer than what the block says, stop and update the block first — silent mismatches between log and Explorer input are the same failure mode as silent hypothesis swaps between iterations (see Anti-Patterns).
-- Construct the Explorer input JSON per `explorer_interface_contract.md §Request Format` and launch via CLI script (see `subagent_invocation.md`).
+- Construct the Explorer input JSON per `explorer_interface_contract.md §Request Format` and launch it through the detached launcher (`subagent_invocation.md §General Pattern`), with `--tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts`.
 - The hypothesis IS passed to the Explorer — this is the one agent that receives it directly. (The Transcript Analyst must NOT receive it.)
 - If prior iterations have narrowed the scope, pass any shaping preferences via the optional `constraints` field (e.g., "focus on system prompt and scoring; skip the scaffold directory").
-- Save the Explorer's stdout report to `<iteration_dir>/artefacts/explorer/report.md`.
+- The Explorer's report lands at `<iteration_dir>/artefacts/explorer/report_<iteration_name>_explorer_<n>.md` (the launcher writes it; there is no separate save step). Cite that path in the log.
 
 **What can go wrong:**
 - The Explorer reports that no viable modification sites exist with the given environment and hypothesis. Report to user and revise.
@@ -188,7 +188,7 @@ This is entirely the orchestrator's work. No sub-agent handles this.
    ```
    investigations/<investigation_name>/<iteration_name>/artefacts/
    ```
-   This directory is passed to sub-agents that produce file outputs. Each sub-agent creates its own subdirectory (e.g., `artefacts/analyst/`). The orchestrator saves stdout reports from sub-agents that cannot write files themselves (the Environment Explorer) to `artefacts/explorer/report.md`.
+   This directory is passed to the launcher as `--artefacts-dir` for every sub-agent of the iteration; the launcher writes each sub-agent's report, stderr, cost sidecar and receipt under `artefacts/<role>/`, and the Analyst additionally writes its own outputs to `artefacts/analyst/`.
 
 2. **Apply the Explorer's diffs and choose the activation pattern.** The Explorer provides diffs with exact file paths and line ranges but does not prescribe how conditions are activated at runtime — that is Inspect-specific translation the orchestrator handles here. Choose one of the following patterns based on the diffs:
    - **Parameter-based conditions** (Pattern A): apply any shared modifications common to all conditions, then rely on different `-T` values to activate each condition at runtime. This may involve creating condition-specific copies of files referenced by the parameter (e.g., `system_prompt_control.txt`, `system_prompt_treatment.txt`).
@@ -221,9 +221,9 @@ The request and report formats for the Executor are defined in `executor_interfa
 
 2. **Assemble the Executor input JSON** per `executor_interface_contract.md §Request Format`. Required: `experiment_name`, `experiment_dir`, `conditions`, `models`. Pass this iteration's `<iteration_name>` and `<iteration_dir>` as the values of the schema's `experiment_name` and `experiment_dir` fields respectively — the schema retains its historical field names but the values are per-iteration. Optional `overrides` supports `sample_limit`, `sample_id`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `command_timeout_seconds` (`runs_per_condition` was removed and is refused; use `epochs`).
 
-3. **Launch the Experiment Executor sub-agent** via CLI script (see `subagent_invocation.md`).
+3. **Launch the Experiment Executor sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) with `--tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts`, and poll with `wait`. The Executor drives a detached batch runner and reports only when the batch is terminal, so expect it to run as long as the evals do — hours for sandboxed evals.
 
-4. **Save the Executor's stdout report** to `<iteration_dir>/artefacts/executor/report.md`.
+4. **Read the Executor's report** at the launcher's per-invocation path (`<iteration_dir>/artefacts/executor/report_<iteration_name>_executor_<n>.md`); there is no separate save step. Read the **Zero-sample pairs** line first — a pair that completed zero samples is an execution defect, never a rate.
 
 **What can go wrong:**
 - A task file path in `conditions` does not resolve inside the experiment directory. Double-check paths before launching.
@@ -236,7 +236,7 @@ The request and report formats for the Executor are defined in `executor_interfa
 
 The report structure is defined in `executor_interface_contract.md §Report Format`. Read the Summary first — 3–5 sentences naming the final disposition of every condition-model pair and flagging the most decision-critical observation. The remaining sections provide drill-down.
 
-**Do not read eval results.** Between receiving the Executor's report and receiving the Analyst's report, do not read eval log file contents, extract scores, compute aggregate metrics, or run `inspect log list/dump` on experiment log directories. The Executor's report contains everything needed to decide whether to proceed: Execution Matrix status, Error Summary categories and evidence, and Transcript Termination Metadata. You may verify that log *files exist* (e.g., `ls` the log directory to confirm paths before passing them to the Analyst), but you must not read their *contents*. The Analyst's blinded report must be your first view of the experimental results. Reading scores early contaminates your interpretation of the Analyst's findings — you will unconsciously seek confirmation of what you already know.
+**Do not read eval results.** Between receiving the Executor's report and receiving the Analyst's report, do not read eval log file contents, extract scores, compute aggregate metrics, or run `inspect log list/dump` on experiment log directories — and never open the batch runner's `private/` directory under `artefacts/executor/runs/`, which holds raw, score-bearing output. The Executor's report contains everything needed to decide whether to proceed: Execution Matrix status, Error Summary categories and evidence, and Transcript Termination Metadata. You may verify that log *files exist* (e.g., `ls` the log directory to confirm paths before passing them to the Analyst), but you must not read their *contents*. The Analyst's blinded report must be your first view of the experimental results. Reading scores early contaminates your interpretation of the Analyst's findings — you will unconsciously seek confirmation of what you already know.
 
 **Interpreting the Executor's report:**
 
@@ -335,7 +335,7 @@ This is the orchestrator's most important cognitive task. The Transcript Analyst
    - **Constraints** (optional): Limit transcript count, concurrency, etc.
    - **Artefacts directory**: Pass `<iteration_dir>/artefacts/` so the analyst writes its outputs to `<iteration_dir>/artefacts/analyst/`.
 
-2. **Launch the Transcript Analyst sub-agent** via CLI script (see `subagent_invocation.md`).
+2. **Launch the Transcript Analyst sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) and poll with `wait`.
 
 3. **After the Analyst returns**, review the scan results path provided in the report for sanity-checking summary statistics.
 
@@ -610,6 +610,7 @@ Research scope unchanged since iteration 1.
 ├── <eval_environment>/                       # Original eval (never modified)
 └── investigations/
     └── <investigation_name>/                 # One per research investigation
+        ├── requests/                         # Every sub-agent request, persisted by the launcher
         ├── INVESTIGATION-LOG.md              # Cumulative per-iteration state
         ├── FINDINGS-REPORT.md                # Standalone final synthesis (written in Phase 3)
         ├── <iteration_name>_v1/              # Iteration 1 working copy
@@ -618,12 +619,14 @@ Research scope unchanged since iteration 1.
         │   │   ├── control/
         │   │   └── treatment/
         │   └── artefacts/
-        │       ├── explorer/                 # Explorer report (saved by orchestrator)
-        │       │   └── report.md
-        │       ├── executor/                 # Executor report (saved by orchestrator)
-        │       │   └── report.md
-        │       └── analyst/                  # Analyst outputs (written by analyst agent)
-        │           ├── report.md
+        │       ├── explorer/                 # Written by the launcher
+        │       │   ├── report_<iter>_explorer_<n>.md
+        │       │   └── stderr_… / cost_… / receipt_…
+        │       ├── executor/
+        │       │   ├── report_<iter>_executor_<n>.md
+        │       │   └── runs/<iter>_<timestamp>/   # Batch runner state; private/ is score-bearing — never read
+        │       └── analyst/                  # Launcher report + the analyst's own outputs
+        │           ├── report_<iter>_analyst_<n>.md
         │           ├── scanners.py
         │           └── scans/
         └── <iteration_name>_v2/              # Iteration 2 working copy (if needed)
@@ -643,7 +646,7 @@ Each iteration gets its own directory. Previous iterations are never modified �
 
 The Edge Cases below concern sub-agents that *return a report* you don't like — no viable sites, no successful pairs, no patterns. This section concerns a different problem: a sub-agent that **fails to return a usable report at all** — the CLI invocation crashes, times out, exits non-zero with empty output, or the agent hits an API refusal (`stop_reason='refusal'`). These are infrastructure events, not experimental findings, and they have their own recovery discipline.
 
-**Triage before you react.** A failed invocation is a diagnostic problem, not a trigger for a fixed procedure. Capture the evidence first — exit code, combined output tail, any `stop_reason` — then work out *why* it failed before deciding what to do. The decisive distinction is transient vs. deterministic:
+**Triage before you react.** A failed invocation is a diagnostic problem, not a trigger for a fixed procedure. Capture the evidence first — the exit code in the launcher's receipt, the tail of its `stderr_…` file, the `subtype` in its cost sidecar (`error_max_turns` means the turn cap was hit; raise `subagent_max_turns` rather than retrying unchanged), any `stop_reason` — then work out *why* it failed before deciding what to do. The decisive distinction is transient vs. deterministic:
 
 - *Transient* (timeout, rate limit, one-off network/API error): re-invoking will likely succeed. Retry once or twice, noting it in the log.
 - *Deterministic* (API refusal on the content, SDK crash, misconfiguration, exhausted API credits): re-invoking unchanged fails the same way. Stop and diagnose; do not retry blindly.

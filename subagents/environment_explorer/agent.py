@@ -3,7 +3,7 @@
 from typing import Any
 
 from subagents.environment_explorer.system_prompt import SYSTEM_PROMPT
-from subagents.runner import run_agent
+from subagents.runner import contract_section, run_agent
 
 ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
 DISALLOWED_TOOLS = ["Edit", "Bash", "WebSearch", "WebFetch"]
@@ -58,6 +58,10 @@ async def run_environment_explorer(cwd: str | None = None, **data: Any) -> str:
     if constraints:
         prompt += f"\n## Constraints\n\n{constraints}\n"
 
+    # Absolute contract path first, so the read-first instruction resolves from
+    # any working directory (see runner.contract_section).
+    prompt = contract_section(".claude/docs/contracts/explorer_interface_contract.md") + "\n\n" + prompt
+
     # Memory is disabled for the Explorer: each invocation is self-contained,
     # per the interface contract. This also keeps the agent fully read-only
     # (runner.py only injects Write into allowed_tools when a memory_file is set).
@@ -73,4 +77,5 @@ async def run_environment_explorer(cwd: str | None = None, **data: Any) -> str:
         model=data.get("subagent_model"),
         thinking=data.get("subagent_thinking"),
         route=data.get("subagent_route"),
+        max_turns=data.get("subagent_max_turns"),
     )
