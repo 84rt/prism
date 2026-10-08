@@ -86,13 +86,12 @@ A mapping of execution-parameter overrides. Supported keys:
 | `max_parallel` | int | Upper bound on concurrent eval subprocesses. **Default 1** (the runner's ceiling) |
 | `max_connections` | int | Maps to `--max-connections` (concurrent API calls within an eval). **Default 4** |
 | `command_timeout_seconds` | int | Wall-clock limit per `inspect eval` subprocess. Default 14400 (4 h) |
-| `runs_per_condition` | int | Number of full-run repetitions per condition-model pair — **specified but not currently implemented**, see below |
 
 Unrecognised keys are ignored with a note in **Additional Notes**. Other flags (`--retry-on-error 3`, `--no-fail-on-error`, `--display plain`, and `--with "openai>=…"` on `openrouter/…` models) are applied to every invocation by the runner without being in overrides — these are policy, not configuration.
 
 **The concurrency ceiling is the runner's, not the Executor's.** `max_parallel: 1` / `max_connections: 4` are sized for a shared host running one Docker sandbox per sample (see `inspect_reference.md §Concurrency heuristics`). A caller who knows better sets them in `overrides`. The Executor may raise them only by passing `--max-parallel` / `--max-connections` together with `--rationale` to the runner; the rationale is recorded verbatim in the report's **Concurrency Decision**. Raising them silently is not possible — the runner refuses the flags without a rationale.
 
-**`runs_per_condition` is documented here but has no rendering step in the Executor's system prompt.** `sample_limit`, `sample_id`, `epochs` and `max_connections` each name a flag the Executor is instructed to append; `runs_per_condition` names a *multiplication of commands* that nothing performs. It is also a *recognised* key, so it would not earn the Additional Notes entry that unrecognised keys get — it would simply take no effect while the caller believed it had. The Executor therefore treats it as **accepted-but-not-applied**: it runs the pair once and records the key and its value in **Additional Notes**, naming `epochs` as the alternative. Callers needing repeated sampling should use `epochs` directly; see *Resample runs* below for when the two genuinely differ.
+**`runs_per_condition` has been removed.** It was documented as a key but never implemented — nothing ever multiplied the commands — so a caller setting it believed it had taken effect when it had not. The runner now refuses a request that carries it, naming `epochs` (with `sample_id`) as the repeated-sampling mechanism; see *Resample runs* below for the one case where repeated whole-eval runs would genuinely differ.
 
 ### Resample runs (Model Forensics)
 
@@ -116,12 +115,9 @@ The paragraphs below are marked **[caller]** or **[Executor]**. Caller-facing pa
 
 Note that `sample_id` selects which dataset entry runs; it does not alter the task's content, so it does not conflict with the no-`-T`-overrides rule above.
 
-**[caller] Why `epochs` and not `runs_per_condition`.** They are not interchangeable, and the difference is about where state lives:
+**[caller] Why `epochs` is the resample mechanism.** `epochs` re-runs each selected *sample* *n* times **inside one eval**, producing one log directory and one `.eval` file containing all *n* trajectories. Each epoch is an independent rollout — a fresh model context and, for sandboxed tasks, a fresh sandbox — so for the overwhelming majority of evals this is exactly the independent resampling the investigation wants, and it keeps the resample in a single log directory.
 
-- `epochs` re-runs each selected *sample* *n* times **inside one eval**, producing one log directory and one `.eval` file containing all *n* trajectories. Each epoch is an independent rollout — a fresh model context and, for sandboxed tasks, a fresh sandbox — so for the overwhelming majority of evals this is exactly the independent resampling the investigation wants.
-- `runs_per_condition` would re-run the *whole eval* *n* times as *n* separate processes. This is only materially different when the eval carries state that survives across samples within a single run: a module-level accumulator, a shared external service, a dataset the task mutates, a solver that caches. There, epochs are not independent draws and separate runs would be the only honest resample.
-
-`epochs` is the documented mechanism because it is the one the Executor implements (see the `runs_per_condition` note above) and because it keeps the resample in a single log directory. If the eval under investigation *does* carry cross-sample state, that is a blocker for the caller to raise rather than work around — the resample would be measuring a sequence rather than a population, and no override available here fixes that.
+The one exception is an eval carrying state that survives across samples within a single run: a module-level accumulator, a shared external service, a dataset the task mutates, a solver that caches. There, epochs are not independent draws, and only separate whole-eval runs would be an honest resample — which the runner does not offer. That is a blocker for the caller to raise rather than work around: the resample would be measuring a sequence rather than a population, and no override available here fixes that.
 
 **[Executor] Log organisation.** Resample logs go to their own directory under their own `experiment_dir`, exactly as any single-condition run does: `<experiment_dir>/logs/baseline/`. This is the ordinary per-condition rule, stated here only because the Analyst later receives that one path as one condition and the resample is compared against for the life of the investigation.
 

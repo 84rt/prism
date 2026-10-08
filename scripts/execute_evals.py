@@ -31,10 +31,6 @@ ceiling; must be accompanied by ``--rationale``), ``--only <pair_id,...>``
 (re-run a subset of pairs), ``--quarantine-existing-logs`` (move stale
 ``.eval`` files out of a pair's log directory instead of refusing to run).
 
-The legacy form ``execute_evals.py <spec.json>`` — a ``commands`` list plus an
-``execution`` block — still runs in the foreground and prints JSON, for the
-in-house drivers that wrap it.
-
 Score blackout
 --------------
 Nothing this script prints, and nothing in the status file or draft report,
@@ -108,7 +104,6 @@ RECOGNISED_OVERRIDES = {
     "skip_preflight",
     "max_parallel",
     "max_connections",
-    "runs_per_condition",
     "command_timeout_seconds",
 }
 
@@ -173,60 +168,6 @@ class ExecutionReport:
     concurrency_reductions: list[ConcurrencyReduction] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     total_wall_clock_seconds: float = 0.0
-
-
-# ---------------------------------------------------------------------------
-# Legacy input parsing (commands-list spec)
-# ---------------------------------------------------------------------------
-
-
-def parse_input(path: str) -> tuple[list[CommandSpec], ExecutionConfig]:
-    """Load and validate a legacy ``commands`` + ``execution`` spec.
-
-    Parameters
-    ----------
-    path : str
-        Path to the JSON spec.
-
-    Returns
-    -------
-    tuple[list[CommandSpec], ExecutionConfig]
-        The commands to run and the execution parameters.
-    """
-    with open(path) as f:
-        data = json.load(f)
-
-    if "commands" not in data or not isinstance(data["commands"], list):
-        raise ValueError("Input must contain a 'commands' list")
-
-    commands = []
-    for cmd in data["commands"]:
-        if not all(k in cmd for k in ("id", "command", "log_dir")):
-            raise ValueError(f"Command missing required fields: {cmd}")
-        commands.append(
-            CommandSpec(id=cmd["id"], command=cmd["command"], log_dir=cmd["log_dir"], cwd=cmd.get("cwd"))
-        )
-
-    exec_data = data.get("execution", {})
-    if "max_parallel" not in exec_data:
-        raise ValueError("execution.max_parallel is required")
-
-    config = ExecutionConfig(
-        max_parallel=exec_data["max_parallel"],
-        max_retries=exec_data.get("max_retries", 3),
-        retry_backoff_seconds=exec_data.get("retry_backoff_seconds", [10, 30, 60]),
-        command_timeout=exec_data.get("command_timeout_seconds", DEFAULT_COMMAND_TIMEOUT),
-    )
-
-    ids = [c.id for c in commands]
-    if len(ids) != len(set(ids)):
-        raise ValueError(f"Duplicate command IDs: {[x for x in ids if ids.count(x) > 1]}")
-
-    log_dirs = [c.log_dir for c in commands]
-    if len(log_dirs) != len(set(log_dirs)):
-        raise ValueError(f"Duplicate log directories: {[x for x in log_dirs if log_dirs.count(x) > 1]}")
-
-    return commands, config
 
 
 # ---------------------------------------------------------------------------
@@ -1047,6 +988,14 @@ def validate_request(request: dict[str, Any]) -> list[str]:
     else:
         if "sample_id" in overrides and "sample_limit" in overrides:
             problems.append("overrides: sample_id and sample_limit cannot both be set (Inspect rejects the pair)")
+        # Refused rather than ignored: it was documented for long enough that a
+        # caller may still send it believing it repeats the run, and an ignored
+        # key would leave them believing that.
+        if "runs_per_condition" in overrides:
+            problems.append(
+                "overrides: runs_per_condition was removed (it was never applied); "
+                "use epochs, with sample_id, for repeated sampling"
+            )
         for k in ("sample_limit", "epochs", "max_parallel", "max_connections", "command_timeout_seconds"):
             if k in overrides and (not isinstance(overrides[k], int) or overrides[k] < 1):
                 problems.append(f"overrides.{k} must be a positive integer")
@@ -1640,11 +1589,6 @@ def prepare_run(
     unrecognised = sorted(k for k in overrides if k not in RECOGNISED_OVERRIDES)
     if unrecognised:
         notes.append(f"Unrecognised override keys ignored: {', '.join(unrecognised)}.")
-    if "runs_per_condition" in overrides:
-        notes.append(
-            f"`runs_per_condition` = {overrides['runs_per_condition']} accepted but not applied: "
-            "each pair ran once. Use `epochs` for repeated sampling."
-        )
     if (max_parallel is not None or max_connections is not None) and not rationale:
         return "", ["--max-parallel / --max-connections require --rationale (recorded in the Concurrency Decision)"]
 
@@ -2140,25 +2084,8 @@ def render_report(data: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _legacy_main(input_path: str) -> None:
-    """Run a legacy ``commands`` spec in the foreground and print JSON."""
-    try:
-        commands, config = parse_input(input_path)
-    except (ValueError, FileNotFoundError, json.JSONDecodeError) as e:
-        print(json.dumps({"status": "error", "errors": [f"Input error: {e}"]}))
-        sys.exit(1)
-
-    report = execute(commands, config)
-    print(json.dumps(asdict(report), indent=2, default=str))
-
-
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-
-    # Legacy form: a single positional JSON spec with a `commands` list.
-    if len(argv) == 1 and argv[0] not in ("run", "status", "wait", "report", "_worker", "-h", "--help"):
-        _legacy_main(argv[0])
-        return 0
 
     parser = argparse.ArgumentParser(description="Prism eval batch runner (score-free).")
     sub = parser.add_subparsers(dest="cmd", required=True)

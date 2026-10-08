@@ -119,20 +119,13 @@ def test_scrub_scores_on_real_inspect_plain_output():
     assert "Log:" in out
 
 
-def test_legacy_spec_stdout_has_no_metrics(tmp_path, fake_eval_script):
-    """The in-house drivers wrap the legacy form; its JSON must be score-free."""
-    log_dir = tmp_path / "legacy_logs"
-    spec = {
-        "commands": [{"id": "c1", "command": f"{shlex.quote(sys.executable)} {shlex.quote(fake_eval_script)} --log-dir {shlex.quote(str(log_dir))} --epochs 2", "log_dir": str(log_dir)}],
-        "execution": {"max_parallel": 1},
-    }
+def test_removed_legacy_spec_form_is_rejected(tmp_path):
+    """The old single-positional `commands` spec is gone; the CLI must refuse it, not run it."""
     spec_path = tmp_path / "spec.json"
-    spec_path.write_text(json.dumps(spec))
-    out = subprocess.run([sys.executable, SCRIPT, str(spec_path)], capture_output=True, text=True, check=True).stdout
-    data = json.loads(out)
-    assert data["results"][0]["status"] == "success"
-    assert "metrics" not in data["results"][0]
-    assert_no_leak(out, "legacy stdout")
+    spec_path.write_text(json.dumps({"commands": [], "execution": {"max_parallel": 1}}))
+    rc = subprocess.run([sys.executable, SCRIPT, str(spec_path)], capture_output=True, text=True)
+    assert rc.returncode != 0
+    assert "invalid choice" in rc.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -230,13 +223,19 @@ def test_default_ceiling_and_override_sources(tmp_path):
     assert "Executor raised the runner ceiling via CLI override — API-only eval, 2 pairs" in report
 
 
-def test_unrecognised_and_runs_per_condition_are_noted(tmp_path):
-    path, _ = make_request(tmp_path, overrides={"runs_per_condition": 3, "bogus": 1})
+def test_unrecognised_override_is_noted(tmp_path):
+    path, _ = make_request(tmp_path, overrides={"bogus": 1})
     run_dir, problems = ee.prepare_run(path)
     assert not problems
     notes = "\n".join(ee.Status.load(run_dir).data["notes"])
     assert "Unrecognised override keys ignored: bogus" in notes
-    assert "`runs_per_condition` = 3 accepted but not applied" in notes
+
+
+def test_removed_runs_per_condition_is_refused(tmp_path):
+    """Refused, not ignored: a caller still sending it must learn it never repeated anything."""
+    path, _ = make_request(tmp_path, overrides={"runs_per_condition": 3})
+    _, problems = ee.prepare_run(path)
+    assert any("runs_per_condition was removed" in p and "epochs" in p for p in problems)
 
 
 def test_stale_logs_are_refused_unless_quarantined(tmp_path):

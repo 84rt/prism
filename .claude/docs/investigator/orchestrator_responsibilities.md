@@ -219,7 +219,7 @@ The request and report formats for the Executor are defined in `executor_interfa
    - Task file path (relative to `experiment_dir`)
    - Task arguments (`-T key=value` pairs that differ between conditions)
 
-2. **Assemble the Executor input JSON** per `executor_interface_contract.md §Request Format`. Required: `experiment_name`, `experiment_dir`, `conditions`, `models`. Pass this iteration's `<iteration_name>` and `<iteration_dir>` as the values of the schema's `experiment_name` and `experiment_dir` fields respectively — the schema retains its historical field names but the values are per-iteration. Optional `overrides` supports `sample_limit`, `sample_id`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `runs_per_condition`.
+2. **Assemble the Executor input JSON** per `executor_interface_contract.md §Request Format`. Required: `experiment_name`, `experiment_dir`, `conditions`, `models`. Pass this iteration's `<iteration_name>` and `<iteration_dir>` as the values of the schema's `experiment_name` and `experiment_dir` fields respectively — the schema retains its historical field names but the values are per-iteration. Optional `overrides` supports `sample_limit`, `sample_id`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `command_timeout_seconds` (`runs_per_condition` was removed and is refused; use `epochs`).
 
 3. **Launch the Experiment Executor sub-agent** via CLI script (see `subagent_invocation.md`).
 
