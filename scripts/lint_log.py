@@ -46,6 +46,34 @@ _LATE_PHASE_PARENT = re.compile(r"^phase\s+[45]\b", re.IGNORECASE)
 # `### Decision` that reads "continue" twice is coincidence, not a paste.
 DEFAULT_MIN_LINES = 3
 
+# A body made only of labelled fields with short answers — a filled-in form,
+# e.g. the Orchestrator's `### Surprises` reading "yes / Nothing / none / no" —
+# legitimately repeats verbatim across quiet iterations, so it is never
+# reported as a pasted duplicate however many lines it has. Prose, tables and
+# long field values still are.
+_SHORT_FORM_LINE = re.compile(r"^\s*-\s+\*{1,2}[^*]+\*{1,2}\s*:\s*.{0,24}$")
+
+
+def _is_short_form(body: list[str]) -> bool:
+    """True when every line is a `- *Label*: <short answer>` field.
+
+    Parameters
+    ----------
+    body : list[str]
+        A section's own non-empty lines.
+
+    Returns
+    -------
+    bool
+        Whether the body is a filled-in form whose repetition is coincidental.
+
+    Examples
+    --------
+    >>> _is_short_form(["- *Aligned with the agreed scope?*: yes", "- *What surprised me*: Nothing"])
+    True
+    """
+    return bool(body) and all(_SHORT_FORM_LINE.match(line) for line in body)
+
 
 @dataclass
 class Section:
@@ -176,7 +204,7 @@ def check_duplicate_blocks(sections: list[Section], min_lines: int) -> list[Find
     first_seen: dict[tuple[str, ...], Section] = {}
     findings = []
     for s in sections:
-        if len(s.body) < min_lines:
+        if len(s.body) < min_lines or _is_short_form(s.body):
             continue
         key = tuple(s.body)
         if key in first_seen:

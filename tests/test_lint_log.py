@@ -95,6 +95,29 @@ def test_short_identical_bodies_are_ignored():
     assert kinds(text) == []
 
 
+def test_identical_short_answer_forms_across_quiet_iterations_are_not_pastes():
+    """An Orchestrator `### Surprises` form answered identically twice is coincidence."""
+    form = (
+        "- *Aligned with the agreed scope?*: yes\n"
+        "- *What surprised me, if anything*: Nothing\n"
+        "- *What this updates in my working picture*: none\n"
+        "- *Does this suggest a move outside the agreed scope?*: no\n"
+    )
+    text = "# L\n## Iteration 1\n### Surprises\n" + form + "## Iteration 2\n### Surprises\n" + form
+    assert kinds(text) == []
+
+
+def test_form_with_a_long_answer_is_still_checked():
+    """The exemption is for short answers only; a pasted substantive field still flags."""
+    form = (
+        "- *Aligned with the agreed scope?*: yes\n"
+        "- *What surprised me, if anything*: the control rate fell from 40% to 12% with no change to the prompt\n"
+        "- *Does this suggest a move outside the agreed scope?*: no\n"
+    )
+    text = "# L\n## Iteration 1\n### Surprises\n" + form + "## Iteration 2\n### Surprises\n" + form
+    assert [k for k, _ in kinds(text)] == ["duplicate-block"]
+
+
 def test_stranded_block_under_other_iteration_and_under_phase4():
     text = (
         "# L\n## Iteration 1\n### Analyst Findings — iteration 1\n- ok\n"

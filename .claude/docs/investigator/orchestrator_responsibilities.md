@@ -84,11 +84,13 @@ The user presents a research question. The orchestrator helps articulate it as t
    - Sample limit (full dataset or a subset for rapid iteration?)
    - Number of epochs per sample
    - Whether to skip preflight validation
-   - Parallelism preferences (`max_parallel` — how many eval runs to execute concurrently; if unset, the Executor decides based on environment assessment)
+   - Parallelism preferences (`max_parallel` — how many eval runs to execute concurrently; if unset, the batch runner's ceiling applies: one eval process, four API connections)
    - Any other Inspect CLI overrides
 
+   **Do not read determinism off the task's configuration.** `temperature=0` and `seed` are silently no-ops on Anthropic endpoints and on most routed providers, so a task that declares itself deterministic still has run-to-run spread — in one archived investigation, nine draws of the identical unmodified condition at n = 40 ranged 60–90%. Determinism is established empirically or not at all; the noise-floor rule in Step 2j says how. If the eval's own design leans on determinism (a fixed-seed shuffle, a cached solver), record that as a scoping fact rather than an assumption to inherit.
+
 7. **Agree on cost parameters.** Discuss with the user:
-   - *Total API budget*: What is the rough ceiling the user is comfortable spending on this investigation? This anchors all downstream cost decisions. For OpenRouter-routed models, price varies by upstream provider — sometimes severalfold for the same model id — so the routing decision from step 4 is also a cost decision. `scripts/openrouter_endpoints.py` reports per-endpoint pricing; if the budget is tight, raise `--prefer cost` here rather than silently choosing fidelity.
+   - *Total API budget*: What is the rough ceiling the user is comfortable spending on this investigation? This anchors all downstream cost decisions, and it is observable: `uv run --no-project python scripts/spend.py investigations/<name>` sums every sub-agent invocation's cost sidecar and every eval's token usage into a running total, which Step 2j reads before each decision. For OpenRouter-routed models, price varies by upstream provider — sometimes severalfold for the same model id — so the routing decision from step 4 is also a cost decision. `scripts/openrouter_endpoints.py` reports per-endpoint pricing; if the budget is tight, raise `--prefer cost` here rather than silently choosing fidelity.
    - *Run strategy*: Does the user prefer fewer large-N runs (more statistical power per iteration, higher confidence) or more small-N exploratory runs (broader coverage of hypotheses, less confidence per result)? This choice shapes sample limits and iteration count.
    - *Baseline drift policy*: If control conditions produce substantially different results across iterations, should the orchestrator re-run controls to check reproducibility (costs an extra iteration's compute) or flag the inconsistency and continue? Small sample sizes make some drift expected — agree on how much warrants action.
    - *Iteration cap*: Maximum number of investigation loop cycles before stopping, regardless of whether findings are conclusive. This prevents runaway costs on ambiguous questions.
@@ -223,9 +225,11 @@ The request and report formats for the Executor are defined in `executor_interfa
 
 2. **Assemble the Executor input JSON** per `executor_interface_contract.md §Request Format`. Required: `experiment_name`, `experiment_dir`, `conditions`, `models`. Pass this iteration's `<iteration_name>` and `<iteration_dir>` as the values of the schema's `experiment_name` and `experiment_dir` fields respectively — the schema retains its historical field names but the values are per-iteration. Optional `overrides` supports `sample_limit`, `sample_id`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `command_timeout_seconds` (`runs_per_condition` was removed and is refused; use `epochs`).
 
-3. **Launch the Experiment Executor sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) with `--tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts`, and poll with `wait`. The Executor drives a detached batch runner and reports only when the batch is terminal, so expect it to run as long as the evals do — hours for sandboxed evals.
+3. **Pre-register the predictions before launching.** In the iteration's `### Pre-registered Predictions` block, write for every non-control condition its predicted direction on the construct the hypothesis is about, against its control — `↑`, `↓` or `↔` — and one line on what each possible outcome would mean for the hypothesis. Include the positive control's expected `↑`/`↓` and each construal check's intended direction. **This block is written before any eval runs and is never edited afterwards** — not to fix wording, not to "clarify". Step 2i scores the outcomes against it as written. The Analyst builds its own scanners from the neutral topic, so the prediction is about the construct, and Step 2i matches it to whichever validated scanner operationalises that construct; when none does, the row is scored `unscorable — no matching instrument`, which is itself worth recording.
 
-4. **Read the Executor's report** at the launcher's per-invocation path (`<iteration_dir>/artefacts/executor/report_<iteration_name>_executor_<n>.md`); there is no separate save step. Read the **Zero-sample pairs** line first — a pair that completed zero samples is an execution defect, never a rate.
+4. **Launch the Experiment Executor sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) with `--tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts`, and poll with `wait`. The Executor drives a detached batch runner and reports only when the batch is terminal, so expect it to run as long as the evals do — hours for sandboxed evals.
+
+5. **Read the Executor's report** at the launcher's per-invocation path (`<iteration_dir>/artefacts/executor/report_<iteration_name>_executor_<n>.md`); there is no separate save step. Read the **Zero-sample pairs** line first — a pair that completed zero samples is an execution defect, never a rate.
 
 **What can go wrong:**
 - A task file path in `conditions` does not resolve inside the experiment directory. Double-check paths before launching.
@@ -394,6 +398,10 @@ Run lightweight consistency checks before interpreting findings. See `orchestrat
 
 2. **State the null hypothesis and simplest alternative before interpreting** (see `eval_science_principles.md`). What would you expect if the manipulated variable had no effect? What would you expect if the observed effect were due to a confound (e.g., formatting differences, eval awareness) rather than the intended manipulation? Write these down in the investigation log before reading the Analyst's quantified results. This prevents post-hoc rationalisation.
 
+   Then **score the pre-registered predictions as written** (Step 2d). For each row: `hit`, `miss`, `inconclusive` (the Newcombe-Wilson CI on the difference straddles zero), `void` (the condition's construal-check verdict was not `succeeded`), or `unscorable — no matching instrument`. A hit on a row where every plausible account predicted the same direction is not evidence for the hypothesis; say so. An argument for why the hypothesis survives a miss goes in the log as reasoning and does not turn the miss into anything else.
+
+   **Tag what each result licenses**, in causal terms rather than loose talk of "effects". A condition that *removes* a feature and loses the behaviour gives a lower bound on that feature being *necessary* for the behaviour in this setting. A condition that *adds* a feature and induces the behaviour shows it is *sufficient* here. Both are bounds on population rates in this eval, not point estimates of causal contribution, and neither transfers to other evals without testing.
+
 3. **Map patterns to the hypothesis.** For each pattern the Analyst observed, consider:
    - Does this pattern relate to the hypothesis? (Some patterns may be interesting but irrelevant.)
    - Does it support the hypothesis, contradict it, or is it ambiguous?
@@ -470,6 +478,8 @@ When in doubt, default to consulting (existing principle).
 - *Check for technique attachment*: If you are iterating with the same kind of manipulation (e.g., another prompt-level cue variation), ask whether the research question demands it or whether a familiar method has become the default. The method should follow the question.
 - *Note hypothesis origin when iterating*: When the next iteration's hypothesis is suggested by this iteration's findings (rather than committed at Phase 1 scoping), note its origin briefly in the next iteration's *Hypothesis this iteration → Statement* — e.g. *"Test whether X drives Y, suggested by iter N's substring-artefact finding."* The log's append-only history records when each hypothesis first entered the investigation; the prose note in the Statement makes the data-suggested origin explicit, which the Phase 3 synthesis should honour by distinguishing findings that rest on hypotheses committed at investigation-start from those that emerged from earlier iterations' data.
 - *Check baseline consistency*: Compare this iteration's control condition results against previous iterations. If the same control condition produces substantially different rates across iterations (e.g., 20% in iteration 1 vs 7% in iteration 2), assess whether the difference is plausible given the sample size — small N makes large swings expected, large N makes them a red flag. If the drift looks implausible, follow the baseline drift policy agreed with the user in Phase 1: either re-run the control to check reproducibility or flag the inconsistency and continue. Do not treat baseline drift as merely a caveat for the final report — unstable controls undermine any treatment comparison built on top of them.
+- *Characterise the noise floor before trusting a modest effect*: Each iteration's control condition is a fresh draw of an identical setting, so by iteration 3 you hold three. Record every identical-condition draw's rate in the log's noise-floor line. Until at least three exist, tag any between-condition difference smaller than twice its Newcombe-Wilson half-width `[floor uncharacterised]` and do not conclude on it. Once three exist, an effect inside the observed spread between identical draws is not attributable to its manipulation, however significant its Fisher's p — a single arm against a single control can reach nominal significance from re-running alone. When a decision turns on a modest effect and fewer than three draws exist, add an extra identical control draw to the next iteration; it is the cheapest condition you can run.
+- *Check spend before deciding*: Run `uv run --no-project python scripts/spend.py investigations/<name>` and write the running total, this iteration's cost and a projection for the next into the Decision block's `Spend:` line. If the projection would cross the agreed budget, the budget exit is a decision made here and recorded, not an interruption suffered later: first degrade cheaper (fewer conditions, smaller n on settled comparisons), then conclude with what the evidence supports. An externally stopped run is an interruption, and its unscored work is scored later against its pre-registered table.
 
 **Evaluate hypothesis quality before committing to iterate.** Good research taste is difficult to codify, but asking the right questions helps. Before running a follow-up experiment, explicitly consider:
 
@@ -481,6 +491,7 @@ When in doubt, default to consulting (existing principle).
 These questions don't have mechanical answers. They require judgement — the kind of judgement that comes from thinking carefully about what matters, not from following a checklist. Engage with them genuinely.
 
 **Decision criteria:**
+- **Only informative iterations count.** An iteration is *informative* when at least one pre-registered row was scored `hit` or `miss` — a comparison with headroom (no floor/ceiling exposure), measured by a passing scanner, on a condition whose construal check (if any) succeeded. A quiet iteration that was quiet because nothing it ran could register an effect is not evidence of anything and must never be the basis for concluding. It still counts toward the escalation cap below — it spent budget — and two uninformative iterations in a row are themselves a reason to escalate: the design, not the hypothesis, is the problem. Record `Informative: yes | no — <why>` in the Decision block.
 - If after 3 iterations the findings are still ambiguous, escalate to user rather than continuing to iterate.
 - If the investigation has consumed significant compute, check with the user before continuing.
 - If the Analyst's report contradicts the hypothesis cleanly, that IS a finding worth reporting — do not iterate just because the result wasn't what was expected.
@@ -500,7 +511,11 @@ These questions don't have mechanical answers. They require judgement — the ki
 
 2. **Headline finding (1-2 sentences).** What was the research question, and what did you find? State the effect direction and magnitude. If the result is null, say so directly.
 
-3. **Evidence summary (brief).** Per-iteration: what was manipulated, what changed, key numbers. Use a table if there were multiple iterations. Do not relay the full analyst report — summarise the 2-3 strongest signals with their per-condition rates and validation metrics. Include each condition's construal-check verdict, and report any null without a moving positive control as *no detectable effect, instrument unverified*.
+3. **Evidence summary (brief).** Per-iteration: what was manipulated, what changed, key numbers. Use a table if there were multiple iterations. Do not relay the full analyst report — summarise the 2-3 strongest signals with their per-condition rates and validation metrics. Include each condition's construal-check verdict and each pre-registered prediction's outcome (hit / miss / inconclusive / void), and report any null without a moving positive control as *no detectable effect, instrument unverified*.
+
+   **What the evidence licenses.** State each headline in the causal vocabulary of Step 2i: removing a feature that eliminated the behaviour bounds *necessity in this setting*; adding one that induced it shows *sufficiency here*; both are bounds on population rates in this eval, not point estimates.
+
+   **Alternatives still standing.** Name the explanations of the headline that no condition you ran could exclude, and for each, the condition that would have separated it. This section is required, including when the honest answer is short: a reader needs to know what the result does *not* rule out as much as what it shows.
 
 4. **Caveats and limitations.** What could undermine these findings? Include: sample size adequacy, baseline variance across iterations, scanner precision/recall, differential attrition, confounds not controlled for, **and provider-family coverage** — if the model set was single-provider *and* the headline finding is a construct-level claim (i.e. about a behaviour or eval property meant to generalise, not about a specific model's behaviour), the construct-validity is tested against one operationalisation; state that explicitly with a one-line provider-sensitivity caveat. When the headline is intentionally model-specific (e.g. *"Opus 4.7 exhibits behaviour X under condition Y"*), the multi-provider caveat does not apply — the claim is already scoped to that model. (See `eval_science_principles.md` §3, Q4 corollary.) Be specific — "more work is needed" is not a caveat.
 
@@ -539,6 +554,7 @@ The orchestrator maintains `INVESTIGATION-LOG.md` at the investigation root (`in
 - Model routes: <per model: direct | openrouter pinned to <slug> (<quantization>) | openrouter unpinned — with the one-line rationale. Resolved once in Phase 1 and reused for every iteration; note any mid-investigation change and which iterations it affected>
 - Eval environment: <path>
 - Execution parameters: <details>
+- Budget: <spend cap, iteration cap; cost basis observed via `scripts/spend.py`>
 
 ## Iteration 1
 ### Scope this iteration
@@ -556,6 +572,12 @@ Research scope unchanged since iteration 1.
 - <list of named conditions with variant choices per site; mark the positive control, if any>
 - Construal checks (private — never sent with this mapping): <check id → condition, intended direction, against which control>
 
+### Pre-registered Predictions
+*(Written before the Executor runs. Never edited.)*
+| Condition (vs control) | Predicted direction | What each outcome would mean |
+|---|---|---|
+| <condition> | ↑ / ↓ / ↔ | <one line> |
+
 ### Modifications Applied
 - Experiment directory: <path>
 - Files modified: <list with brief descriptions>
@@ -572,6 +594,8 @@ Research scope unchanged since iteration 1.
 - Key patterns: <summary>
 - Construal-check verdicts (derived): <per condition: succeeded / failed / ambiguous / void — with the check's scorability label>
 - Precision drift: <none, or affected condition(s) and which way it cuts>
+- Prediction scoring: <per pre-registered row: hit / miss / inconclusive / void / unscorable>
+- Noise floor: <identical-condition draws so far, with rates; characterised (k ≥ 3) or not>
 - Supports/contradicts/ambiguous: <assessment>
 
 ### Surprises
@@ -582,6 +606,8 @@ Research scope unchanged since iteration 1.
 
 ### Decision
 <iterate/conclude/escalate> — <reasoning, including any retirements of prior-iteration runner-ups with one-line reasons>
+- Informative: <yes | no — why>
+- Spend: <running total from `scripts/spend.py`; this iteration; projection for the next; agreed cap>
 
 #### Runner-up candidates carried forward
 - <Candidate A>: <one-line description> — <one-line: why not chosen this iteration, why still worth pursuing>
@@ -606,6 +632,8 @@ Research scope unchanged since iteration 1.
 **The Surprises subsection** is a forcing function for tactical research-taste cultivation. It anchors per-iteration reflection against the Agreed Scope rather than against a rolling working picture — this is what makes the design anti-drift. *"Nothing surprising"* is a valid entry; the discipline is in asking, not in finding. The final prompt (*Does this suggest a move outside the agreed scope?*) is the bridge to Phase 2j Step 0: a `yes` here surfaces the strategic candidate that Step 0 routes through user consultation. See `eval_science_principles.md` §1 (Strong Inference, *tracking epistemic state*) and §2 (*narrative coherence as a warning sign*) for the methodological backbone.
 
 **Runner-up candidates carried forward** are how the *competing use of resources* discipline (Step 2j) persists across iterations. Without a structured list, runner-ups raised at iteration N can silently die under context-window pressure — exactly the depth-first-search failure mode that loses good alternatives in favour of always pressing onwards. The list lives in each iteration's *Decision* block (append-only-clean) and is the first thing the next iteration's Step 0 reviews. *"None"* is a valid entry; not every iteration has runner-ups worth carrying forward. Carry-forward entries persist until either (i) they become the chosen action of a later iteration, in which case they migrate into that iteration's *Hypothesis this iteration → Statement*, or (ii) they are explicitly retired in a later iteration's *Decision* reasoning with a one-line reason (e.g. *"Retired candidate X from iter 2: already addressed by iter 4's substring-artefact finding."*). Silently dropping a candidate from the carry-forward list — without explanation — defeats the auditability the structure exists to provide; the discipline is in the explicit retirement note, not in keeping every prior runner-up alive forever.
+
+**Lint the log before each Decision block.** Append-only discipline accumulates ordering and duplication defects when late material meets it — a pasted block appearing twice, a check specified after its round closed and stranded under a later heading. Late material goes under the *current* heading with a one-line pointer to where it belongs, never as a second copy. Run `uv run --no-project python scripts/lint_log.py investigations/<name>/INVESTIGATION-LOG.md` before writing each Decision, and fix anything it reports by appending.
 
 ### Why state management matters
 
@@ -737,3 +765,7 @@ If Model A succeeded but Model B failed entirely, the orchestrator can still sen
 13. **Reporting a null as robustness without a positive control.** "No effect" means the manipulated property does not matter only when a positive control showed this measurement, in this setting, could have moved. Otherwise the honest finding is *no detectable effect, instrument unverified*.
 
 14. **Reading a behavioural result whose construal check did not succeed.** If the model never registered the edit, neither a null nor an effect tells you what the edit was meant to test. A `failed`, `ambiguous` or `void` check makes that condition's result uninterpretable in both directions.
+
+15. **Editing the pre-registered predictions after seeing results.** Including "clarifications". The Step 2d table is scored as written; a prediction rewritten to fit the outcome is not a prediction.
+
+16. **Attributing an effect that sits inside the noise floor.** Re-running an identical condition moves rates too, and `seed` / `temperature` do not make an eval deterministic. Until three identical draws exist, a modest effect is `[floor uncharacterised]`; once they do, an effect inside their spread belongs to the noise, not the manipulation.
