@@ -47,6 +47,16 @@ RESTRICTED_FILES: dict[str, str] = {
     "FINDINGS-REPORT.md": "Investigation synthesis: explanations and evidence.",
 }
 
+# The per-iteration condition label map (`CONDITION_LABEL_MAP_iter<N>.json`)
+# holds opaque id → real condition name and the Analyst-time labels: it *is* the
+# mapping the blinding withholds. One wildcard pattern, matched on the basename
+# by the runner's read hook, covers every iteration's map, numbered or not,
+# with no upper bound.
+RESTRICTED_FILES["CONDITION_LABEL_MAP*.json"] = (
+    "Private condition label map: opaque execution ids → real condition names "
+    "and Analyst labels. The analyst must never learn which condition is which."
+)
+
 
 def normalise_construal_checks(spec: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Split a behaviour spec into the grader part and the construal-check set.

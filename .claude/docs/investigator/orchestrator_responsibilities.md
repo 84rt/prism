@@ -148,7 +148,7 @@ The report structure is defined in `explorer_interface_contract.md §Report Form
 4. **Construct conditions from the Explorer's raw material.** The Explorer reports modification sites, variants at each site, and (if applicable) Variant Dependencies. It does not recommend which conditions to run. The orchestrator constructs conditions by:
    - Choosing a variant at each relevant site. Discard any variant carrying a Blocker flag.
    - Respecting Variant Dependencies — if the Explorer recorded that Variant A at Site 1 requires Variant B at Site 2, do not construct a condition that pairs them otherwise.
-   - Naming each condition in filesystem-safe `snake_case` (e.g., `control`, `treatment_explicit_goal`).
+   - Giving each condition a descriptive `snake_case` name for your own use (e.g., `control`, `treatment_explicit_goal`) **and an opaque execution id** (`c_<4 hex>`, e.g. `c_3f9a`, drawn at random) for everything downstream. The descriptive name lives only in the log and the private label map (Step 2d); the id is what the environment copies, the Executor request and the log directories carry, because every one of those reaches the Analyst.
    - Deciding factorial vs. selected design: if the hypothesis concerns a single IV, control + treatment at the relevant site(s) suffices. If the hypothesis concerns an interaction between multiple IVs, run all coherent combinations of variants. Cost and iteration-budget constraints may require pruning; prune by scientific relevance, not by convenience.
    - **Adding a positive control whenever a null would be load-bearing.** If a plausible outcome of this iteration is "no effect", and that outcome would be reported as a finding — *the eval is robust to X*, *feature Y does not matter* — add one condition in which the effect is present by construction: an exaggerated version of the manipulation, or one that makes the target behaviour plainly available or plainly instructed. It must move **the same measurement in the same setting**; a control that moves a different scanner, or works only in a different environment, does not show this instrument could have varied here. Without one, a null is reported as *no detectable effect, instrument unverified* (Step 2h). It costs one condition, and only when a null is a headline.
    - **Specifying a construal check for each condition whose interpretation depends on the model's reading shifting** — whether it registered the edit, not whether the text changed. Write it as an observable property that could come out negative, with its intended direction, per `orchestrator_analyst_guide.md §Writing construal checks`. It goes to the Analyst at Step 2g as one de-identified set.
@@ -180,7 +180,7 @@ This is entirely the orchestrator's work. No sub-agent handles this.
    ```
    investigations/<investigation_name>/<iteration_name>/
    ```
-   where `<iteration_name>` is a descriptive snake_case identifier for this iteration (e.g., `explicit_goal_framing_v1`).
+   where `<iteration_name>` is a **neutral** snake_case identifier for this iteration (e.g., `iter_01`). It doubles as the Executor's `experiment_name` (Step 2d), which the runner writes into every log's `exp:` tag, and it sits in every transcript path — so a descriptive name like `explicit_goal_framing_v1` hands the Analyst the hypothesis the neutral topic (Step 2f) exists to withhold. Describe the iteration in the log instead.
 
    **Each iteration directory is immutable once created.** When starting iteration N+1, create a new sibling directory rather than editing iteration N. Two cases:
    - *Fresh perturbation:* copy the original eval environment into the new iteration directory. This preserves the original for future iterations.
@@ -195,8 +195,8 @@ This is entirely the orchestrator's work. No sub-agent handles this.
    This directory is passed to the launcher as `--artefacts-dir` for every sub-agent of the iteration; the launcher writes each sub-agent's report, stderr, cost sidecar and receipt under `artefacts/<role>/`, and the Analyst additionally writes its own outputs to `artefacts/analyst/`.
 
 2. **Apply the Explorer's diffs and choose the activation pattern.** The Explorer provides diffs with exact file paths and line ranges but does not prescribe how conditions are activated at runtime — that is Inspect-specific translation the orchestrator handles here. Choose one of the following patterns based on the diffs:
-   - **Parameter-based conditions** (Pattern A): apply any shared modifications common to all conditions, then rely on different `-T` values to activate each condition at runtime. This may involve creating condition-specific copies of files referenced by the parameter (e.g., `system_prompt_control.txt`, `system_prompt_treatment.txt`).
-   - **Separate task files** (Pattern B): create a copy of the task file for each condition, applying the relevant diffs to each copy. Name them with the condition name (e.g., `task_control.py`, `task_treatment.py`).
+   - **Parameter-based conditions** (Pattern A): apply any shared modifications common to all conditions, then rely on different `-T` values to activate each condition at runtime. This may involve creating condition-specific copies of files referenced by the parameter, **named by the condition's id** (e.g., `system_prompt_c_8b21.txt`, `system_prompt_c_3f9a.txt`), never by its role. Note the residual leak: every `-T` value is recorded in the log header's `task_args`, which the Analyst can read and nothing can scrub — so when the `-T` value *is* the manipulation (`-T goal_type=explicit`), the Analyst can tell the arms apart. Prefer Pattern B when blinding matters; when it cannot be avoided, accept it and record it (Step 2g).
+   - **Separate task files** (Pattern B): create a copy of the task file — or of the whole environment — for each condition, applying the relevant diffs to each copy. Name each by the condition's id (e.g., `c_8b21/task.py`, `c_3f9a/task.py`), the control's included, so every arm's `task_file` in the log header has the same shape and none is singled out as the unprefixed original.
    - **Model variation only** (Pattern C): no file modifications needed beyond any shared setup.
 
 3. **Verify the modifications.** Read each modified file back and confirm the changes match the Explorer's diffs. This catches copy/paste errors and merge conflicts.
@@ -219,9 +219,11 @@ The request and report formats for the Executor are defined in `executor_interfa
 **Orchestrator work:**
 
 1. **Build the condition specification.** From the conditions constructed in Step 2b and the activation pattern chosen in Step 2c, assemble a mapping for each condition per `executor_interface_contract.md §Conditions`:
-   - Condition name (`snake_case`)
+   - Condition name — **the opaque id** (`c_3f9a`), never the descriptive name: the runner writes it into `logs/<name>/`, the `cond:` tag and `metadata.condition`
    - Task file path (relative to `experiment_dir`)
    - Task arguments (`-T key=value` pairs that differ between conditions)
+
+   **Write the private label map before launching**, as `investigations/<investigation_name>/CONDITION_LABEL_MAP_iter<N>.json`: `{"iteration": N, "conditions": {"c_8b21": {"name": "control", "role": "control"}, "c_3f9a": {"name": "treatment_explicit_goal", "role": "treatment"}}, "analyst_labels": {}}` — every id the iteration's Analyst invocations will see — and fill `analyst_labels` (`{"<request tag>": {"condition_B": "c_3f9a", …}}`) as each Analyst request is built in Step 2g. The Analyst's `RESTRICTED_FILES` denies the map; never copy it into anything the Analyst receives.
 
 2. **Assemble the Executor input JSON** per `executor_interface_contract.md §Request Format`. Required: `experiment_name`, `experiment_dir`, `conditions`, `models`. Pass this iteration's `<iteration_name>` and `<iteration_dir>` as the values of the schema's `experiment_name` and `experiment_dir` fields respectively — the schema retains its historical field names but the values are per-iteration. Optional `overrides` supports `sample_limit`, `sample_id`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `command_timeout_seconds` (`runs_per_condition` was removed and is refused; use `epochs`).
 
@@ -336,19 +338,24 @@ This is the orchestrator's most important cognitive task. The Transcript Analyst
 
 1. **Construct the request** following the format in `analyst_interface_contract.md`:
    - **Topic**: The neutral topic from Step 2f.
-   - **Transcript source**: A mapping from opaque condition labels to log directory paths (e.g., `{"condition_A": "<iteration_dir>/logs/control/", "condition_B": "<iteration_dir>/logs/treatment/"}`). Randomise the mapping between condition labels and actual conditions.
+   - **Transcript source**: A mapping from opaque condition labels to log directory paths (e.g., `{"condition_A": "<iteration_dir>/logs/c_3f9a/", "condition_B": "<iteration_dir>/logs/c_8b21/"}`). Randomise the mapping between condition labels and condition ids, and record it under `analyst_labels` in the iteration's label map.
    - **Scanning model** (optional): Override the default scanning model if needed.
    - **Construal checks** (when Step 2b specified any): the round's checks as one de-identified `construal_checks` list with opaque ids (`M1`, `M2`, …) and no indication of which condition each bears on. The check → condition mapping and intended directions stay in the log, beside the label mapping.
    - **Constraints** (optional): Limit transcript count, concurrency, etc.
    - **Artefacts directory**: Pass `<iteration_dir>/artefacts/` so the analyst writes its outputs to `<iteration_dir>/artefacts/analyst/`.
 
-2. **Launch the Transcript Analyst sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) and poll with `wait`.
+2. **Run the blinding check — a non-zero exit blocks the invocation.** `uv run python scripts/check_blinding.py investigations/<investigation_name>/CONDITION_LABEL_MAP_iter<N>.json <analyst request.json>`, before every Analyst invocation. It blocks on any real condition name from the map, or any role word (`baseline`, `control`, `treatment`, `resample`), in a label, a transcript-source path or symlink target, a file name under it, or a log header's `task_file`, tags or metadata; fix the naming and re-run. Its warnings do not block: record each beside the label mapping in the log and carry it into the Phase 3 caveats — above all a `task_args` difference (a Pattern A variant whose `-T` value is the manipulation), which is an accepted leak, not a fixed one. **What this protects, and what it does not.** The goal is not an airtight firewall: an Analyst that went out of its way to read the logs and compare conditions could always eventually tell them apart. The goal is that the *scaffold itself* never hands the Analyst an expectation — no name, path or label that tells it what a condition is before it has looked at the transcripts. That is why real names block while incidental, irreducible channels (a shared task name, a `-T` value) only warn.
 
-3. **After the Analyst returns**, review the scan results path provided in the report for sanity-checking summary statistics.
+   *Logs produced before opaque ids existed* cannot be fixed by renaming. Neutrally named staging directories (symlinks, as one archived investigation used) hide the directory name but not the symlink target or the names inside each `.eval` (`task_file`, tags, metadata), so the check still blocks. Either re-run those conditions under ids, or record the exposure — every channel and condition the check listed, and which measurements it could have touched — in the log and the Phase 3 caveats, and proceed on that recorded decision. Never proceed past a block silently.
+
+3. **Launch the Transcript Analyst sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) and poll with `wait`.
+
+4. **After the Analyst returns**, review the scan results path provided in the report for sanity-checking summary statistics.
 
 **What can go wrong:**
 - The log directories contain no `.eval` files (e.g., the Executor put logs in a different location than reported). Verify the paths contain logs before launching.
 - The condition labels leak the experimental design (e.g., using "control" and "treatment" instead of opaque labels). Always use condition_A, condition_B, etc.
+- The labels are opaque but what they point at is not: `condition_A → logs/treatment_explicit_goal/`, a `task_file` of `task_treatment.py`, a `cond:` tag carrying the real name. In one archived run the Analyst reported every condition by its real name this way. Opaque ids at Step 2b and `check_blinding.py` at step 2 above close it.
 - The topic accidentally contains hypothesis-leaking language. Re-read the topic one more time before launching. See `orchestrator_analyst_guide.md` for detailed guidance.
 
 ---
@@ -517,7 +524,7 @@ These questions don't have mechanical answers. They require judgement — the ki
 
    **Alternatives still standing.** Name the explanations of the headline that no condition you ran could exclude, and for each, the condition that would have separated it. This section is required, including when the honest answer is short: a reader needs to know what the result does *not* rule out as much as what it shows.
 
-4. **Caveats and limitations.** What could undermine these findings? Include: sample size adequacy, baseline variance across iterations, scanner precision/recall, differential attrition, confounds not controlled for, **and provider-family coverage** — if the model set was single-provider *and* the headline finding is a construct-level claim (i.e. about a behaviour or eval property meant to generalise, not about a specific model's behaviour), the construct-validity is tested against one operationalisation; state that explicitly with a one-line provider-sensitivity caveat. When the headline is intentionally model-specific (e.g. *"Opus 4.7 exhibits behaviour X under condition Y"*), the multi-provider caveat does not apply — the claim is already scoped to that model. (See `eval_science_principles.md` §3, Q4 corollary.) Be specific — "more work is needed" is not a caveat.
+4. **Caveats and limitations.** What could undermine these findings? Include: sample size adequacy, baseline variance across iterations, scanner precision/recall, differential attrition, confounds not controlled for, blinding exposures (every `check_blinding.py` warning carried from Step 2g — a `task_args` difference above all — and any recorded exposure of pre-id logs), **and provider-family coverage** — if the model set was single-provider *and* the headline finding is a construct-level claim (i.e. about a behaviour or eval property meant to generalise, not about a specific model's behaviour), the construct-validity is tested against one operationalisation; state that explicitly with a one-line provider-sensitivity caveat. When the headline is intentionally model-specific (e.g. *"Opus 4.7 exhibits behaviour X under condition Y"*), the multi-provider caveat does not apply — the claim is already scoped to that model. (See `eval_science_principles.md` §3, Q4 corollary.) Be specific — "more work is needed" is not a caveat.
 
    **Serving-route caveats (required when applicable).** Routing is part of the measurement instrument, so it belongs in the caveats whenever it was not fully controlled or not fully faithful:
    - *Unpinned routing* (tier iii): state that upstream provider varied freely across the run. If router metadata was recorded, say what the logs show about whether routing actually stayed stable — an uncontrolled variable that turned out constant is a much weaker caveat than one that varied, and you can tell the difference from the logs.
@@ -569,7 +576,8 @@ Research scope unchanged since iteration 1.
 - Open questions resolved: <list, if any>
 
 ### Conditions Constructed
-- <list of named conditions with variant choices per site; mark the positive control, if any>
+- <list of named conditions with variant choices per site and each one's opaque id (`treatment_explicit_goal` → `c_3f9a`); mark the positive control, if any>
+- Label map: `CONDITION_LABEL_MAP_iter<N>.json` (ids ↔ names; Analyst labels per invocation)  |  `check_blinding.py`: <clean | warnings: …>  |  Exposure recorded: <none | channels and conditions — pre-id logs only>
 - Construal checks (private — never sent with this mapping): <check id → condition, intended direction, against which control>
 
 ### Pre-registered Predictions
@@ -653,11 +661,12 @@ Research scope unchanged since iteration 1.
         ├── requests/                         # Every sub-agent request, persisted by the launcher
         ├── INVESTIGATION-LOG.md              # Cumulative per-iteration state
         ├── FINDINGS-REPORT.md                # Standalone final synthesis (written in Phase 3)
-        ├── <iteration_name>_v1/              # Iteration 1 working copy
-        │   ├── [eval files, modified]
+        ├── CONDITION_LABEL_MAP_iter1.json    # Private: ids ↔ condition names, Analyst labels (denied to the Analyst)
+        ├── iter_01/                          # Iteration 1 working copy (neutral name)
+        │   ├── c_8b21/ c_3f9a/               # Per-condition environment copies, named by id (Pattern B)
         │   ├── logs/
-        │   │   ├── control/
-        │   │   └── treatment/
+        │   │   ├── c_8b21/
+        │   │   └── c_3f9a/
         │   └── artefacts/
         │       ├── explorer/                 # Written by the launcher
         │       │   ├── report_<iter>_explorer_<n>.md
@@ -669,11 +678,11 @@ Research scope unchanged since iteration 1.
         │           ├── report_<iter>_analyst_<n>.md
         │           ├── scanners.py
         │           └── scans/
-        └── <iteration_name>_v2/              # Iteration 2 working copy (if needed)
+        └── iter_02/                          # Iteration 2 working copy (if needed)
             ├── [eval files, modified differently]
             ├── logs/
-            │   ├── control/
-            │   └── treatment/
+            │   ├── c_51d0/                   # Fresh ids every iteration
+            │   └── c_a7e2/
             └── artefacts/
                 └── [same structure]
 ```
@@ -769,3 +778,5 @@ If Model A succeeded but Model B failed entirely, the orchestrator can still sen
 15. **Editing the pre-registered predictions after seeing results.** Including "clarifications". The Step 2d table is scored as written; a prediction rewritten to fit the outcome is not a prediction.
 
 16. **Attributing an effect that sits inside the noise floor.** Re-running an identical condition moves rates too, and `seed` / `temperature` do not make an eval deterministic. Until three identical draws exist, a modest effect is `[floor uncharacterised]`; once they do, an effect inside their spread belongs to the noise, not the manipulation.
+
+17. **Letting a condition's real name reach the Analyst through a path, filename or log metadata.** Opaque labels are decorative if `condition_A` points at `logs/treatment_explicit_goal/`, or if the log header's `task_file`, `cond:` tag or `metadata.condition` carries the name. Opaque ids from Step 2b onward, the private label map, and `check_blinding.py` before every Analyst invocation (Step 2g).

@@ -116,16 +116,16 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 **Input JSON**:
 ```json
 {
-    "experiment_name": "explicit_goal_framing",
+    "experiment_name": "iter_01",
     "experiment_dir": "/absolute/path/to/experiment",
     "conditions": {
-        "control": {
-            "task": "task.py",
+        "c_8b21": {
+            "task": "c_8b21/task.py",
             "args": {}
         },
-        "treatment": {
-            "task": "task.py",
-            "args": {"system": "system_prompt_treatment.txt"}
+        "c_3f9a": {
+            "task": "c_3f9a/task.py",
+            "args": {}
         }
     },
     "models": ["anthropic/claude-sonnet-4-5-20250929"],
@@ -147,6 +147,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 ```
 
 - `experiment_dir` must be an existing directory
+- Condition names are **opaque execution ids** (`c_<4 hex>`) and `experiment_name` is neutral: the runner writes both into the log directory, tags and metadata the Analyst later reads. The id → real-name map is the caller's private `CONDITION_LABEL_MAP_iter<N>.json` (see the Analyst's `check_blinding.py` rule below)
 - `model_routing` is optional; per-model routing directives resolved by the Orchestrator in Phase 1 and rendered by the Executor as `-M` arguments. Omit it and every model is invoked directly (the pre-existing behaviour). For OpenRouter models, get the provider slug and model args from `scripts/openrouter_endpoints.py` — never guess a slug. See `executor_interface_contract.md §Model routing`
 - `overrides` is optional; supported keys: `sample_limit`, `sample_id`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `command_timeout_seconds`. `sample_id` pins the eval to named dataset entries (`--sample-id`) and pairs with `epochs` for resampling one episode — without it, `epochs` repeats the *whole dataset*. The removed `runs_per_condition` key is refused by the runner; use `epochs` for repeated sampling
 - `subagent_model` is optional; the model the Executor agent runs on. **Distinct from `models`**, which are the eval's target models — `subagent_model` has no provider prefix (e.g. `claude-opus-4-7`), whereas `models` entries do (e.g. `anthropic/claude-sonnet-4-5-20250929`)
@@ -163,8 +164,8 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 {
     "topic": "How models reason about their operational context and whether they adjust their approach based on perceived circumstances",
     "transcript_source": {
-        "condition_A": "/absolute/path/to/logs/run_001",
-        "condition_B": "/absolute/path/to/logs/run_002"
+        "condition_A": "/absolute/path/to/iter_01/logs/c_3f9a",
+        "condition_B": "/absolute/path/to/iter_01/logs/c_8b21"
     },
     "scanning_model": "openai/gpt-4.1-mini",
     "constraints": {"limit": 100},
@@ -176,7 +177,8 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 
 - `transcript_source` values must all be existing directories containing `.eval` log files
 - `topic` must be a **neutral description** — never the hypothesis
-- Use **opaque condition labels** (condition_A, condition_B) — randomise the mapping to conditions
+- Use **opaque condition labels** (condition_A, condition_B) — randomise the mapping to conditions — pointing at directories named by opaque condition ids, never by a real condition name or a role word
+- **Before every launch, run `uv run python scripts/check_blinding.py <CONDITION_LABEL_MAP_iter<N>.json> <request.json>`; a non-zero exit blocks the invocation.** Exit 1 lists each blocking hit (channel — label, path, symlink target, file name, `task_file`, tags, metadata — file, and offending token); exit 2 is a usage error; warnings (a differing `task_args`, mixed-iteration layouts) print without changing the exit code and are recorded in the log and the report's caveats. The map itself is in the Analyst's `RESTRICTED_FILES`
 - `scanning_model`, `constraints`, and `artefacts_dir` are optional. If `scanning_model` is an `openrouter/…` string, pin its route the same way target-model routes are pinned — the scanner is a measurement instrument held constant across conditions, and unpinned routing lets it drift between condition scans in a way that is indistinguishable from a real effect (see `analyst_interface_contract.md §Scanning model`)
 - `subagent_model` is optional; the model the Analyst agent runs on. **Distinct from `scanning_model`**, which is the model Scout uses for LLM scanners — `subagent_model` changes which model *does the analysis*, `scanning_model` changes which model the scanners *call*
 - `subagent_thinking` is optional; the Analyst's extended-thinking config (see General Pattern above)
@@ -192,7 +194,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
 ```json
 {
     "topic": "<neutral topic — rules unchanged>",
-    "transcript_source": {"condition_A": "/abs/path/logs/run_001", "condition_B": "/abs/path/logs/run_002", "condition_C": "/abs/path/logs/run_003"},
+    "transcript_source": {"condition_A": "/abs/path/iterations/01_round1/logs/c_3f9a", "condition_B": "/abs/path/iterations/01_round1/logs/c_8b21", "condition_C": "/abs/path/iterations/01_round1/logs/c_51d0"},
     "behaviour_spec": {
         "description": "The model edited the test file rather than the implementation",
         "reference_transcript": "/abs/path/to/original.eval",

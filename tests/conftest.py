@@ -98,6 +98,11 @@ def write_fixture_log(
     no_assistant: int = 0,
     status: str = "success",
     completed: int | None = None,
+    task: str = "fixture_task",
+    task_file: str = "task.py",
+    tags: list[str] | None = None,
+    metadata: dict | None = None,
+    task_args: dict | None = None,
 ) -> str:
     """Write a small **scored** .eval log so the blackout tests have something to leak.
 
@@ -117,6 +122,13 @@ def write_fixture_log(
         Log status.
     completed : int | None
         ``completed_samples`` in the header (defaults to ``epochs``).
+    task, task_file : str
+        The header's task name and ``task_file`` (the blinding tests craft
+        leaky ones).
+    tags, metadata : list[str] | dict | None
+        Header tags and metadata; default to a ``baseline`` condition.
+    task_args : dict | None
+        The header's ``task_args`` (the ``-T`` values).
 
     Returns
     -------
@@ -144,15 +156,16 @@ def write_fixture_log(
     spec = EvalSpec(
         run_id="fixture-run",
         created=now,
-        task="fixture_task",
+        task=task,
         task_id="t1",
         task_version=0,
-        task_file="task.py",
+        task_file=task_file,
+        task_args=task_args or {},
         dataset=EvalDataset(samples=1, sample_ids=["s1"]),
         model="mockllm/model",
         config=EvalConfig(epochs=epochs, sample_id=["s1"]),
-        metadata={"condition": "baseline"},
-        tags=["exp:fixture", "cond:baseline"],
+        metadata={"condition": "baseline"} if metadata is None else metadata,
+        tags=["exp:fixture", "cond:baseline"] if tags is None else tags,
     )
     samples = []
     for i in range(epochs):

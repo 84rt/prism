@@ -1,5 +1,6 @@
 """Shared Agent SDK runner for all sub-agents."""
 
+import fnmatch
 import json
 import os
 import sys
@@ -239,8 +240,11 @@ def _build_hooks(
         agent_name: Human-readable agent name for error messages.
         restricted_files: Mapping of path patterns to denial reasons. A
             pattern ending in "/" denies an entire directory (matched
-            anywhere in the path); any other pattern denies paths ending
-            with it, which is normally a bare filename. Directory patterns
+            anywhere in the path); a pattern containing a shell wildcard
+            (`*`, `?`, `[`) is matched against the file's basename
+            (e.g. "CONDITION_LABEL_MAP*.json" covers every iteration's map);
+            any other pattern denies paths ending with it, which is
+            normally a bare filename. Directory patterns
             exist so that a whole class of documents can be blinded once
             rather than enumerated — a file added to a denied directory
             later is blocked automatically, whereas a new filename is
@@ -272,6 +276,11 @@ def _build_hooks(
                 # filename and would never end with the directory itself.
                 if pattern.endswith("/"):
                     matched = pattern in file_path
+                elif any(ch in pattern for ch in "*?["):
+                    # A family of files sharing a name shape (one per
+                    # iteration, say) is denied by one pattern rather than
+                    # an enumeration that silently stops at its last entry.
+                    matched = fnmatch.fnmatchcase(os.path.basename(file_path), pattern)
                 else:
                     matched = file_path.endswith(pattern)
                 if matched:

@@ -1044,8 +1044,8 @@ def build_pairs(
         command::
 
             uv run inspect eval task.py --model openai/gpt-5 --display plain
-              --log-dir /abs/exp/logs/baseline --tags exp:x,cond:baseline
-              --metadata condition=baseline --metadata model=openai/gpt-5
+              --log-dir /abs/exp/logs/c_0e4d --tags exp:x,cond:c_0e4d
+              --metadata condition=c_0e4d --metadata model=openai/gpt-5
               --metadata route=direct --no-fail-on-error --retry-on-error 3
               --sample-id 1 --epochs 30 --max-connections 4
     """
@@ -1753,11 +1753,11 @@ def render_status(data: dict[str, Any]) -> str:
     str
         Multi-line text. Example::
 
-            run: mf_x_resample_20260917T120000Z  state: running  pid: 4242 (alive)
+            run: iter_00_20260917T120000Z  state: running  pid: 4242 (alive)
             concurrency: max_parallel=1 (runner default) max_connections=4 (runner default)
             preflight: done — 2 passed, 0 excluded
             pairs:
-              baseline / openai/gpt-5   running   samples -/-   attempts 1
+              c_0e4d / openai/gpt-5   running   samples -/-   attempts 1
             zero-sample pairs: none
     """
     pid = _worker_pid(data)

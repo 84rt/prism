@@ -170,6 +170,7 @@ link_file "scripts/lint_log.py"
 link_file "scripts/openrouter_endpoints.py"
 link_file "scripts/ledger_to_json.py"
 link_file "scripts/check_report.py"
+link_file "scripts/check_blinding.py"
 
 # subagents
 link_file "subagents/__init__.py"
@@ -257,6 +258,7 @@ GITIGNORE_ENTRIES=(
     "scripts/openrouter_endpoints.py"
     "scripts/ledger_to_json.py"
     "scripts/check_report.py"
+    "scripts/check_blinding.py"
     ".claude/docs/investigator/orchestrator_analyst_guide.md"
     ".claude/docs/contracts/analyst_forensic_addendum.md"
     ".claude/docs/contracts/analyst_interface_contract.md"

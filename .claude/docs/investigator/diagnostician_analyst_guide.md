@@ -90,7 +90,8 @@ The self-check, adapted: *if I read only this topic, could I reconstruct any can
 
 ## Condition labels and request assembly
 
-- **Opaque labels, re-randomised every invocation** — the mapping recorded in the investigation log, never sent. Reusing a stable mapping across iterations weakens the firewall exactly as it does for the Orchestrator (`orchestrator_responsibilities.md` Anti-Pattern #6).
+- **Opaque labels, re-randomised every invocation** — the mapping recorded in the iteration's `CONDITION_LABEL_MAP_iter<N>.json`, never sent. Reusing a stable mapping across iterations weakens the firewall exactly as it does for the Orchestrator (`orchestrator_responsibilities.md` Anti-Pattern #6).
+- **Opaque all the way down.** The labels sit on top of opaque execution ids (`c_3f9a`) assigned at 3a — and at 1b for the resample — which name every environment copy, condition-specific file and log directory, so no designer name or role word enters a path or a log header (`diagnostician_responsibilities.md §3a`, *Assign opaque execution ids*). Run `scripts/check_blinding.py` on the map and the request before every invocation; a non-zero exit blocks it, and its warnings (a `task_args` difference above all) go into the log and the report's Limitations (`orchestrator_analyst_guide.md §Providing condition labels`).
 - **Include the control arm.** Rates are only interpretable against the matched control from the same round; a single-condition scan also implicitly reveals design information (`orchestrator_analyst_guide.md §Providing condition labels`).
 - **Forward attrition and retry caveats** from the Executor's report, per condition, exactly as the Orchestrator does (`orchestrator_analyst_guide.md §Before delegating`).
 - **Scanning model discipline is unchanged**: pinned route, held constant across conditions and across iterations — the scanner is part of the instrument.

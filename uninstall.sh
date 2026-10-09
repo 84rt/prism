@@ -115,6 +115,7 @@ unlink_file "scripts/lint_log.py"
 unlink_file "scripts/openrouter_endpoints.py"
 unlink_file "scripts/ledger_to_json.py"
 unlink_file "scripts/check_report.py"
+unlink_file "scripts/check_blinding.py"
 
 # subagents
 unlink_file "subagents/__init__.py"

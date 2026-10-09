@@ -150,6 +150,7 @@ prism/
 │   ├── openrouter_endpoints.py    # Provider enumeration + pin selection
 │   ├── ledger_to_json.py          # CANDIDATES.md -> Designer/Critic candidates JSON
 │   ├── check_report.py            # Sub-agent report conformance check (headings, signatures)
+│   ├── check_blinding.py          # Pre-Analyst blinding check (condition names in paths, log headers)
 │   ├── dump_transcripts.py        # .eval logs -> plain-text per-sample dumps for sub-agents
 │   └── lint_log.py                # Investigation-log lint (duplicate/stranded blocks)
 ├── docs/

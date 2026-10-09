@@ -98,7 +98,7 @@ Each item should name what the orchestrator needs to do to resolve it (read a sp
 
 **Diff notation.** Use unified diff format with `-` / `+` line markers and sufficient context lines for the diff to apply unambiguously. Include the file path and line range for each diff so the orchestrator can apply it mechanically.
 
-**Condition naming.** When the orchestrator names conditions (downstream of the Explorer), the names must be filesystem-safe `snake_case` identifiers (e.g., `control`, `treatment_explicit_goal`). This convention is recorded here because the Explorer's per-site rationale may reference the conceptual role a variant plays under a particular naming scheme.
+**Condition naming.** When the orchestrator names conditions (downstream of the Explorer), the names must be filesystem-safe `snake_case` identifiers (e.g., `control`, `treatment_explicit_goal`). This convention is recorded here because the Explorer's per-site rationale may reference the conceptual role a variant plays under a particular naming scheme. These descriptive names are the orchestrator's own: before anything runs, each condition is given an opaque execution id (`c_<4 hex>`), and only the id names files, directories and logs. So never write a condition's name, or a role word such as `control` or `treatment`, into a diff — neither into file contents nor into the name of a file the diff creates.
 
 **Blocker flag semantics.** A **Blocker** attaches to a specific site, variant, condition, or global risk and means: this would invalidate the experiment if the design went ahead as-is. Scope is local:
 

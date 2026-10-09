@@ -57,6 +57,8 @@ The rule most likely to be violated by a Diagnostician carrying Orchestrator hab
 
 Telling the Analyst *what to measure* leaks nothing about *why* you think it happened; a fixed grader across conditions is what makes rates comparable at all. What never crosses: candidates, predicted directions, the condition mapping, and any score before the Analyst reports it.
 
+**Conditions run under opaque ids, and `scripts/check_blinding.py` gates every Analyst invocation** — no real condition name or role word may reach the Analyst through a label, a path, or a log header (`diagnostician_responsibilities.md §3c`).
+
 ## Pipeline
 
 Phase numbering matches `diagnostician_responsibilities.md`; the diagram is `docs/model-forensics-diagram.png`.

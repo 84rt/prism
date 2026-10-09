@@ -10,7 +10,7 @@ Each request from the orchestrator to the Experiment Executor contains the follo
 
 ### Experiment name (required)
 
-A short `snake_case` identifier for the experiment (e.g., `explicit_goal_framing`). Used in log tags and directory naming; must be filesystem-safe.
+A short `snake_case` identifier for the experiment (e.g., `iter_01`). Used in log tags and directory naming; must be filesystem-safe. It is written into every log's `exp:` tag, which the Transcript Analyst can read, so the caller keeps it **neutral** — an iteration number, never a description of the manipulation or of an arm's role.
 
 ### Experiment directory (required)
 
@@ -18,12 +18,12 @@ An absolute filesystem path to the experiment directory. Must exist, be readable
 
 ### Conditions (required)
 
-A mapping from condition names (`snake_case`) to per-condition invocation parameters:
+A mapping from condition names to per-condition invocation parameters. **Condition names are opaque execution ids** (`c_<4 hex>`) assigned by the caller, never descriptive names: the runner writes each name into the log directory (`logs/<name>/`), the `cond:` tag and `metadata.condition`, all of which the Transcript Analyst can read, so a descriptive name defeats its blinding. The caller keeps the id → real-name map privately and checks the logs with `scripts/check_blinding.py` before the Analyst sees them; the Executor reports by id and needs nothing else.
 
 ```json
 {
-    "control":   {"task": "task.py", "args": {}},
-    "treatment": {"task": "task.py", "args": {"system": "system_prompt_treatment.txt"}}
+    "c_8b21": {"task": "c_8b21/task.py", "args": {}},
+    "c_3f9a": {"task": "c_3f9a/task.py", "args": {}}
 }
 ```
 
@@ -99,13 +99,13 @@ A *resample* is the Model Forensics equivalent of a baseline measurement: the un
 
 The paragraphs below are marked **[caller]** or **[Executor]**. Caller-facing paragraphs constrain how the request is built; Executor-facing paragraphs constrain what the Executor does with it. The Executor need only act on the latter — but the former are here rather than in the caller's own documentation because they define what makes a request a resample at all.
 
-**[caller] Request shape.** Exactly one condition, named `baseline`, pointing at the unmodified task file with **no `-T` overrides at all**. The point of the resample is to characterise the episode's own setting; any `-T` argument makes it a variant of that setting rather than the setting itself, and this run is the investigation's frozen anchor (each round's comparisons are drawn against a concurrent same-round control by default — `diagnostician_responsibilities.md §3a`). One model — the frozen target model for the investigation. The episode is isolated with `sample_id` and repeated with `epochs`.
+**[caller] Request shape.** Exactly one condition, named by an **opaque execution id** like every other condition (`c_<4 hex>` — not `baseline`), pointing at the unmodified task file — inside an unmodified copy of the environment named by that id (`c_0e4d/task.py`), so its header's `task_file` has the same shape as every later arm's — with **no `-T` overrides at all**. The id is recorded in the label map as the frozen baseline (`CONDITION_LABEL_MAP_iter0.json`, role `frozen_baseline`), and the experiment name and directory are neutral too: all three reach the Analyst (the log path, the `cond:` and `exp:` tags), and a pool named `baseline` or filed under `00_resample` tells it which arm is the anchor whenever it is scanned alongside later ones. The point of the resample is to characterise the episode's own setting; any `-T` argument makes it a variant of that setting rather than the setting itself, and this run is the investigation's frozen anchor (each round's comparisons are drawn against a concurrent same-round control by default — `diagnostician_responsibilities.md §3a`). One model — the frozen target model for the investigation. The episode is isolated with `sample_id` and repeated with `epochs`.
 
 ```json
 {
-    "experiment_name": "mf_<investigation>_resample",
-    "experiment_dir": "investigations/<name>/iterations/00_resample",
-    "conditions": {"baseline": "<path/to/unmodified_task.py>"},
+    "experiment_name": "iter_00",
+    "experiment_dir": "investigations/<name>/iterations/00_round0",
+    "conditions": {"c_0e4d": "c_0e4d/<path/to/unmodified_task.py>"},
     "models": ["<frozen target model>"],
     "overrides": {"sample_id": "<id of the episode under investigation>", "epochs": 30}
 }
@@ -119,9 +119,9 @@ Note that `sample_id` selects which dataset entry runs; it does not alter the ta
 
 The one exception is an eval carrying state that survives across samples within a single run: a module-level accumulator, a shared external service, a dataset the task mutates, a solver that caches. There, epochs are not independent draws, and only separate whole-eval runs would be an honest resample — which the runner does not offer. That is a blocker for the caller to raise rather than work around: the resample would be measuring a sequence rather than a population, and no override available here fixes that.
 
-**[Executor] Log organisation.** Resample logs go to their own directory under their own `experiment_dir`, exactly as any single-condition run does: `<experiment_dir>/logs/baseline/`. This is the ordinary per-condition rule, stated here only because the Analyst later receives that one path as one condition and the resample is compared against for the life of the investigation.
+**[Executor] Log organisation.** Resample logs go to their own directory under their own `experiment_dir`, exactly as any single-condition run does: `<experiment_dir>/logs/<id>/` (e.g. `logs/c_0e4d/`). This is the ordinary per-condition rule, stated here only because the Analyst later receives that one path as one condition and the resample is compared against for the life of the investigation.
 
-**[Executor] Zero successful runs is reported, never recovered.** If every command for the `baseline` condition fails — nothing ran, or things ran and no samples completed — report it plainly and completely: the normal taxonomy applies, with exit code, command and output tail per the structural-failure rules. Do not relax a pin, drop `-M` arguments, widen a limit, or otherwise adjust the invocation to make it succeed. Standard retry policy applies and nothing beyond it. The Executor makes no judgement about what a zero count means for the investigation.
+**[Executor] Zero successful runs is reported, never recovered.** If every command for the resample's one condition fails — nothing ran, or things ran and no samples completed — report it plainly and completely: the normal taxonomy applies, with exit code, command and output tail per the structural-failure rules. Do not relax a pin, drop `-M` arguments, widen a limit, or otherwise adjust the invocation to make it succeed. Standard retry policy applies and nothing beyond it. The Executor makes no judgement about what a zero count means for the investigation.
 
 **[caller] Zero successful runs and zero behaviour rate are different things.** The Executor can observe the first and structurally cannot observe the second — it reports execution outcomes and never scorer outputs. A resample that ran cleanly but in which the target behaviour never occurred is a *finding* about reproducibility and terminates the investigation; a resample that failed to run is a broken setup and is fixed and re-run. Only the caller, holding the Analyst's report, can tell these apart. See `diagnostician_responsibilities.md` for what follows from each.
 
@@ -186,7 +186,7 @@ A table of every condition-model pair that entered full execution (or `skipped` 
 
 | Column | Meaning |
 |---|---|
-| Condition | `snake_case` identifier |
+| Condition | The condition name as requested — an opaque execution id (`c_<4 hex>`) |
 | Model | `provider/model-name` |
 | Route | `direct`, `openrouter:<slug>` for a pinned route, or `openrouter:unpinned`. Records how the request actually reached the model, which `--metadata model=` alone cannot capture |
 | Log Path | Absolute path to the `.eval` log file produced by this pair |
