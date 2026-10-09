@@ -95,6 +95,8 @@ def write_fixture_log(
     epochs: int = 2,
     metrics: dict[str, float] | None = None,
     with_error: bool = False,
+    error_message: str = "boom",
+    errored: int = 1,
     no_assistant: int = 0,
     status: str = "success",
     completed: int | None = None,
@@ -110,7 +112,11 @@ def write_fixture_log(
     metrics : dict | None
         Scorer metrics to embed in the header (defaults to a recognisable pair).
     with_error : bool
-        Give the last sample an error.
+        Give the last ``errored`` samples an error.
+    error_message : str
+        The errored samples' message, e.g. a provider's credit-cap refusal.
+    errored : int
+        How many trailing samples error when ``with_error`` is set.
     no_assistant : int
         How many samples carry no assistant message.
     status : str
@@ -160,8 +166,8 @@ def write_fixture_log(
         if i >= no_assistant:
             msgs.append(ChatMessageAssistant(content="LEAKY_ANSWER"))
         err = None
-        if with_error and i == epochs - 1:
-            err = EvalError(message="boom", traceback="tb", traceback_ansi="tb")
+        if with_error and i >= epochs - errored:
+            err = EvalError(message=error_message, traceback="tb", traceback_ansi="tb")
         samples.append(
             EvalSample(
                 id="s1",

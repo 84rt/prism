@@ -180,3 +180,135 @@ def test_missing_document_is_an_agent_error(monkeypatch):
     monkeypatch.setattr(runner, "SCAFFOLD_ROOT", "/nonexistent-scaffold")
     with pytest.raises(RuntimeError, match="scaffold document"):
         runner.contract_section(f"{CONTRACTS}/mapper_interface_contract.md")
+
+
+# --- The one re-ask: `conformance_defects` + `previous_report` -----------------
+
+# Every role a lead agent re-asks after a failed `check_report.py`; the
+# Executor is absent because its report is regenerated, never re-asked.
+REASK_ROLES = ["explorer", "mapper", "designer", "analyst", "critic"]
+
+# The role-specific rule for re-deriving a genuinely missing section, which
+# must reach the prompt (it is what stops a re-ask from redoing the work).
+REASK_NOTES = {
+    "explorer": "Re-read the environment only for such a section.",
+    "mapper": "Re-read the environment only for such a section.",
+    "designer": "do not re-design",
+    "analyst": "never re-run a scan",
+    "critic": "discriminating signature",
+}
+
+DEFECTS = ["missing section `### Summary`", "heading `### Findings` is not in the contract"]
+
+
+def _previous_report(tmp_path) -> str:
+    """A saved non-conformant report the re-ask points at."""
+    path = tmp_path / "artefacts" / "report_iter1_x_1.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("## Summary\nThe content is here under the wrong headings.\n")
+    return str(path)
+
+
+@pytest.mark.parametrize("role", REASK_ROLES)
+def test_reask_section_is_rendered_for_every_reasked_role(role, tmp_path, monkeypatch):
+    """Capture the built prompt: defects verbatim, the report path, the rule."""
+    module, run_fn, data, _ = _requests(tmp_path)[role]
+    previous = _previous_report(tmp_path)
+    got = _capture(monkeypatch, module)
+    asyncio.run(run_fn(cwd=None, **data, conformance_defects=DEFECTS, previous_report=previous))
+    prompt = got["prompt"]
+    section = prompt[prompt.index(runner.REASK_HEADING):]
+    for d in DEFECTS:
+        assert f"- {d}" in section
+    assert f"`{previous}`" in section
+    assert "restructured into the contract's exact section headings" in section
+    assert REASK_NOTES[role] in section
+
+
+@pytest.mark.parametrize("role", REASK_ROLES)
+def test_first_attempt_has_no_reask_section(role, tmp_path, monkeypatch):
+    module, run_fn, data, _ = _requests(tmp_path)[role]
+    got = _capture(monkeypatch, module)
+    asyncio.run(run_fn(cwd=None, **data))
+    assert runner.REASK_HEADING not in got["prompt"]
+
+
+@pytest.mark.parametrize("role", REASK_ROLES)
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "defects_only",
+        "report_only",
+        "defects_not_a_list",
+        "defects_empty",
+        "defect_not_a_string",
+        "relative_report",
+        "missing_report",
+    ],
+)
+def test_malformed_reask_is_an_agent_error(role, malformed, tmp_path, monkeypatch):
+    """A malformed re-ask raises (exit 2) before any spend — never a silent drop."""
+    module, run_fn, data, _ = _requests(tmp_path)[role]
+    previous = _previous_report(tmp_path)
+    fields = {
+        "defects_only": {"conformance_defects": DEFECTS},
+        "report_only": {"previous_report": previous},
+        "defects_not_a_list": {"conformance_defects": "missing section", "previous_report": previous},
+        "defects_empty": {"conformance_defects": [], "previous_report": previous},
+        "defect_not_a_string": {"conformance_defects": [{"line": "x"}], "previous_report": previous},
+        "relative_report": {"conformance_defects": DEFECTS, "previous_report": "artefacts/report.md"},
+        "missing_report": {"conformance_defects": DEFECTS, "previous_report": str(tmp_path / "nope.md")},
+    }[malformed]
+    _capture(monkeypatch, module)
+    with pytest.raises(RuntimeError, match="malformed re-ask"):
+        asyncio.run(run_fn(cwd=None, **data, **fields))
+
+
+@pytest.mark.parametrize("field", ["conformance_defects", "previous_report"])
+def test_executor_rejects_reask_fields(field, tmp_path, monkeypatch):
+    """The Executor is never re-asked; a re-ask field is an error, not a drop."""
+    module, run_fn, data, _ = _requests(tmp_path)["executor"]
+    got = _capture(monkeypatch, module)
+    value = DEFECTS if field == "conformance_defects" else _previous_report(tmp_path)
+    with pytest.raises(RuntimeError, match="not accepted"):
+        asyncio.run(run_fn(cwd=None, **data, **{field: value}))
+    assert not got  # rejected before run_agent
+
+
+# --- Standing invariant: every key a builder reads is documented ---------------
+
+# Each role's section of `subagent_invocation.md`, as (start, end) headings.
+_INVOCATION_SECTIONS = {
+    "environment_explorer": ("## Environment Explorer", "## Experiment Executor"),
+    "experiment_executor": ("## Experiment Executor", "## Transcript Analyst"),
+    "transcript_analyst": ("## Transcript Analyst", "## Environment Mapper"),
+    "environment_mapper": ("## Environment Mapper", "## Variant Designer"),
+    "variant_designer": ("## Variant Designer", "## Red-Teaming Critic"),
+    "redteam_critic": ("## Red-Teaming Critic", None),
+}
+
+
+@pytest.mark.parametrize("agent_dir", sorted(_INVOCATION_SECTIONS))
+def test_every_data_key_read_by_each_builder_is_documented_in_its_section(agent_dir):
+    """A key the builder reads must be documented in that role's own section
+    of the invocation reference; only the shared ``subagent_*`` fields may
+    rely on the General Pattern. (The Analyst's own test in
+    `test_analyst_prompt_builder.py` is the original of this invariant.)"""
+    import re
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = open(os.path.join(root, "subagents", agent_dir, "agent.py")).read()
+    keys = set(re.findall(r"data(?:\.get\(|\[)['\"](\w+)['\"]", src))
+    doc = open(os.path.join(root, ".claude", "docs", "investigator", "subagent_invocation.md")).read()
+    start, end = _INVOCATION_SECTIONS[agent_dir]
+    section = doc.split(start, 1)[1]
+    section = section.split(end, 1)[0] if end else section
+    general = doc.split("## General Pattern")[1].split("## Environment Explorer")[0]
+
+    def documented(k: str) -> bool:
+        if f"`{k}`" in section or f'"{k}"' in section:
+            return True
+        return k.startswith("subagent_") and f"`{k}`" in general
+
+    missing = sorted(k for k in keys if not documented(k))
+    assert not missing, f"{agent_dir}/agent.py reads undocumented request keys: {missing}"

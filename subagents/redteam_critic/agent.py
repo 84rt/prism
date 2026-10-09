@@ -5,7 +5,7 @@ import os
 from typing import Any
 
 from subagents.redteam_critic.system_prompt import SYSTEM_PROMPT
-from subagents.runner import run_agent
+from subagents.runner import reask_section, run_agent
 
 ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
 DISALLOWED_TOOLS = ["Edit", "Write", "Bash", "WebSearch", "WebFetch"]
@@ -238,16 +238,18 @@ def _build_prompt(data: dict[str, Any]) -> str:
         "defects listed, and a second failure is recorded against the Critic."
     )
 
-    # A one-time re-ask carries the previous attempt's defects verbatim.
-    if data.get("conformance_defects"):
-        sections.append(
-            "## Re-ask: Conformance Defects In Your Previous Report\n\n"
-            "This is the one re-ask for this request. Your previous report failed "
-            "the conformance check with the defects below. Produce the complete "
-            "report again from the start — not a patch or an apology — with every "
-            "defect fixed:\n\n"
-            + "\n".join(f"- {d}" for d in data["conformance_defects"])
-        )
+    # A one-time re-ask carries the previous attempt's defects verbatim and
+    # points at that report, which is restructured rather than rewritten
+    # (validated in `reask_section`; malformed raises → exit 2).
+    reask = reask_section(
+        "Red-teaming critic",
+        data.get("conformance_defects"),
+        data.get("previous_report"),
+        "A proposal the defects name as lacking a discriminating signature gets "
+        "one now, written as its falsifier; nothing else is re-reasoned.",
+    )
+    if reask:
+        sections.append(reask)
 
     return "\n\n".join(sections) + "\n"
 
@@ -263,9 +265,11 @@ async def run_redteam_critic(cwd: str | None = None, **data: Any) -> str:
         Fields from the invocation JSON. Always required: ``mode``.
         Mode-conditional requirements are documented in
         `.claude/docs/contracts/critic_interface_contract.md` and enforced in
-        :func:`_build_prompt`. Optional in every mode: ``conformance_defects``,
-        a list of strings from ``scripts/check_report.py`` that turns the
-        invocation into the contract's one re-ask. The shared ``subagent_model`` /
+        :func:`_build_prompt`. Optional in every mode, and only together: the
+        re-ask pair ``conformance_defects`` (the defect lines printed by
+        ``scripts/check_report.py``) + ``previous_report`` (the failed
+        report's absolute path), which turns the invocation into the
+        contract's one re-ask (see `runner.reask_section`). The shared ``subagent_model`` /
         ``subagent_thinking`` / ``subagent_route`` infrastructure fields apply
         as they do to every sub-agent; the Critic is routed cross-family by
         default, so callers pass ``subagent_route="openrouter"`` and a

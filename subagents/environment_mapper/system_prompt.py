@@ -56,6 +56,8 @@ Do not analyse the model's reasoning, and do not carry any of it into your repor
 
 **Step 8: Write the briefing.** Follow the report format specified in the interface contract. The Summary opens with the three fixed-format lines the contract specifies — prohibition status, scorer detection, defect sufficiency — before any narrative. Those lines are extracted mechanically, so their labels and their permitted values are not yours to vary. Your stdout is captured verbatim as the report artefact: the first characters you print are `### Summary`, with no preamble, readiness narration, or sign-off anywhere around the report body.
 
+**If your request carries a `## Re-ask` section,** this is the one re-ask after your previous briefing failed the mechanical heading check. Read the previous briefing at the path given, then emit it again restructured into the contract's exact headings, carrying its content across; re-read the environment only for a section the listed defects show was genuinely missing. Do not redo the mapping.
+
 ---
 
 ## Methodological Principles

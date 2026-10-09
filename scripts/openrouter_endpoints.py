@@ -497,6 +497,34 @@ def unpinned_model_args() -> dict[str, Any]:
     return {"default_headers": {"X-OpenRouter-Metadata": "enabled"}}
 
 
+def resolve_model_id(model_id: str) -> str:
+    """Reduce a model string to the `<author>/<model>` id the catalogue uses.
+
+    Parameters
+    ----------
+    model_id : str
+        e.g. "openrouter/meta-llama/llama-3.3-70b-instruct:free". A leading
+        "openrouter/" and any ":free"-style variant suffix are stripped.
+
+    Returns
+    -------
+    str
+        The base id, e.g. "meta-llama/llama-3.3-70b-instruct".
+
+    Raises
+    ------
+    RuntimeError
+        If the result is not of the form `<author>/<model>`.
+    """
+    resolved = model_id.strip().removeprefix("openrouter/")
+    base_id = resolved.split(":")[0]  # drop :free / :nitro / :extended variants
+    if "/" not in base_id:
+        raise RuntimeError(
+            f"Model id must be '<author>/<model>', got: {model_id!r}"
+        )
+    return base_id
+
+
 def select(model_id: str, prefer: str, timeout: float) -> dict[str, Any]:
     """Enumerate a model's endpoints and recommend a provider to pin.
 
@@ -517,12 +545,7 @@ def select(model_id: str, prefer: str, timeout: float) -> dict[str, Any]:
         recommendation, ready-to-render model args, ranked endpoints, warnings.
     """
     # --- Resolve the model id ---
-    resolved = model_id.strip().removeprefix("openrouter/")
-    base_id = resolved.split(":")[0]  # drop :free / :nitro / :extended variants
-    if "/" not in base_id:
-        raise RuntimeError(
-            f"Model id must be '<author>/<model>', got: {model_id!r}"
-        )
+    base_id = resolve_model_id(model_id)
     author = base_id.split("/")[0]
 
     # --- Fetch live data (both endpoints are public) ---
@@ -639,6 +662,91 @@ def _rationale(
         f"least-quantized pinnable endpoint ({record['quantization'] or 'unknown'}); "
         f"native precision {native_basis}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Context window (for sub-agents routed through OpenRouter)
+# ---------------------------------------------------------------------------
+
+
+def model_context_length(model_id: str, timeout: float = 10.0) -> int | None:
+    """Largest context window that at least half of a model's endpoints serve.
+
+    `subagents/runner.py` uses this for a non-Claude sub-agent on the
+    `openrouter` route: the Claude Code CLI does not know such a model's
+    window, so unless told otherwise it assumes a Claude-sized one and
+    compacts a 1M-window model at ~200k tokens. The figure is an upper median
+    (see `majority_context_length`): a sub-agent should use as much window as
+    the reputable providers give before compacting, while a rare small-window
+    host is ignored. A sub-agent's route is not pinned — OpenRouter routes
+    each request to an endpoint that can hold it — and the sub-agent model is
+    infrastructure, not a measurement instrument, so which upstream serves a
+    long request does not matter.
+
+    Parameters
+    ----------
+    model_id : str
+        Any form `resolve_model_id` accepts, e.g. "google/gemini-3-pro".
+    timeout : float
+        Socket timeout in seconds for the one public, key-free request.
+
+    Returns
+    -------
+    int | None
+        The window in tokens (e.g. 131072 for Llama 3.3 70B, whose 11
+        endpoints span 12k–131k), or None when the catalogue lists the model
+        with no usable `context_length`.
+
+    Raises
+    ------
+    RuntimeError
+        Malformed id, network failure, HTTP error (an unlisted model is a 404)
+        or invalid JSON — callers that must stay offline-safe catch it.
+    """
+    base_id = resolve_model_id(model_id)
+    payload = _get_json(f"{OPENROUTER_API}/models/{base_id}/endpoints", timeout)
+    endpoints = (payload.get("data") or {}).get("endpoints") or []
+    lengths = [
+        e.get("context_length")
+        for e in endpoints
+        if isinstance(e.get("context_length"), int) and e.get("context_length") > 0
+    ]
+    return majority_context_length(lengths)
+
+
+def majority_context_length(lengths: list[int]) -> int | None:
+    """Largest window that at least half of the endpoints offer.
+
+    Sorting descending and taking index `ceil(n/2) - 1` yields the largest
+    `w` such that at least half the endpoints serve `>= w` tokens. In the
+    2026-10 catalogue frontier models (GPT-5.x, Gemini 3.x, Grok 4.x) report
+    one window on every endpoint, so the rule only bites for open-weight
+    models, whose outliers are small-window hosts.
+
+    Parameters
+    ----------
+    lengths : list[int]
+        Positive per-endpoint `context_length` values, in any order.
+
+    Returns
+    -------
+    int | None
+        The window, or None for an empty list.
+
+    Examples
+    --------
+    >>> majority_context_length([1048576])
+    1048576
+    >>> majority_context_length([131072, 1048576])  # n=2: one endpoint is half
+    1048576
+    >>> majority_context_length([131072, 131072, 65536, 32768])
+    131072
+    """
+    if not lengths:
+        return None
+    ranked = sorted(lengths, reverse=True)
+    # -(-n // 2) is ceil(n/2) in integer arithmetic.
+    return ranked[-(-len(ranked) // 2) - 1]
 
 
 # ---------------------------------------------------------------------------

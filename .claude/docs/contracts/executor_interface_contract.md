@@ -215,7 +215,7 @@ For each:
   - **Command**: the exact `uv run inspect eval ...` invocation attempted
   - **Stderr (last ~50 lines)**: the relevant error message
 
-The Executor does not diagnose root cause (experiment-setup bug vs. infrastructure issue); the orchestrator does this from the evidence.
+The Executor does not diagnose root cause (experiment-setup bug vs. infrastructure issue); the orchestrator does this from the evidence. One cause is named mechanically: when the provider refused on account credit or a usage cap, `execute_evals.py` tags the evidence `[structural] [credentials]` and the draft adds a `[credentials] Credentials exhausted` line to the pair — relay it unchanged; it is the orchestrator's cue that re-running cannot help until credit is restored.
 
 #### Sample-level (N condition-model pair(s))
 
@@ -223,6 +223,11 @@ Criterion: eval process exited successfully; one or more samples errored in the 
 
 For each:
 - **`<condition> / <model>`**: `X` of `Y` samples errored.
+
+The runner passes `--no-fail-on-error`, so a credit or usage cap reached mid-eval does not fail the process: Inspect exits 0 and the remaining samples error one by one. `execute_evals.py` therefore classifies each errored sample's message with the same credential patterns as the process level, records the count as `credential_sample_errors` on the pair in `status.json` (the count only — never the message), and the draft adds a line under the pair:
+- **`[credentials]` Credentials exhausted** (`K` of the `X` errored samples): … These samples are not valid data; re-run the pair once credit is restored.
+
+Relay it unchanged and do not re-run the pair yourself; like the structural tag, it is the orchestrator's cue to suspend, not a task bug.
 
 #### Transient, recovered (N condition-model pair(s))
 
@@ -233,7 +238,7 @@ For each:
 
 #### Pinned provider unavailable (N condition-model pair(s))
 
-Criterion: `execute_evals.py` classified the failure as **`routing`** — its error entries are tagged with the class, so an entry beginning `[routing]` maps to this section. The script applies that class to OpenRouter failures that no retry can fix: no available providers for the selected model, or an account-credit failure. Displays `None.` if no pinned routes failed this way.
+Criterion: `execute_evals.py` classified the failure as **`routing`** — its error entries are tagged with the class, so an entry beginning `[routing]` maps to this section. The script applies that class to OpenRouter failures that no retry can fix: no available providers for the selected model. (An account that cannot pay is not a provider that is down: credit and usage-cap refusals are **structural**, tagged `[credentials]` — see Structural.) Displays `None.` if no pinned routes failed this way.
 
 For each:
 - **`<condition> / <model>`**: the pinned `provider_slug`, the OpenRouter error message, and the number of process retries attempted.

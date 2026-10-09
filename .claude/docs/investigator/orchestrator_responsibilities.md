@@ -256,11 +256,13 @@ The report structure is defined in `executor_interface_contract.md §Report Form
 3. **Interpret the Error Summary by category.** Each category gates a different action:
    - **Transient (recovered)**: informational. The eval completed; proceed.
    - **Sample-level**: the eval completed but some samples errored. The Analyst will quantify per-condition attrition. Proceed, but record the attrition for the Analyst's delegation brief.
+     - **Except** a pair whose entry carries a `[credentials] Credentials exhausted` line (with the count of affected samples): the provider's credit or usage cap was reached mid-eval, and because the runner passes `--no-fail-on-error` the process exited 0 while the remaining samples errored. This is a suspension trigger, not a task bug and not attrition — those samples are not valid data, so do not send the pair to the Analyst as it stands; see §Sub-Agent Failure Handling → *Credential exhaustion and suspension*, and re-run the pair after resuming.
    - **Structural**: the eval did not run to completion. Do not proceed without investigation. Read the evidence (exit code, command, combined stdout+stderr tail) to diagnose. Common signatures:
      - `ImportError` referencing a file you created in Step 2c → your modification introduced a bug; re-check the diff rather than re-running.
      - `Authentication` / `401` / `API key` / `No <PROVIDER>_API_KEY defined in the environment` → verify the required key is in `.env`; do not print key values. Note this arrives on stdout, not stderr.
      - `Docker` / `sandbox` errors → sandbox infrastructure; may need `inspect sandbox cleanup docker`.
      - `No such file` referencing a task file → Step 2d path was wrong.
+     - `[structural] [credentials]` → the model's provider refused on account credit or a usage cap. Not a task or configuration bug and not fixable by re-running; see §Sub-Agent Failure Handling → *Credential exhaustion and suspension*. Switching the target model to get past it is a scientific change, never a recovery.
    - **Pinned provider unavailable**: the experiment is correctly configured but the pinned upstream provider could not serve it. This is *your* decision, not the Executor's — it will never re-pin on its own. Three options, and the choice must be recorded in the log:
      - *Wait and re-run* the affected pairs on the same pin. Preferred: it preserves comparability at the cost of time.
      - *Re-pin and restart that model's conditions from scratch*. Anything already run against that model was measured on a different upstream, so partial results cannot be mixed with post-re-pin results. Re-running only the failed pairs is exactly the mistake to avoid.
@@ -469,6 +471,8 @@ When in doubt, default to consulting (existing principle).
 
 5. **Escalate to user.** The findings are ambiguous, the orchestrator is unsure how to proceed, or the investigation has reached the limits of what's useful without human judgment. Present what's been found and ask for direction.
 
+Suspension is not one of these options: it is what happens when a component the next step needs has no live route left (§Sub-Agent Failure Handling), and it leaves the investigation resumable rather than concluded or escalated for direction.
+
 *For any iterate option (2–4): writing the next iteration's `### Hypothesis this iteration → Statement` in the investigation log is part of the decision, not documentation for later. The hypothesis must be named in the Statement field before the next Explorer launch — even when Options 3 or 4 continue with the same hypothesis as this iteration, a fresh Statement block must exist for the new iteration (carrying the same Statement forward is fine; what isn't fine is launching the next iteration without the block).*
 
 **Respect the autonomy agreement.** Before deciding to iterate, check the autonomy agreement from Phase 1. If the user requested check-ins after each iteration, present findings and proposed next steps rather than proceeding. When in doubt, default to pausing.
@@ -506,6 +510,8 @@ These questions don't have mechanical answers. They require judgement — the ki
 **Report structure:** Lead with the headline, then provide supporting evidence. The user should be able to stop reading after the first paragraph and understand the core finding.
 
 **Orchestrator work:**
+
+A **suspended** investigation does not reach this phase and writes no findings report: *Suspended (resumable)* is a state, not a conclusion, and the user gets the short status described under §Sub-Agent Failure Handling instead. If the user decides not to resume, conclude here explicitly, with the suspension stated as the reason the evidence stops where it does.
 
 1. **Write the standalone findings report.** Before presenting to the user, write the final synthesis to `investigations/<investigation_name>/FINDINGS-REPORT.md` as an independent document. This is distinct from `INVESTIGATION-LOG.md`: the log is the cumulative per-iteration state; the findings report is the final standalone synthesis. *Do not append the findings report to the log.* A reader should be able to open `FINDINGS-REPORT.md` and understand the investigation's conclusions without consulting the log. The structure of the report follows steps 2–6 below. If construal checks were used, the caveats (step 4) say so and name the constructs they referred to — the checks' wording told the Analyst roughly what was being probed, and a reader should know that.
 
@@ -635,6 +641,36 @@ Research scope unchanged since iteration 1.
 
 **Lint the log before each Decision block.** Append-only discipline accumulates ordering and duplication defects when late material meets it — a pasted block appearing twice, a check specified after its round closed and stranded under a later heading. Late material goes under the *current* heading with a one-line pointer to where it belongs, never as a second copy. Run `uv run --no-project python scripts/lint_log.py investigations/<name>/INVESTIGATION-LOG.md` before writing each Decision, and fix anything it reports by appending.
 
+### `RESUME.md` (only on suspension)
+
+Written at the investigation root beside the log when the investigation is suspended (§Sub-Agent Failure Handling). On resumption it is renamed `RESUMED-<n>.md` (kept as evidence, never deleted) so a later invocation does not resume twice; the log's `### Resumed` block supersedes it. The investigation log gains a `### Suspension` block under the current iteration at the same moment (what failed, which routes, what was in flight, the step stopped at), and a `### Resumed` block when the run picks up again (a repeat in the same iteration is `### Suspension (2)` / `### Resumed (2)`, so `lint_log.py` sees no duplicate heading).
+
+````markdown
+# RESUME: <Investigation Name>
+*Suspended (resumable) at <timestamp>, during Iteration <N>, Step <2x>. Not a findings report.*
+
+## Resume at
+<the exact next step, e.g. "Iteration 3, Step 2g: launch the Analyst on iter3_v1/logs — the Executor finished 4/4 pairs">
+
+## Credentials needed
+- <key>: <the provider's text> — needed by <roles / target model>
+- Caps are not observable in advance: confirm each with one minimal call before relaunching.
+
+## Relaunch, in order
+<paste `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished` — one ready-to-run `launch` command per unfinished invocation, each pointing at its persisted request under requests/>
+- An Executor cut off mid-batch: relaunch with a request restricted to the pairs not completed (from `execute_evals.py status <run_dir>`, score-free); never re-run a completed pair. A pair that completed with `[credentials]`-tagged sample errors counts as not completed — its capped samples are not data — and is re-run whole.
+
+## Executed but unanalysed
+| Iteration | Log directory | Pre-registered Predictions (INVESTIGATION-LOG.md lines) | Table sha256 |
+|---|---|---|---|
+| 3 | <path> | L<a>–L<b> | <`sed -n '<a>,<b>p' INVESTIGATION-LOG.md \| sha256sum`> |
+
+## Frozen artefacts — verify before relaunching anything
+- [ ] Every pre-registration table above re-hashes to its recorded value
+- [ ] Iteration directories and their `logs/` untouched since the `### Suspension` block
+- [ ] Models, routes and eval environment as in the Agreed Scope
+````
+
 ### Why state management matters
 
 - **Context window pressure.** The orchestrator's conversation will grow across iterations. The investigation log provides a durable summary that survives context compaction.
@@ -689,7 +725,7 @@ The Edge Cases below concern sub-agents that *return a report* you don't like �
 **Triage before you react.** A failed invocation is a diagnostic problem, not a trigger for a fixed procedure. Capture the evidence first — the exit code in the launcher's receipt, the tail of its `stderr_…` file, the `subtype` in its cost sidecar (`error_max_turns` means the turn cap was hit; raise `subagent_max_turns` rather than retrying unchanged), any `stop_reason` — then work out *why* it failed before deciding what to do. The decisive distinction is transient vs. deterministic:
 
 - *Transient* (timeout, rate limit, one-off network/API error): re-invoking will likely succeed. Retry once or twice, noting it in the log.
-- *Deterministic* (API refusal on the content, SDK crash, misconfiguration, exhausted API credits): re-invoking unchanged fails the same way. Stop and diagnose; do not retry blindly.
+- *Deterministic* (API refusal on the content, SDK crash, misconfiguration, exhausted API credits): re-invoking unchanged fails the same way. Stop and diagnose; do not retry blindly. Exhausted credits are named for you — see *Credential exhaustion and suspension* below.
 
 Intelligent diagnosis beats rote response throughout this section.
 
@@ -706,6 +742,13 @@ Some workarounds change the *experiment* rather than the harness — e.g. switch
 **Preserving the firewall under recovery.** The blinding of the Transcript Analyst is the scaffold's central integrity guarantee. Bypassing the Analyst — reading transcripts yourself to surface patterns — is therefore essentially never acceptable: you hold the hypothesis, so your "analysis" is contaminated by construction. If the Analyst fails, exhaust the in-pipeline options (different model, redacted content) or escalate; do not analyse the transcripts yourself. For an Executor bypass in which eval scores become unavoidably visible, you have already breached §2e — fall back to the documented mitigation: pre-register a written prediction *before* seeing any downstream analysis, and report the breach in your caveats. And whenever you run evals directly, you inherit the Executor's safety checks — most importantly, **confirm there are no sample-level errors before reading any score** (in one past run, empty completions caused by exhausted API quota were misread as genuine model refusals precisely because this check was skipped).
 
 **Fixing the scaffold vs. routing around it.** Sometimes the root cause is the scaffold itself (e.g. a sub-agent pinned to a model with too strict a refusal threshold). The preferred response is to work *within the scaffold's existing parameters* — models, content scoping, overrides — which are meant to give you enough room to navigate most failures without modifying anything. Where the needed parameter doesn't yet exist, the proper fix is upstream, by the scaffold maintainer, so future investigations can navigate the situation independently. But not every gap can be foreseen, so in rare cases — a *quick, well-understood* fix, with modifications authorised by the user — it is appropriate to patch the scaffold yourself and re-invoke the sub-agent, in preference to bypassing it. Do not attempt deep or uncertain scaffold surgery mid-investigation; the risk of silently confounding the experiment is too high. Escalate instead, and record any fix you do apply.
+
+**Non-Claude sub-agents: check the report, re-ask once.** Any role may run on a non-Claude model via `subagent_route: "openrouter"`. Whenever one did, run `uv run --no-project python scripts/check_report.py <role> <report>` on its report before reading it. On a non-zero exit, **re-ask once**: relaunch the identical request plus `conformance_defects` (the printed defect lines, as an array of strings) and `previous_report` (the failed report's absolute path) — never through `constraints`, which is a scope limit (`subagent_invocation.md §Report conformance`). The Explorer and Analyst restructure the previous report rather than redo the work; the Analyst, sent with the same `artefacts_dir`, rebuilds a missing section from its own saved artefacts and never re-runs a scan. The Executor is never re-asked; regenerate its report with `execute_evals.py report <run_dir>`. A second failure is read structurally and recorded in the log, never re-asked again. Non-Claude models substitute and merge headings, and an omitted section is otherwise indistinguishable from "nothing to report".
+
+**Credential exhaustion and suspension.** A provider refusing on account credit or a usage cap is its own failure class. The runner names it — the sub-agent exits 2 with `credentials_exhausted (route=<route>, …)` in its stderr, and the launcher's receipt and cost sidecar carry `failure_class: credentials_exhausted` and the route — and `execute_evals.py` tags a target-model credit failure `[structural] [credentials]` when it failed the eval process, or adds a `[credentials] Credentials exhausted` line (with the count of affected samples) to a **Sample-level** pair when the cap was reached mid-eval (the runner passes `--no-fail-on-error`, so the process exits 0 and the remaining samples error). The sample-level tag is equally a suspension trigger, not a task bug: those samples are not valid data, the pair is not sent to the Analyst as it stands, and it is re-run after resuming. Provider caps are not observable in advance (no key reports its headroom), so this is reactive, and distinct from the spend-cap budget exit, which is a decision made at Step 2j. Confirm a suspected cap with one minimal call before acting on it.
+
+- **Degrade first.** A sub-agent on a capped route can usually move to the other: the same Claude model via `subagent_route: "openrouter"` when `direct` is capped is an infrastructure change, recorded in the log and the report's caveats, that leaves the measured construct untouched. Suspend only when a component the next step needs has **no live route left** — both routes capped, or the target model's agreed route capped (re-routing a target is a strategic change of instrument, Step 2j).
+- **Suspend deliberately.** (1) Let still-alive detached work finish — `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished` shows it — and launch nothing new. (2) Never improvise around the gap: no analysing transcripts yourself, no bypassed sub-agent, no switched target model, and no edit to any pre-registration table — the unscored iterations are scored later against those tables as written. (3) Write a `### Suspension` block into the log under the current iteration: what failed (with the provider's text), which routes, what was in flight and how it ended, the step stopped at. (4) Write `RESUME.md` from the template in §State Management. (5) Give the user a short status — *Suspended (resumable)*, what ran out, what is needed, and that `/orchestrate investigations/<name>` resumes it — not a findings report.
 
 **Clean up by quarantine, not deletion.** Recovery often leaves stale or partial artefacts behind — a half-written executor report, an incomplete log directory, a corrupted scan output. Do not `rm -rf` them. Move them to `artefacts/_quarantine/<timestamp>/` instead. Quarantining preserves evidence you may need to diagnose the failure and explain it in the report, and it avoids destructive cleanup commands, which are both irreversible and a safety hazard in an autonomous loop. Deleting experiment artefacts or logs is never part of routine recovery.
 

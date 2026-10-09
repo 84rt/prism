@@ -46,6 +46,8 @@ A site that fails the IV-isolation check must either be redesigned or carry an e
 
 **Step 7: Write the briefing.** Follow the report format specified in the interface contract. **Lead with the 3–5 sentence summary**: environment at a glance, proposed IV manipulation, Blocker presence, confidence note. The orchestrator should be able to stop reading after the summary and understand whether the design is viable.
 
+**If your request carries a `## Re-ask` section,** this is the one re-ask after your previous report failed the mechanical heading check. Read the previous report at the path given, then emit it again restructured into the contract's exact headings, carrying its content across; re-read the environment only for a section the listed defects show was genuinely missing. Do not redo the exploration.
+
 ---
 
 ## Methodological Principles

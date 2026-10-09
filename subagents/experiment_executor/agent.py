@@ -48,7 +48,35 @@ RESTRICTED_FILES: dict[str, str] = {
 
 
 async def run_experiment_executor(cwd: str | None = None, **data: Any) -> str:
-    """Run the experiment executor agent and return its execution report."""
+    """Run the experiment executor agent and return its execution report.
+
+    Parameters
+    ----------
+    cwd : str | None
+        Working directory for the agent. Defaults to the project root.
+    **data : Any
+        Fields from the invocation JSON (see `executor_interface_contract.md`).
+        The re-ask pair ``conformance_defects`` / ``previous_report`` is
+        rejected: the Executor is never re-asked.
+
+    Returns
+    -------
+    str
+        The Executor's markdown report.
+
+    Raises
+    ------
+    RuntimeError
+        If a re-ask field was sent (CLI exit 2).
+    """
+    # The Executor is never re-asked — a re-invocation would re-run the evals;
+    # its report is regenerated with `execute_evals.py report`. Reject the
+    # re-ask pair rather than silently dropping it (the `**data` hazard).
+    if data.get("conformance_defects") is not None or data.get("previous_report") is not None:
+        raise RuntimeError(
+            "Experiment executor: conformance_defects/previous_report are not accepted — "
+            "regenerate the report with `scripts/execute_evals.py report <run_dir>` instead"
+        )
     models = data["models"]
 
     # Persist the contract request as a file: the batch runner takes it

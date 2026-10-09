@@ -39,7 +39,7 @@ You direct five sub-agents via CLI scripts. For exact invocation commands, JSON 
 Two invocation rules with no exceptions:
 
 - **The Analyst's forensic interface spans two files.** Read `analyst_forensic_addendum.md` alongside the base contract for every forensic invocation — the base contract deliberately never mentions it, so it is reachable only from here, `diagnostician_responsibilities.md`, `diagnostician_analyst_guide.md`, and `subagent_invocation.md`. The presence of `behaviour_spec` in your request is what switches the Analyst into forensic mode.
-- **The Critic is cross-family, as a hard gate.** Every Critic invocation goes through `subagent_route: "openrouter"` with a non-Claude model. No `OPENROUTER_API_KEY` → the investigation does not start (an `OPENAI_API_KEY` does not substitute; there is no direct-OpenAI route).
+- **The Critic is cross-family, as a hard gate.** Every Critic invocation goes through `subagent_route: "openrouter"` with a non-Claude model. No `OPENROUTER_API_KEY` → the investigation does not start (an `OPENAI_API_KEY` does not substitute; by deliberate choice there is no direct-OpenAI route — correlated cap exhaustion is answered by suspension, below, not a third route).
 
 **Run sub-agents through the detached launcher.** Write the input JSON to a file, launch it with `scripts/launch_subagent.py launch <role> …` with the iteration's `artefacts/` as `--artefacts-dir`, and poll with `wait` (`subagent_invocation.md §General Pattern`). The launcher persists the request and writes each report to `artefacts/<role>/report_<tag>_<role>_<n>.md` — there is no separate save step; the Analyst additionally writes its own outputs via `artefacts_dir`. Never run a sub-agent's CLI in the foreground or with `nohup … &`: the Executor runs for as long as the evals do, and either form dies with the session.
 
@@ -106,7 +106,16 @@ The eval environment and target model are **frozen at Phase 0**; the baseline is
 
 ## How to Begin
 
-**If `$ARGUMENTS` is provided:** treat it as the behaviour description plus transcript path, and begin Phase 0.
+**If `$ARGUMENTS` names an investigation directory containing `RESUME.md`:** resume it — do not start fresh, and do not re-run Phase 0. The investigation was suspended because credentials ran out (`diagnostician_responsibilities.md §Sub-Agent Failure Handling`), and everything needed to continue is on disk:
+
+1. **Verify the frozen artefacts first**, before launching anything: re-run the grader-file `find … -exec sha256sum {} +` command `RESUME.md` gives and compare with the hashes pasted there, check the grader hash recorded under `### Grader` (the Analyst re-reports it on load), and every pre-registration table re-hashed from its recorded `INVESTIGATION-LOG.md` line range. Any mismatch is an instrument change: stop and tell the user — it is not resumable as the same investigation.
+2. **Confirm each credential `RESUME.md` names** with one minimal call; if a route is still capped, say so and stay suspended.
+3. **Write a `### Resumed` block** (`### Resumed (2)` for a second resumption in the same section) into the log under the section holding the `### Suspension` block: when, what was verified, which credentials are back, any route change (recorded as a `### Deviation`).
+4. **Relaunch from the persisted requests** with the commands in `RESUME.md` (re-derive them with `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished` if anything changed), then continue at the step it names. Executed-but-ungraded rounds are scored against their tables as written.
+
+The archive is the precedent: three runs graded already-executed rounds days later against their untouched tables, and two improvised a `RESUME.md`; this is that path, made explicit. Once relaunched, rename `RESUME.md` to `RESUMED-<n>.md` so the directory is not resumed twice.
+
+**Otherwise, if `$ARGUMENTS` is provided:** treat it as the behaviour description plus transcript path, and begin Phase 0.
 
 **If no arguments:** ask the user — *"Which transcript would you like me to explain, and what did the model do in it that needs explaining?"*
 

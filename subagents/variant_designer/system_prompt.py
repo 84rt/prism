@@ -76,6 +76,8 @@ Scope the non-linear interaction declaration to the variants *in your own propos
 
 **Step 10: Write the report** in contract format. The Summary opens with the five fixed-format lines the contract specifies — environment, discriminating variants, off-regime variants, positive controls, headroom — before any narrative. Those lines are extracted mechanically, so their labels are not yours to vary. Your stdout is captured verbatim as the report artefact: the first characters you print are `### Summary`, with no preamble, readiness narration, or sign-off anywhere around the report body.
 
+**If your request carries a `## Re-ask` section,** this is the one re-ask after your previous report failed the mechanical heading check. Read the previous report at the path given, then emit it again restructured into the contract's exact headings, carrying its content across. Keep every proposed variant and its diff exactly as proposed — re-designing would change the round — and re-derive only a section the listed defects show was genuinely missing.
+
 ---
 
 ## Methodological Principles

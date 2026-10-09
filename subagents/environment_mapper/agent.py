@@ -3,7 +3,7 @@
 from typing import Any
 
 from subagents.environment_mapper.system_prompt import SYSTEM_PROMPT
-from subagents.runner import contract_section, run_agent
+from subagents.runner import contract_section, reask_section, run_agent
 
 ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
 DISALLOWED_TOOLS = ["Edit", "Bash", "WebSearch", "WebFetch"]
@@ -56,8 +56,10 @@ async def run_environment_mapper(cwd: str | None = None, **data: Any) -> str:
     **data : Any
         Fields from the invocation JSON. Required: ``environment_path``,
         ``behaviour_description``. Optional: ``reference_transcript``,
-        ``constraints``, and the shared ``subagent_model`` /
-        ``subagent_thinking`` / ``subagent_route`` infrastructure fields.
+        ``constraints``, the re-ask pair ``conformance_defects`` +
+        ``previous_report`` (see `runner.reask_section`), and the shared
+        ``subagent_model`` / ``subagent_thinking`` / ``subagent_route``
+        infrastructure fields.
 
     Returns
     -------
@@ -86,6 +88,17 @@ async def run_environment_mapper(cwd: str | None = None, **data: Any) -> str:
     constraints = data.get("constraints")
     if constraints:
         prompt += f"\n## Constraints\n\n{constraints}\n"
+
+    # The one re-ask after a failed conformance check (validated; malformed
+    # raises, so the CLI exits 2 rather than silently re-running from scratch).
+    reask = reask_section(
+        "Environment mapper",
+        data.get("conformance_defects"),
+        data.get("previous_report"),
+        "Re-read the environment only for such a section.",
+    )
+    if reask:
+        prompt += f"\n{reask}\n"
 
     # Absolute contract path first, so the read-first instruction resolves from
     # any working directory (see runner.contract_section).

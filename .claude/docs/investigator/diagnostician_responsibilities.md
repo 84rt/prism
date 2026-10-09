@@ -115,7 +115,7 @@ This is stricter than the Orchestrator's negotiable baseline-drift policy, delib
 The Critic must run on a different model family from the Diagnostician, via `subagent_route: "openrouter"`.
 
 - **No `OPENROUTER_API_KEY` → do not start the investigation.** Explain to the user: the Critic is the only component in the pipeline whose job is to find explanations the Diagnostician cannot see, and a same-family Critic shares exactly the priors it exists to challenge (`model_forensics_principles.md §9`). Proceeding would produce an investigation that looks complete and is not.
-- **An `OPENAI_API_KEY` does not substitute.** `runner.py` implements two sub-agent routes only — `direct` (Anthropic) and `openrouter`. There is no direct-OpenAI path. Say this in the error, because it is a reasonable thing for a user to assume works.
+- **An `OPENAI_API_KEY` does not substitute.** `runner.py` implements two sub-agent routes only — `direct` (Anthropic) and `openrouter` — and that is a deliberate choice, not a gap: there is no direct-OpenAI path. Say this in the error, because it is a reasonable thing for a user to assume works. The answer to both routes hitting a cap at once is the Suspension procedure (§Sub-Agent Failure Handling), not a third route.
 - **Resolve the Critic's model by cost at scoping.** Run `uv run --no-project python scripts/openrouter_endpoints.py <model-id> --prefer cost` over the documented shortlist (cheapest-first at time of writing: `google/gemini-3-pro`, then `openai/gpt-5` — but the rule is *cheapest non-Claude frontier model that can sustain the role*, verified against live pricing rather than this list). Announce the pick with a one-line rationale and record it in the Agreed Scope.
 - Thinking configuration is left to the runner's default, which disables extended thinking for non-Claude models on the OpenRouter route.
 
@@ -368,6 +368,8 @@ Stated as an explicit procedure (D6, D12):
 - **Eager exit:** leave the loop early when the leading candidate has at least two confirmed pre-registered predictions that discriminated it from the current runner-up, the runner-up has at least one disconfirmed prediction, and no live candidate is inert. *(This threshold is a proposal, recorded as provisional in the plan; recalibrate after the first real run.)*
 - **Budget exit:** iteration cap reached, or the next round would cross the spend cap. **The spend half fires as a decision, never as an interruption.** Before designing each round, and again before Phase 4, run `scripts/spend.py` and write the running total against the cap into the `### Decision` block, with a projection for the round ahead: arms × n × the measured per-episode cost, plus the round's sub-agent invocations at their measured per-invocation cost (a Designer, a Critic twice, an Analyst, an Executor). If total + projection exceeds cap − reserve, degrade the round first, in this order — drop variants (never the concurrent control, never a positive control an elimination needs), then any optional Critic redundancy, then n down to the sizing rule's minimum — and if it still does not fit, the budget exit fires *now*, recorded as such. A run stopped from outside mid-round has not exited on budget; it has been interrupted, and its executed-but-ungraded arms are handled as deferred scoring against the immutable table, which remains a genuine test for as long as the table is unedited. Report the equivalence class as it stands rather than forcing a verdict (`§8`).
 
+- **Not an exit: suspension.** A needed component left with no live route (§Sub-Agent Failure Handling → *Credential exhaustion and suspension*) suspends the investigation in a resumable state. No exit fires, no Phase 4 or 5 runs, and the stopping-rule counts carry over unchanged to the resumed run.
+
 **Termination precondition — the must-exclude candidate.** No exit fires until the dangerous candidate in the must-exclude slot has either had a **clean test** — a pre-registered row on a variant that targets its own signature (the ablation of the cue it names, or its stake amplification), with a succeeded manipulation check and, where the outcome was a null, a positive control — or is explicitly recorded as **carried untested-dangerous**. From iteration 1 on, each 3a asks whether this round gives it that test and, if not, which round will; a design whose every variant is an addition chosen to separate the cue-specific accounts never tests it, and two full rounds went that way in one investigation while the candidate accrued misses on rows that did not bear on it. The eager exit does not fire while it is untested; the quiet and budget exits may, but only by carrying the untested-dangerous line into the report's primary finding.
 
 Every exit proceeds to Phase 4 before Phase 5. The Phase 4 reserve agreed at Phase 0 is what makes "budget permitting" normally true — it is spent on nothing else. A budget exit that has already consumed the reserve, or an interruption that leaves nothing to spend, goes straight to Phase 5 as a Constrained Termination.
@@ -402,6 +404,8 @@ Complete the `INVESTIGATION-LOG.md` (every iteration's blocks filled, final deci
 Required report sections:
 
 1. **Primary finding**, in exactly one of three forms, named as such: *Early Termination* (behaviour not reproducible — 1x), *Constrained Termination* (no compelling explanation within budget — say what the leading candidate was and what evidence was missing), *Full Success* (explanation X, with evidence). In the same paragraph, the **must-exclude candidate's status**: eliminated (by which row, with which positive control), survived its clean test (in which case no benign Full Success is claimed), or *carried untested-dangerous*.
+
+   *Suspended (resumable)* is not a fourth form, and it is never written up as a Constrained Termination. Constrained Termination is a verdict reached by decision; suspension is a state the investigation is in when credentials run out, and it produces no `FINDINGS-REPORT.md` — only `RESUME.md` and a short status to the user (§Sub-Agent Failure Handling). A user who decides not to resume turns it into a Constrained Termination explicitly, with the suspension recorded as the reason.
 2. **The explanation and its discriminating signature**, stated against the **contrast class** fixed at Phase 0 ("X rather than Y"). An explanation that does not name its contrast is underspecified.
 3. **Evidence table** — per iteration: variant, pre-registered predictions, observed rates with CIs, manipulation-check verdict, severity, PN/PS tag, outcome. Void rows appear as void.
 4. **What the evidence licenses** (`§5`) — the causal-strength statement, kept honest: ablations give lower bounds on necessity, amplifications give sufficiency, and both are bounds rather than point estimates absent a monotonicity argument. Flag the **token-vs-type inference** explicitly: every instrument produced population rates, while the explanandum is one episode, so the single-episode claim is an inference from type-level evidence and is labelled as such.
@@ -573,6 +577,39 @@ variant may make them testable. Not rankable.>
 
 Update the log incrementally as each block becomes fillable, exactly as the Orchestrator does (`orchestrator_responsibilities.md §State Management`) — deferred batch updates risk loss-on-interruption, and the per-block state is what survives context compaction.
 
+**`RESUME.md` template** — written only on suspension (§Sub-Agent Failure Handling), at the investigation root beside the log. On resumption it is renamed `RESUMED-<n>.md` (kept as evidence, never deleted) so a later invocation does not resume twice, and the log's `### Resumed` block supersedes it:
+
+````markdown
+# RESUME: <Investigation Name>
+*Suspended (resumable) at <timestamp>, during <## Iteration N / ## Phase N, step>. Not a findings report.*
+
+## Resume at
+<the exact next step, e.g. "Iteration 2, 3c Measure: launch the Analyst on iterations/02_*/logs — the Executor finished 11/11 pairs">
+
+## Credentials needed
+- <ANTHROPIC_API_KEY | OPENROUTER_API_KEY | target provider key>: <the provider's text, e.g. "workspace API usage limits … regain access on 2026-10-01 at 00:00 UTC"> — needed by <roles / target model>
+- Caps are not observable in advance: confirm each with one minimal call before relaunching.
+
+## Relaunch, in order
+<paste `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished` — one ready-to-run `launch` command per unfinished invocation, each pointing at its persisted request under requests/; change only `subagent_route`/`subagent_model` in a copy if a route substitution is recorded>
+- An Executor cut off mid-batch: relaunch with a request restricted to the pairs not completed (read them from `execute_evals.py status <run_dir>`, which is score-free); never re-run a completed arm. A pair that completed with `[credentials]`-tagged sample errors counts as not completed — its capped samples are not data — and is re-run whole.
+
+## Executed but ungraded
+| Round | Log directory | Pre-registration table (INVESTIGATION-LOG.md lines) | Table sha256 |
+|---|---|---|---|
+| Iteration 2 | <path> | L<a>–L<b> | <`sed -n '<a>,<b>p' INVESTIGATION-LOG.md \| sha256sum`> |
+
+## Frozen artefacts — verify before relaunching anything
+- [ ] Grader: `<grader_dir>`, hash `<as recorded under ### Grader>`; file hashes as of suspension, pasted from `find <grader_dir> -type f -not -path '*/__pycache__/*' -exec sha256sum {} +` (bytecode caches change on every load, so they are excluded):
+  ```
+  <sha256>  <grader_dir>/grader.py
+  <sha256>  <grader_dir>/metrics.json
+  ```
+- [ ] Every pre-registration table above re-hashes to its recorded value
+- [ ] Environment, target model and route as in the Agreed Scope; iteration directories untouched
+- [ ] `CANDIDATES.md` matches the ledger as of the `### Suspension` block
+````
+
 ---
 
 ## Sub-Agent Failure Handling
@@ -588,8 +625,28 @@ Update the log incrementally as each block becomes fillable, exactly as the Orch
 
 - **Substitutable, no pause.** The model or route any sub-agent runs on — including a cross-family swap of the Analyst *agent* — provided the frozen grader is re-run on the 1c pool under the new configuration and reproduces its rate before any new number is trusted (four re-grades across two families returning 84% each time is what that evidence looks like). The route failover in `subagent_invocation.md §subagent_route`, per role, recorded. The Executor, replaced by the sanctioned batch runner (`scripts/execute_evals.py`), which is score-blind by construction.
 - **Substitutable with a labelled substitute; the round is downgraded.** Designer lost → variants designed by the Diagnostician with self-declared confounds, the round marked *reduced independence*. Analyst lost with a persisted, hash-verified grader → the grader may be *run* (hash checked before and after every scan; the 1c populations must reproduce) but nothing new may be built: manipulation checks fall back to deterministic proxies marked `[provisional]` — written into the pre-registration at 3a alongside the Designer's check, never built after the arms have run, since voiding a row is not evidence-neutral — used only to void rows, and there is no open-ended scan, so no analyst-surfaced candidates that round. Critic `diff_review` lost → the round runs unreviewed and says so.
-- **Pause-forcing.** The Critic at a gate that *decides*: a round whose design the Critic already reviewed may still be executed and scored — an immutable, pre-registered experiment is not wasted by pausing after it — but no elimination is finalised, no candidate retired, and no Full Success declared on evidence from a Critic-less round until a Critic has critiqued the resulting ledger; hold them as `pending critique`. Phase 4 factor selection follows its own fallback. The Analyst with no persisted grader (1c cannot be substituted). The target model or the environment (the frozen setting: the investigation ends).
+- **Pause-forcing.** The Critic at a gate that *decides*: a round whose design the Critic already reviewed may still be executed and scored — an immutable, pre-registered experiment is not wasted by pausing after it — but no elimination is finalised, no candidate retired, and no Full Success declared on evidence from a Critic-less round until a Critic has critiqued the resulting ledger; hold them as `pending critique`. Phase 4 factor selection follows its own fallback. The Analyst with no persisted grader (1c cannot be substituted). The target model or the environment (the frozen setting): a *changed* model, route or environment ends the investigation, while a frozen route that is merely out of credit **suspends** it (below) — restoring the credit restores the identical instrument.
 - **Deferral is the cheap option, and often the right one.** With the table immutable, leaving a round's arms ungraded until the component returns costs nothing in validity — one investigation graded 270 episodes days after they ran, against the frozen table, and the concurrent control reproduced the baseline. Prefer it to any substitute that would weaken the report.
+
+### Non-Claude sub-agents: check the report, re-ask once
+
+Whenever a sub-agent ran on a non-Claude model (`subagent_route: "openrouter"` with a non-Claude `subagent_model` — always the Critic, sometimes any other role after a route substitution), run `uv run --no-project python scripts/check_report.py <role> <report>` on its report before reading it (`--mode <mode>` for the Critic, `--forensic` for the Analyst). On a non-zero exit, **re-ask once**: relaunch the identical request plus `conformance_defects` (the printed defect lines, as an array of strings) and `previous_report` (the failed report's absolute path) — never through `constraints`, which is a scope limit (`subagent_invocation.md §Report conformance`). The Mapper, Designer, Analyst and Critic restructure the previous report rather than redo the work: the Designer keeps its variants and diffs unchanged, and the Analyst — sent with the same `artefacts_dir` and `grader_dir` — rebuilds a missing section from its own saved artefacts and never re-runs a scan. The Executor is never re-asked; regenerate its report with `execute_evals.py report <run_dir>`. A second failure is read structurally and recorded in the log, never re-asked again. Non-Claude models substitute and merge headings, and an omitted section is otherwise indistinguishable from "nothing to report".
+
+### Credential exhaustion and suspension
+
+**Detect it as its own class.** A provider refusing on account credit or a usage cap is neither transient nor a bug. The runner names it: the sub-agent exits 2 with `credentials_exhausted (route=<route>, …)` in its stderr, and the launcher's receipt and the cost sidecar carry `failure_class: credentials_exhausted` with the route. For the target model `execute_evals.py` tags it `[credentials]` at whichever level it surfaced: a cap that fails the eval process stays in the **structural** class with the evidence line tagged; a cap reached mid-eval — the runner passes `--no-fail-on-error`, so the process exits 0 and the remaining samples error — puts the pair under **Sample-level** with a `[credentials] Credentials exhausted` line and the count of affected samples. A sample-level `[credentials]` tag is a suspension trigger, not a task bug and not ordinary attrition: those samples are not valid data, so the pair is neither scored nor handed to the Analyst as it stands, and is re-run after resuming (it goes in `RESUME.md`'s relaunch section). A cap hit by the Analyst's *scanning* model surfaces in the Analyst's own report, or as the Analyst's `credentials_exhausted` if it takes the agent down. Provider caps are not observable in advance — no key reports its remaining headroom — so this is reactive, and it is distinct from the spend-cap budget exit, which is a decision made before a round against `scripts/spend.py`. Confirm a suspected cap with one minimal call before acting on it; in the archive a cap on one route arrived minutes before the other.
+
+**Degrade before suspending.** Apply the degraded-mode policy above first: a Claude sub-agent on a capped `direct` route may move to the same Claude model via `subagent_route: "openrouter"` as a recorded, labelled substitution with the continuity check (one investigation did exactly this and re-graded its 1c pool to confirm); a capped Critic moves within the non-Claude shortlist. Suspension applies only when a component the next step needs has **no live route left** — both routes capped, or the target model's frozen route capped (it cannot be substituted: degraded-mode policy, *Pause-forcing*).
+
+**Suspend deliberately.** When it applies:
+
+1. **Let still-alive detached work finish; launch nothing new.** `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished` shows what is still running; wait on those receipts and on any detached `execute_evals.py` run (its output is evidence, and an Executor run on a live route may well complete).
+2. **Never improvise around the gap.** No self-grading of transcripts, no same-family Critic, no hand-built scanner, no switching the target model — each produces a round that reads as intact and is not (Anti-Pattern #23). The pre-registration tables are not touched: deferred scoring against them stays a genuine test only while they are unedited.
+3. **Write a `### Suspension` block into the log**, under the current `## Iteration N` / `## Phase N`: what failed (role or target, with the provider's text), which routes are exhausted and since when, what was in flight and how each in-flight item ended, and the step the investigation stopped at. (A second suspension in the same section is `### Suspension (2)`, and its resumption `### Resumed (2)`, so `lint_log.py` sees no duplicate.)
+4. **Write `RESUME.md`** at the investigation root from the template in §State Management.
+5. **Tell the user in a short status, not a findings report**: *Suspended (resumable)* — what ran out, what is needed to resume, and that `/diagnose investigations/<name>` resumes from `RESUME.md`. Write no `FINDINGS-REPORT.md`.
+
+The archive is the precedent for all five: three investigations lost both routes mid-run and resumed days later by grading existing transcripts against their untouched tables, and two improvised a `RESUME.md` of their own. This procedure makes that path the designed one.
 
 ---
 
