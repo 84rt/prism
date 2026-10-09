@@ -11,7 +11,7 @@ uv run python scripts/launch_subagent.py launch <role> <input.json> \
     --investigation investigations/<name> --tag <label> [--artefacts-dir <dir>] [--cwd <dir>]
 uv run python scripts/launch_subagent.py wait <receipt.json> --timeout 540   # exit 0 finished, 3 still running
 uv run python scripts/launch_subagent.py status <receipt.json>
-uv run python scripts/launch_subagent.py list investigations/<name>
+uv run python scripts/launch_subagent.py list investigations/<name> [--unfinished]
 ```
 
 - **Roles**: `explorer`, `executor`, `analyst`, `mapper`, `designer`, `critic`.
@@ -21,6 +21,8 @@ uv run python scripts/launch_subagent.py list investigations/<name>
 - **Waiting**: `wait` blocks up to `--timeout` seconds (default 540, under the Bash tool's 10-minute cap) and exits 0 when the sub-agent has finished with an exit code recorded in the receipt, 3 if it is still running — call it again. Use absolute paths throughout; the Bash tool's working directory drifts.
 - **Reading the report**: the report file *is* the sub-agent's stdout. There is no separate "save stdout to `report.md`" step; cite the per-invocation path in the log.
 - **Exit codes** (recorded in the receipt): 0 = success, 1 = input validation error, 2 = agent error. `scripts/spend.py investigations/<name>` sums the cost sidecars and eval token usage.
+- **Credential exhaustion** is reported distinctly: an exit 2 whose provider refused on account credit or a usage cap carries `credentials_exhausted (route=<route>, model=<model>)` in its stderr, and the receipt and cost sidecar record `failure_class: credentials_exhausted` plus the route (`status` and `list` show it). It is not transient — re-invoking on the same route fails identically — and when no live route is left it triggers the lead doc's Suspension procedure (`diagnostician_responsibilities.md` / `orchestrator_responsibilities.md §Sub-Agent Failure Handling`).
+- **`list --unfinished`** prints only the invocations not yet cleanly finished (exit 0), each with a ready-to-run `launch` command for its persisted request — or "still running" for live ones. A failed invocation is left out once a later one of the same role and tag, asking for the same work (the request equal apart from `subagent_*` and the re-ask pair `conformance_defects` / `previous_report`), has exited 0. Its output is what `RESUME.md`'s relaunch section is pasted from — after pruning any non-credential failure already handled another way (a request fixed and relaunched under a different task is not recognised as superseding it).
 
 The underlying CLI the launcher runs is `uv run --with claude-agent-sdk --with python-dotenv python subagents/<agent>/main.py <input.json> [--cwd <dir>]` — input JSON with agent-specific fields (below), markdown report on stdout, errors on stderr. All agents run fire-and-forget — no back-and-forth.
 
@@ -55,7 +57,7 @@ Like `subagent_model`, this is an infrastructure choice independent of the exper
 
 ### Optional: `subagent_route` (all agents)
 
-Every agent's input JSON also accepts an optional `subagent_route` field — **how the sub-agent reaches its model**. Two values:
+Every agent's input JSON also accepts an optional `subagent_route` field — **how the sub-agent reaches its model**. Two values — deliberately only two (there is no direct-OpenAI or other third route; correlated cap exhaustion across both is handled by the lead docs' Suspension procedure, not by more routes):
 
 - `"direct"` (default) — Anthropic, using `ANTHROPIC_API_KEY`. Unchanged behaviour.
 - `"openrouter"` — points the sub-agent at OpenRouter's Anthropic-compatible endpoint using `OPENROUTER_API_KEY`, so `subagent_model` may name **any** model family (e.g. `openai/gpt-5`, `google/gemini-3-pro`).
@@ -65,11 +67,36 @@ The route is set per invocation, so one sub-agent can run through OpenRouter whi
 Two things to know before using it:
 
 - **Thinking is auto-guarded.** Adaptive thinking is a Claude feature, so when the route is `openrouter` and the model is not a Claude model, `subagent_thinking` defaults to `{"type": "disabled"}` instead of adaptive. An explicit `subagent_thinking` still wins.
+- **The context window is set for you, and the `unrecognized_model` line is benign.** The Claude Code CLI only knows Claude models' windows: for any other model it prints a `[claude-code:unrecognized_model]` warning to stderr — a note that it is *assuming* a window size, **not** a rejection; the run proceeds normally — and would compact a 1M-window model at ~200k tokens. So for a non-Claude model on this route the runner sets `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the model's window, read from OpenRouter's public model catalogue (the largest window that at least half of its endpoints serve, so a rare small-window host does not shrink it; one key-free request, cached per process). Offline, or for a model the catalogue does not list, it leaves the CLI default in place and logs one `[route] …` stderr line; the invocation is never failed over it. A `CLAUDE_CODE_MAX_CONTEXT_TOKENS` you export yourself wins.
 - **Every role is open to any sufficiently capable model.** No sub-agent is restricted to Claude. The interface contracts and system prompts are meant to specify each role completely enough that any capable agent can fulfil it — so if a non-Claude sub-agent produces a report that violates its contract, treat that as evidence the *guidance* is underspecified, not as a reason to restrict the model. Fix the contract. The defaults remain Claude simply because that is what the scaffold has been exercised against, not because the roles depend on it.
 
 Running the Analyst cross-family is additionally a robustness check on the scaffold's own assumption that the sub-agent model is infrastructure rather than part of the experiment — the one place where a differing result is informative rather than merely a bug.
 
-**For the Red-Teaming Critic, cross-family is a hard requirement, not a preference.** The Critic exists to supply reasoning decorrelated from the lead investigator's, so a same-family Critic is a methodological failure rather than a cost trade-off: every Critic invocation passes `subagent_route: "openrouter"` with a non-Claude `subagent_model`, and `/diagnose` refuses to start without `OPENROUTER_API_KEY` (an `OPENAI_API_KEY` does not substitute — the runner has no direct-OpenAI route). See `critic_interface_contract.md §Cross-family routing`.
+### Report conformance (every role on a non-Claude model)
+
+**Whenever a sub-agent runs on a non-Claude model, run `scripts/check_report.py` on its report and re-ask once on failure.** It checks the contract's section headings — verbatim, at level 3, in order, once each — for all six roles, plus the Critic's discriminating signatures and the Executor's four Error Summary sub-headings:
+
+```bash
+uv run --no-project python scripts/check_report.py <role> <report.md> [--mode <critic mode>] [--forensic]
+```
+
+`--mode` is required for the Critic; `--forensic` checks an Analyst report against the forensic addendum (the request carried `behaviour_spec`), which adds `### Behaviours not captured by the grader` and `### Eval-awareness split` after `### Quantified results`. Exit 0 conformant, 1 defects (printed one per line), 2 usage error. The re-ask is a fresh invocation of the **identical request** plus two dedicated fields, sent together and never on a first attempt:
+
+- **`conformance_defects`** — array of strings: the defect lines `check_report.py` printed, verbatim.
+- **`previous_report`** — absolute path to the non-conformant report (the launcher's `report_<tag>_<role>_<n>.md`).
+
+The agent is told to **restructure** that report into the contract's exact headings, carrying its content across and re-deriving content only for a section the defects show was genuinely missing — not to redo the work, which would cost a full run and could change the findings. `constraints` never carries a reformatting request: it is a scope limit, and the re-ask must not change the scope. The builder validates the pair (`conformance_defects` a non-empty list of strings, `previous_report` an absolute path to an existing file, neither without the other); a malformed re-ask is an agent error (exit 2), never silently run as a first attempt.
+
+| Role | Re-ask |
+|---|---|
+| Explorer, Mapper, Critic | `conformance_defects` + `previous_report`; the source is re-read only for a missing section (the Critic supplies a missing discriminating signature) |
+| Designer | the same; every proposed variant and its diff are carried over unchanged, never re-designed |
+| Analyst | the same, with `artefacts_dir` unchanged: a missing section is rebuilt from its own saved artefacts under `<artefacts_dir>/analyst/`, and no scan is re-run, no scanner re-validated and no grader rebuilt |
+| Executor | **no re-invocation** — that would re-run the evals. Regenerate the report from the batch runner's state instead: `uv run python scripts/execute_evals.py report <run_dir>`, where `<run_dir>` is the newest `<experiment_dir>/artefacts/executor/runs/<experiment_name>_<stamp>/` (score-free, already in the contract's shape), check it, and use it as the report, noted in the log |
+
+A second failure is read structurally and recorded in the log, never re-asked again. A Claude sub-agent's report may be checked the same way, but the rule binds only for non-Claude models, where substituted and merged headings were observed in every family tried.
+
+**For the Red-Teaming Critic, cross-family is a hard requirement, not a preference.** The Critic exists to supply reasoning decorrelated from the lead investigator's, so a same-family Critic is a methodological failure rather than a cost trade-off: every Critic invocation passes `subagent_route: "openrouter"` with a non-Claude `subagent_model`, and `/diagnose` refuses to start without `OPENROUTER_API_KEY` (an `OPENAI_API_KEY` does not substitute — by deliberate choice the runner has no direct-OpenAI route; if both routes are capped mid-run, the investigation suspends rather than degrading the Critic). See `critic_interface_contract.md §Cross-family routing`.
 
 ### Transcript handoff: dump `.eval` logs to text before any sub-agent reads them
 
@@ -104,6 +131,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 
 - `environment_path` must be an existing directory
 - `constraints` is optional; free-form string passed through to the Explorer to shape or narrow exploration
+- `conformance_defects` and `previous_report` are optional and sent only together, only for the one re-ask after `check_report.py explorer` fails (see §Report conformance)
 - `subagent_model` is optional; the model the Explorer agent runs on (see General Pattern above)
 - `subagent_thinking` is optional; the Explorer's extended-thinking config (see General Pattern above)
 
@@ -152,6 +180,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 - `overrides` is optional; supported keys: `sample_limit`, `sample_id`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `command_timeout_seconds`. `sample_id` pins the eval to named dataset entries (`--sample-id`) and pairs with `epochs` for resampling one episode — without it, `epochs` repeats the *whole dataset*. The removed `runs_per_condition` key is refused by the runner; use `epochs` for repeated sampling
 - `subagent_model` is optional; the model the Executor agent runs on. **Distinct from `models`**, which are the eval's target models — `subagent_model` has no provider prefix (e.g. `claude-opus-4-7`), whereas `models` entries do (e.g. `anthropic/claude-sonnet-4-5-20250929`)
 - `subagent_thinking` is optional; the Executor's extended-thinking config (see General Pattern above)
+- `conformance_defects` / `previous_report` are **not accepted**: the Executor is never re-asked (a re-invocation would re-run the evals), so sending either is an agent error (exit 2). Regenerate a non-conformant report with `execute_evals.py report <run_dir>` (see §Report conformance)
 
 **Returns**: Structured markdown report. See `executor_interface_contract.md` for the full request and report format.
 
@@ -183,6 +212,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 - `subagent_model` is optional; the model the Analyst agent runs on. **Distinct from `scanning_model`**, which is the model Scout uses for LLM scanners — `subagent_model` changes which model *does the analysis*, `scanning_model` changes which model the scanners *call*
 - `subagent_thinking` is optional; the Analyst's extended-thinking config (see General Pattern above)
 - When `artefacts_dir` is provided, the analyst writes all file outputs to `<artefacts_dir>/analyst/`
+- `conformance_defects` and `previous_report` are optional and sent only together, only for the one re-ask after `check_report.py analyst` fails (see §Report conformance). Keep `artefacts_dir` (and any `grader_dir`) unchanged: the Analyst rebuilds a missing section from its saved artefacts there and never re-runs a scan
 - `construal_checks` is optional (**Orchestrator mode only**): a de-identified list of construal properties — strings or `{"id": "M1", "property": "..."}` — each built as its own validated scanner and rated across every condition, with no verdict stated (see `analyst_interface_contract.md §Construal checks`). Keep the check→condition mapping in the investigation log, never in the request. In forensic mode the set goes inside `behaviour_spec` instead, and sending it at the top level there is an agent error (exit 2)
 
 **Returns**: Scanner definitions, validation metrics, quantified results (per-condition detection rates), scan results path, transcript exclusions, transcript excerpts, additional observations. See `analyst_interface_contract.md` for the full report format.
@@ -236,6 +266,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
 - `environment_path` must be an existing directory — the frozen original environment
 - `behaviour_description` is the **explanandum**: what the model did, never why. It is not a hypothesis and must not contain one
 - `reference_transcript` and `constraints` are optional; the transcript is read only to check the environment-as-written against the episode-as-run. Pass a **plain-text dump**, not the `.eval` (see §Transcript handoff)
+- `conformance_defects` and `previous_report` are optional and sent only together, only for the one re-ask after `check_report.py mapper` fails (see §Report conformance)
 - The Mapper runs **once per investigation**, before any candidate exists; its briefing lands at `artefacts/mapper/report_<tag>_mapper_1.md` (written by the launcher) — the Designer and Critic receive that path
 
 **Returns**: Summary (with fixed-format `**Prohibition status:**` / `**Scorer detection:**` / `**Defect sufficiency:**` lines), file catalogue, pipeline model, instruction analysis, scorer analysis, tool & environment analysis, manipulable surface inventory, environment defects, uncertainties. See `mapper_interface_contract.md` for the full request and report format.
@@ -281,6 +312,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
 - `variations_tried` is optional: every variation already run across all rounds and branches, outcomes stripped
 - `elimination_targets` is optional and triggers a **positive-control variant** per named candidate (outside `variant_budget`). Each target costs a condition — name one only where retiring it would change the leading explanation or move the equivalence-class boundary
 - Only `live` candidates are sent
+- `conformance_defects` and `previous_report` are optional and sent only together, only for the one re-ask after `check_report.py designer` fails (see §Report conformance); the Designer carries its variants and diffs over unchanged
 
 **Returns**: Summary (with fixed-format `**Environment:**` / `**Discriminating variants:**` / `**Off-regime variants:**` / `**Positive controls:**` / `**Headroom:**` lines), proposed variants with diffs and confound declarations, discrimination matrix, variant dependencies (only if applicable), confounds & risks, uncertainties. See `designer_interface_contract.md` for the full request and report format.
 
@@ -316,6 +348,6 @@ The Critic's only CLI-validated field is `mode` ∈ `{candidate_critique, diff_r
 - `diff_review` requires `diffs` (array of `{"name": ..., "diff": ...}`), `environment_path`, `mapper_report_path` — and **must not** receive the candidates, the discrimination matrix, or the behaviour description; the blinding is the mode's value
 - `prediction` requires `investigation_log_path`, `leading_explanation`, `untested_surfaces` — and must not receive the Diagnostician's own prediction
 - Sending a withheld field does not error: it silently converts the review into a much weaker one. The blinding is the caller's responsibility
-- `conformance_defects` is optional in every mode and is used only for the **one re-ask**: when `scripts/check_report.py critic <report> --mode <mode>` exits non-zero, re-send the same request with its printed defect lines as this array (strings). The Critic is told what was non-conformant and returns a corrected report; a second failure is read structurally and recorded, not re-asked again (`critic_interface_contract.md §Report Format`)
+- `conformance_defects` and `previous_report` are optional in every mode, sent only together, and used only for the **one re-ask** (§Report conformance): when `scripts/check_report.py critic <report> --mode <mode>` exits non-zero, re-send the same request with its printed defect lines as `conformance_defects` (strings) and that report's absolute path as `previous_report`. The Critic restructures the previous report into the mode's headings; a second failure is read structurally and recorded, not re-asked again (`critic_interface_contract.md §Report Format`)
 
 **Returns**: only the active mode's sections — `candidate_critique`: independent reading (written before the ledger is read), blind spots, assumption audit, proposed additional candidates (`X<n>` ids), retirement advice; `diff_review`: summary, per-diff analysis, cross-diff analysis, inferred purpose (last); `prediction`: chosen factor, ordinal prediction, reasoning, falsifier. See `critic_interface_contract.md` for all three request and report formats.

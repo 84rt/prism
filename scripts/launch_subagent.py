@@ -12,7 +12,7 @@ Usage
         --investigation investigations/<name> --tag <label> [--artefacts-dir <dir>] [--cwd <dir>]
     uv run python scripts/launch_subagent.py status <receipt.json>
     uv run python scripts/launch_subagent.py wait <receipt.json> [--timeout S]
-    uv run python scripts/launch_subagent.py list <investigation-dir>
+    uv run python scripts/launch_subagent.py list <investigation-dir> [--unfinished]
 
 Roles: ``explorer``, ``executor``, ``analyst``, ``mapper``, ``designer``,
 ``critic``. ``--tag`` is the iteration or phase label (``00_resample``,
@@ -26,6 +26,12 @@ Roles: ``explorer``, ``executor``, ``analyst``, ``mapper``, ``designer``,
 
 ``--artefacts-dir`` defaults to ``<investigation>/artefacts``; pass the
 iteration's ``artefacts/`` for iteration-scoped roles.
+
+A run that fails because a provider refused on credit or a usage cap carries
+``failure_class: credentials_exhausted`` and ``failure_route`` in its receipt
+(from the runner's cost sidecar, or the marker in its stderr). ``list
+--unfinished`` prints every invocation not yet cleanly finished with a
+ready-to-run relaunch command — the mechanical half of a ``RESUME.md``.
 """
 
 from __future__ import annotations
@@ -33,6 +39,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -57,6 +65,17 @@ ROLES: dict[str, str] = {
 # Environment variable through which `subagents/runner.py` learns where to
 # write its cost sidecar for this invocation.
 COST_FILE_ENV = "PRISM_COST_FILE"
+
+# The marker `subagents/runner.py` puts in a credential-exhaustion error, which
+# the CLI prints to stderr as "Agent error: <agent>: credentials_exhausted
+# (route=openrouter, model=…): …". Used when no cost sidecar recorded the class.
+CREDENTIALS_MARKER = re.compile(r"credentials_exhausted \(route=(?P<route>[A-Za-z_-]+)")
+
+# Request keys that select *how* a sub-agent runs rather than *what* it is asked
+# to do. A relaunch that changed only these (a route substitution, a re-ask
+# carrying `conformance_defects` + `previous_report`) supersedes the failed
+# original.
+INFRA_REQUEST_KEYS = ("subagent_", "conformance_defects", "previous_report")
 
 
 def _now() -> str:
@@ -179,6 +198,8 @@ def launch(
         "pid": None,
         "supervisor_pid": None,
         "exit_code": None,
+        "failure_class": None,
+        "failure_route": None,
         "started_at": _now(),
         "finished_at": None,
     }
@@ -245,8 +266,45 @@ def supervise(receipt_path: str) -> int:
     receipt["exit_code"] = code
     receipt["state"] = "finished"
     receipt["finished_at"] = _now()
+    if code != 0:
+        receipt["failure_class"], receipt["failure_route"] = failure_from_outputs(receipt)
     save()
     return code
+
+
+def failure_from_outputs(receipt: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Recover a failed run's failure class and route from its outputs.
+
+    Parameters
+    ----------
+    receipt : dict
+        The run's receipt (paths to its cost sidecar and stderr log).
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        ``(failure_class, route)`` — e.g. ``("credentials_exhausted",
+        "direct")`` — or ``(None, None)`` when no class was recognised.
+    """
+    # The sidecar is structured, so prefer it; the stderr marker covers a run
+    # whose sidecar could not be written.
+    try:
+        cost = load_receipt(receipt["cost"])
+        if cost.get("failure_class"):
+            return cost["failure_class"], cost.get("route")
+    except (OSError, json.JSONDecodeError, KeyError):
+        pass
+    try:
+        with open(receipt["stderr"], "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 65536))  # the error is at the end
+            tail = f.read().decode("utf-8", "replace")
+    except (OSError, KeyError):
+        return None, None
+    m = CREDENTIALS_MARKER.search(tail)
+    if m:
+        return "credentials_exhausted", m.group("route")
+    return None, None
 
 
 def load_receipt(path: str) -> dict[str, Any]:
@@ -265,6 +323,8 @@ def describe(receipt: dict[str, Any]) -> str:
     elif state != "finished" and not alive:
         state = f"{state} — PROCESS DIED (no exit code recorded; check {receipt.get('stderr')})"
     size = os.path.getsize(receipt["report"]) if os.path.exists(receipt["report"]) else 0
+    if receipt.get("failure_class"):
+        state = f"{state} — {receipt['failure_class']} (route={receipt.get('failure_route')})"
     lines = [
         f"{receipt['role']} {receipt['tag']} #{receipt['n']}: {state}"
         + (f" exit={receipt['exit_code']}" if receipt.get("exit_code") is not None else ""),
@@ -325,6 +385,106 @@ def list_receipts(investigation: str) -> list[dict[str, Any]]:
     return sorted(found, key=lambda r: (r.get("started_at") or "", r.get("role", ""), r.get("tag", ""), int(r.get("n") or 0)))
 
 
+def _task_of(request_path: str) -> dict[str, Any] | None:
+    """The request with its infrastructure keys removed (None if unreadable).
+
+    Parameters
+    ----------
+    request_path : str
+        A persisted request JSON.
+
+    Returns
+    -------
+    dict | None
+        The request minus `INFRA_REQUEST_KEYS`, for "same work?" comparison.
+    """
+    try:
+        with open(request_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return {k: v for k, v in data.items() if not k.startswith(INFRA_REQUEST_KEYS)}
+
+
+def relaunch_command(receipt: dict[str, Any]) -> list[str]:
+    """The `launch` command that re-runs a receipt's persisted request.
+
+    Parameters
+    ----------
+    receipt : dict
+        A receipt written by `launch`.
+
+    Returns
+    -------
+    list[str]
+        argv for this script, e.g. ``["uv", "run", "python",
+        "scripts/launch_subagent.py", "launch", "analyst",
+        "<inv>/requests/iter2_analyst_1.json", "--investigation", "<inv>",
+        "--tag", "iter2", "--artefacts-dir", "<inv>/iter2/artefacts"]``.
+    """
+    request = receipt["request"]
+    # Layout fixed by `launch`: <investigation>/requests/<stem>.json and
+    # <artefacts-dir>/<role>/report_<stem>.md.
+    investigation = os.path.dirname(os.path.dirname(request))
+    artefacts_dir = os.path.dirname(os.path.dirname(receipt["report"]))
+    cmd = [
+        "uv", "run", "python", "scripts/launch_subagent.py", "launch", receipt["role"], request,
+        "--investigation", investigation, "--tag", receipt["tag"], "--artefacts-dir", artefacts_dir,
+    ]
+    if receipt.get("cwd") and os.path.abspath(receipt["cwd"]) != TARGET_ROOT:
+        cmd += ["--cwd", receipt["cwd"]]
+    return cmd
+
+
+def unfinished(investigation: str) -> list[dict[str, Any]]:
+    """Invocations not yet cleanly finished, each with what to do about it.
+
+    An invocation is finished cleanly when it exited 0. A failed or dead one
+    is *superseded* — and so not listed — when a later invocation of the same
+    role and tag asked for the same work (request equal up to
+    `INFRA_REQUEST_KEYS`) and exited 0: that is the retry or route
+    substitution that already recovered it.
+
+    Parameters
+    ----------
+    investigation : str
+        The ``investigations/<name>`` directory.
+
+    Returns
+    -------
+    list[dict]
+        One entry per unfinished invocation, oldest first: ``receipt``,
+        ``alive`` (still running — let it finish, launch nothing over it),
+        and ``relaunch`` (argv, None while alive).
+    """
+    receipts = list_receipts(investigation)
+    clean = [
+        r for r in receipts if r.get("state") == "finished" and r.get("exit_code") == 0
+    ]
+    out: list[dict[str, Any]] = []
+    for r in receipts:
+        if r in clean:
+            continue
+        task = _task_of(r["request"])
+        # An unreadable request cannot be shown to be the same work, so it is
+        # never superseded (None == None must not count as a match).
+        superseded = task is not None and any(
+            c["role"] == r["role"]
+            and c["tag"] == r["tag"]
+            and (c.get("started_at") or "") >= (r.get("started_at") or "")
+            and c is not r
+            and _task_of(c["request"]) == task
+            for c in clean
+        )
+        if superseded:
+            continue
+        alive = r.get("state") not in ("finished", "failed") and (
+            _pid_alive(r.get("pid")) or _pid_alive(r.get("supervisor_pid"))
+        )
+        out.append({"receipt": r, "alive": alive, "relaunch": None if alive else relaunch_command(r)})
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Launch Prism sub-agents detached.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -349,6 +509,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("list")
     p.add_argument("investigation")
+    p.add_argument(
+        "--unfinished",
+        action="store_true",
+        help="only invocations not cleanly finished, each with a relaunch command",
+    )
 
     p = sub.add_parser("_supervise", help=argparse.SUPPRESS)
     p.add_argument("receipt")
@@ -371,6 +536,17 @@ def main(argv: list[str] | None = None) -> int:
         r = wait_for(args.receipt, args.timeout, args.interval)
         print(json.dumps(r, indent=2) if args.json else describe(r))
         return 0 if r.get("state") in ("finished", "failed") else 3
+    if args.cmd == "list" and args.unfinished:
+        entries = unfinished(args.investigation)
+        if not entries:
+            print("no unfinished invocations")
+        for e in entries:
+            print(describe(e["receipt"]))
+            if e["alive"]:
+                print("  -> still running: let it finish; do not relaunch over it")
+            else:
+                print("  -> relaunch (from the target root): " + shlex.join(e["relaunch"]))
+        return 0
     if args.cmd == "list":
         rs = list_receipts(args.investigation)
         if not rs:

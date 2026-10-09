@@ -216,20 +216,74 @@ _RESOURCE_CONTENTION_PATTERNS = [
 ]
 
 # OpenRouter routing failures. These are structural in the sense that retrying
-# the identical command cannot help — the pinned provider is unavailable, or the
-# account cannot pay — but they are kept separate from _STRUCTURAL_PATTERNS so
-# the Executor can report them under their own category. The remedy is the
-# orchestrator's (wait, re-pin, or drop the model), not a configuration fix, and
-# relaxing the pin to make the command succeed would silently change the
-# measurement instrument mid-experiment.
+# the identical command cannot help — the pinned provider is unavailable — but
+# they are kept separate from _STRUCTURAL_PATTERNS so the Executor can report
+# them under their own category. The remedy is the orchestrator's (wait,
+# re-pin, or drop the model), not a configuration fix, and relaxing the pin to
+# make the command succeed would silently change the measurement instrument
+# mid-experiment.
 _ROUTING_PATTERNS = [
     "no allowed providers",
     "no endpoints found",
     "no providers available",
-    "requires more credits",
-    "insufficient credits",
-    "402",
 ]
+
+# Target-model credential exhaustion: the provider refused on account credit
+# or a usage cap. Classified **structural** (no retry can help, and the
+# Executor taxonomy gains no category) but its evidence line is tagged
+# `[credentials]`, because the remedy — restore credit, then resume — is
+# neither a task fix nor a re-pin, and a lead agent reading a bare structural
+# tail would go looking for a bug in the task. Checked before every other
+# class: the Anthropic cap arrives as a 400 and the OpenRouter budget as a 403
+# prefixed "Failed to authenticate", either of which would otherwise read as a
+# misconfiguration. These were formerly routed via the `402`/credits entries
+# of _ROUTING_PATTERNS; an account that cannot pay is not a pinned provider
+# that is down. Kept identical to `subagents/runner.py`'s CREDENTIAL_PATTERNS
+# (a test pins the two); see there for each string's archive provenance.
+_CREDENTIAL_PATTERNS = [
+    "reached your specified workspace api usage limits",  # Anthropic workspace cap (R04/R05 stderr)
+    "workspace lifetime budget",  # OpenRouter workspace budget (R01/R02/R04)
+    "credit balance is too low",  # Anthropic prepaid credit (documented)
+    "requires more credits",  # OpenRouter 402 (documented)
+    "insufficient credits",  # OpenRouter 402 (documented)
+]
+# A bare "402" also matches sample ids and hashes; count it only as a status.
+_CREDENTIAL_STATUS_RE = re.compile(r"(?:error code|api error|http|status(?:[ _]code)?)[:=\s]*402\b", re.I)
+
+# Tag appended to the structural evidence line of a credential failure.
+CREDENTIALS_TAG = "[credentials]"
+
+
+# One line the report attaches to every `[credentials]` pair, so the reader
+# need not infer the remedy from a provider's prose.
+_CREDENTIALS_NOTE = (
+    "the model's provider refused on account credit or a usage cap. Not a task, "
+    "configuration or pin bug; re-running cannot help until credit is restored."
+)
+
+
+def is_credential_exhaustion(output: str) -> bool:
+    """Whether captured eval output shows the provider refusing on credit.
+
+    Parameters
+    ----------
+    output : str
+        Combined, scrubbed stdout+stderr from `combine_output`.
+
+    Returns
+    -------
+    bool
+        True for a credit/usage-cap refusal of the target model (or of a
+        model-graded scorer the eval itself calls).
+
+    Examples
+    --------
+    >>> is_credential_exhaustion("anthropic.BadRequestError: Error code: 400 - "
+    ...     "You have reached your specified workspace API usage limits.")
+    True
+    """
+    low = output.lower()
+    return any(p in low for p in _CREDENTIAL_PATTERNS) or bool(_CREDENTIAL_STATUS_RE.search(output))
 
 _TRANSIENT_PATTERNS = [
     "ConnectionError",
@@ -340,6 +394,11 @@ def classify_error(returncode: int, output: str, log_status: str | None) -> str:
         ``transient`` or ``unknown``.
     """
     combined = output.lower()
+
+    # Credential exhaustion first: its 400/403 wrappers would otherwise match
+    # a routing or misconfiguration pattern. Structural, tagged by the caller.
+    if is_credential_exhaustion(output):
+        return "structural"
 
     for pattern in _RESOURCE_CONTENTION_PATTERNS:
         if pattern.lower() in combined:
@@ -484,6 +543,14 @@ def sample_shape(log_path: str) -> dict[str, Any]:
     the shape fields are read) and falls back to the samples' message roles for
     the no-assistant-message count when the summaries predate ``turn_count``.
 
+    Each errored sample's error message is classified with
+    `is_credential_exhaustion`. Under ``--no-fail-on-error`` a credit or
+    usage cap reached mid-eval does not fail the process: Inspect exits 0 and
+    the remaining samples error one by one, so the process-level
+    ``[credentials]`` tag in `classify_error` never sees it. Only the count is
+    kept — the message itself is never stored, so nothing a scorer wrote into
+    an error can reach the status file.
+
     Parameters
     ----------
     log_path : str
@@ -492,16 +559,20 @@ def sample_shape(log_path: str) -> dict[str, Any]:
     Returns
     -------
     dict
-        ``samples``, ``sample_errors``, ``sample_retries``, and
+        ``samples``, ``sample_errors``, ``credential_sample_errors`` (how
+        many of those errors are a provider credit/usage-cap refusal),
+        ``sample_retries``, and
         ``termination`` = ``{no_assistant_msg, limit_hit, error_terminated}``.
-        Example: ``{"samples": 30, "sample_errors": 1, "sample_retries": 2,
+        Example: ``{"samples": 30, "sample_errors": 12,
+        "credential_sample_errors": 11, "sample_retries": 2,
         "termination": {"no_assistant_msg": 0, "limit_hit": 3,
-        "error_terminated": 1}}``.
+        "error_terminated": 12}}``.
     """
     from inspect_ai.log import read_eval_log_sample_summaries
 
     summaries = read_eval_log_sample_summaries(log_path)
     errors = sum(1 for s in summaries if s.error is not None)
+    credential_errors = sum(1 for s in summaries if s.error is not None and is_credential_exhaustion(str(s.error)))
     retries = sum(int(s.retries or 0) for s in summaries)
     limit_hit = sum(1 for s in summaries if s.limit is not None)
 
@@ -523,6 +594,7 @@ def sample_shape(log_path: str) -> dict[str, Any]:
     return {
         "samples": len(summaries),
         "sample_errors": errors,
+        "credential_sample_errors": credential_errors,
         "sample_retries": retries,
         "termination": {
             "no_assistant_msg": no_assistant,
@@ -780,7 +852,12 @@ def execute(
                     resource_contention_count += 1
 
                 if diagnostic:
-                    result.errors.append(f"[{error_class}] {diagnostic[:2000]}")
+                    # The tag rides on the already-scrubbed tail, so the
+                    # blackout holds for credential failures as for any other.
+                    tag = f"[{error_class}]"
+                    if is_credential_exhaustion(diagnostic):
+                        tag += f" {CREDENTIALS_TAG}"
+                    result.errors.append(f"{tag} {diagnostic[:2000]}")
                 else:
                     # A non-zero exit with no output at all leaves the
                     # orchestrator nothing to diagnose from, so say so
@@ -1261,6 +1338,8 @@ def init_status(
                 "error_class": None,
                 "errors": [],
                 "sample_errors": None,
+                # Of those, provider credit/usage-cap refusals (`[credentials]`).
+                "credential_sample_errors": None,
                 "sample_retries": None,
                 "termination": None,
                 "model_usage": {},
@@ -1293,6 +1372,7 @@ def _apply_shape(entry: dict[str, Any], log_path: str | None) -> None:
         entry["errors"].append(f"sample summaries unreadable: {type(e).__name__}: {e}")
         return
     entry["sample_errors"] = shape["sample_errors"]
+    entry["credential_sample_errors"] = shape["credential_sample_errors"]
     entry["sample_retries"] = shape["sample_retries"]
     entry["termination"] = shape["termination"]
 
@@ -1380,10 +1460,19 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
                 except Exception:
                     rshape = {"samples": 0, "sample_errors": 0}
                 n, errs = rshape["samples"], rshape["sample_errors"]
-                entry["retest"] = {"samples": n, "sample_errors": errs, "process_retries": rr.process_retries}
+                creds = rshape.get("credential_sample_errors", 0)
+                entry["retest"] = {
+                    "samples": n,
+                    "sample_errors": errs,
+                    "credential_sample_errors": creds,
+                    "process_retries": rr.process_retries,
+                }
                 if n and errs >= n:
                     entry["outcome"] = "excluded-all-samples-deterministic"
-                    entry["evidence"] = {"retest_errors": f"{errs} of {n} samples errored in the --limit 3 retest"}
+                    # A cap hit during preflight looks "deterministic" too;
+                    # the tag stops it being read as a task bug.
+                    tag = f" ({creds} {CREDENTIALS_TAG})" if creds else ""
+                    entry["evidence"] = {"retest_errors": f"{errs} of {n} samples errored in the --limit 3 retest{tag}"}
                 elif errs == 0:
                     entry["outcome"] = "sample-transient"
                 else:
@@ -1786,6 +1875,8 @@ def render_status(data: dict[str, Any]) -> str:
         total = e.get("samples_total")
         samples = f"{done if done is not None else '-'}/{total if total is not None else '-'}"
         extra = f"  [{e['error_class']}]" if e.get("error_class") else ""
+        if e.get("credential_sample_errors"):
+            extra += f"  {CREDENTIALS_TAG} {e['credential_sample_errors']} sample error(s)"
         lines.append(f"  {e['condition']} / {e['model']}   {e['state']}   samples {samples}   attempts {e.get('attempts', 0)}{extra}")
     zs = data.get("zero_sample_pairs") or []
     if zs:
@@ -1889,7 +1980,13 @@ def render_report(data: dict[str, Any]) -> str:
         )
     if sample_err:
         observations.append(
-            "Sample-level attrition: " + "; ".join(f"{e['condition']} / {e['model']} {e['sample_errors']} of {e['samples_completed']}" for e in sample_err) + "."
+            "Sample-level attrition: "
+            + "; ".join(
+                f"{e['condition']} / {e['model']} {e['sample_errors']} of {e['samples_completed']}"
+                + (f" ({e['credential_sample_errors']} {CREDENTIALS_TAG})" if e.get("credential_sample_errors") else "")
+                for e in sample_err
+            )
+            + "."
         )
     if transient_recovered:
         observations.append("Process-level retries were needed for: " + ", ".join(f"{e['condition']} / {e['model']} ({e['process_retries']})" for e in transient_recovered) + ".")
@@ -1930,10 +2027,14 @@ def render_report(data: dict[str, Any]) -> str:
             outcome = entry.get("outcome", "")
             if outcome == "excluded-all-samples-deterministic":
                 out.append("  - **Reason**: `all-samples-deterministic-sample-error`")
+                if (entry.get("retest") or {}).get("credential_sample_errors"):
+                    out.append(f"  - **{CREDENTIALS_TAG} Credentials exhausted**: {_CREDENTIALS_NOTE}")
                 out.append(f"  - **Evidence**: {ev.get('retest_errors')}; sample error traces are in the quarantined preflight logs under the run directory's `private/preflight_logs/`.")
             else:
                 reason = "pinned-provider-unavailable (routing)" if outcome == "excluded-routing" else "structural"
                 out.append(f"  - **Reason**: `{reason}`")
+                if CREDENTIALS_TAG in (ev.get("output_tail") or ""):
+                    out.append(f"  - **{CREDENTIALS_TAG} Credentials exhausted**: {_CREDENTIALS_NOTE}")
                 out.append(f"  - **Final exit code**: {ev.get('exit_code')}")
                 out.append(f"  - **Command**: `{ev.get('command')}`")
                 out.append("  - **Evidence** (combined stderr+stdout tail, scorer lines scrubbed):")
@@ -1978,6 +2079,8 @@ def render_report(data: dict[str, Any]) -> str:
         exit_code = next((x.split("=", 1)[1] for x in e.get("errors", []) if x.startswith("exit_code=")), "—")
         tail = next((x for x in e.get("errors", []) if x.startswith("[")), "(no output captured)")
         out.append(f"- **{_pair_label(e)}**")
+        if CREDENTIALS_TAG in tail:
+            out.append(f"  - **{CREDENTIALS_TAG} Credentials exhausted**: {_CREDENTIALS_NOTE}")
         out.append(f"  - **Final exit code**: {exit_code}")
         out.append(f"  - **Command**: `{e['command']}`")
         out.append(f"  - **Stderr (last ~50 lines)** (combined stderr+stdout, scorer lines scrubbed; class tag `{e.get('error_class')}`):")
@@ -1991,6 +2094,15 @@ def render_report(data: dict[str, Any]) -> str:
         out.append("None.")
     for e in sample_err:
         out.append(f"- **{_pair_label(e)}**: {e.get('sample_errors')} of {e.get('samples_completed')} samples errored.")
+        # A cap reached mid-eval under --no-fail-on-error errors the remaining
+        # samples instead of failing the process; those samples are not data.
+        creds = e.get("credential_sample_errors")
+        if creds:
+            out.append(
+                f"  - **{CREDENTIALS_TAG} Credentials exhausted** ({creds} of the {e.get('sample_errors')} "
+                f"errored samples): {_CREDENTIALS_NOTE} These samples are not valid data; re-run the pair "
+                "once credit is restored."
+            )
     out.append("")
     out.append(f"#### Transient, recovered ({len(transient_recovered)} condition-model pair(s))")
     out.append("")

@@ -148,3 +148,4 @@ Small numbers of sample-level errors (< 5%) are normal in LLM evals. Common caus
 
 - If errors are evenly distributed across conditions: proceed.
 - If errors cluster in one condition: investigate whether the manipulation causes the errors.
+- **Except** errors the Executor report tags `[credentials]`: a credit or usage cap reached mid-eval errors every remaining sample, so it clusters in whichever conditions ran last without saying anything about the manipulation. Those samples are not attrition and not data — it is a suspension trigger (`orchestrator_responsibilities.md §Sub-Agent Failure Handling`), and the pair is re-run after resuming.

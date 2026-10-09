@@ -9,6 +9,7 @@ diff review and prediction are not.
 
 from __future__ import annotations
 
+import re
 
 import pytest
 
@@ -62,21 +63,92 @@ def test_critic_headings_match_agent_checklist() -> None:
     assert agent.REPORT_HEADINGS == cr.CRITIC_HEADINGS
 
 
-@pytest.mark.parametrize(
-    "role, contract",
-    [
-        ("critic", ".claude/docs/contracts/critic_interface_contract.md"),
-        ("mapper", ".claude/docs/contracts/mapper_interface_contract.md"),
-        ("designer", ".claude/docs/contracts/designer_interface_contract.md"),
-        ("explorer", ".claude/docs/contracts/explorer_interface_contract.md"),
-    ],
-)
-def test_every_expected_heading_appears_in_its_contract(role: str, contract: str) -> None:
-    """A heading in the table that the contract does not spell is a drift bug."""
-    text = (REPO_ROOT / contract).read_text()
-    for headings in cr.ROLE_HEADINGS[role].values():
-        for h in headings:
-            assert f"### {h}" in text, f"{role}: `### {h}` not in {contract}"
+CONTRACTS = {
+    "critic": ".claude/docs/contracts/critic_interface_contract.md",
+    "mapper": ".claude/docs/contracts/mapper_interface_contract.md",
+    "designer": ".claude/docs/contracts/designer_interface_contract.md",
+    "explorer": ".claude/docs/contracts/explorer_interface_contract.md",
+    "executor": ".claude/docs/contracts/executor_interface_contract.md",
+    "analyst": ".claude/docs/contracts/analyst_interface_contract.md",
+}
+OPTIONAL_MARK = re.compile(r"\s*\*\(only if applicable\)\*\s*$")
+
+
+def _report_format_headings(contract: str) -> list[tuple[str, bool]]:
+    """The `###` headings of a contract's `## … Report Format` section.
+
+    Parameters
+    ----------
+    contract : str
+        Scaffold-relative contract path.
+
+    Returns
+    -------
+    list[tuple[str, bool]]
+        ``(heading text, marked optional)`` in document order, e.g.
+        ``[("Summary", False), ..., ("Variant Dependencies", True), ...]``.
+    """
+    lines = (REPO_ROOT / contract).read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("## ") and "Report Format" in ln)
+    found: list[tuple[str, bool]] = []
+    for ln in lines[start + 1 :]:
+        if ln.startswith("## "):
+            break
+        if ln.startswith("### "):
+            text = ln[4:].strip()
+            found.append((OPTIONAL_MARK.sub("", text), bool(OPTIONAL_MARK.search(text))))
+    return found
+
+
+def test_every_role_is_covered() -> None:
+    """Any role can run on a non-Claude model, so every role needs a check."""
+    assert set(cr.ROLE_HEADINGS) == set(CONTRACTS)
+
+
+@pytest.mark.parametrize("role", sorted(CONTRACTS))
+def test_heading_tables_equal_their_contracts(role: str) -> None:
+    """Each table restates its contract's Report Format exactly, in order.
+
+    A strict equality rather than a containment check: a heading added to or
+    reordered in a contract without the table following is drift, and drift
+    is exactly what makes a conformant report fail (or a defective one pass).
+    For the Critic the section lists the three modes' headings in mode order.
+    """
+    contract = _report_format_headings(CONTRACTS[role])
+    modes = cr.ROLE_HEADINGS[role]
+    # The Analyst's forensic mode is checked against its addendum below.
+    tables = [v for k, v in modes.items() if not (role == "analyst" and k == "forensic")]
+    expected = [h for table in tables for h in table]
+    assert [h for h, _ in contract] == expected, role
+    marked_optional = {h for h, optional in contract if optional}
+    assert marked_optional == cr.OPTIONAL_HEADINGS & set(expected), role
+
+
+def test_forensic_analyst_table_follows_the_addendum() -> None:
+    """The two forensic sections sit exactly where the addendum places them."""
+    text = (REPO_ROOT / ".claude/docs/contracts/analyst_forensic_addendum.md").read_text()
+    forensic = cr.ROLE_HEADINGS["analyst"]["forensic"]
+    for added in cr.ANALYST_FORENSIC_ADDITIONS:
+        m = re.search(
+            rf"^### {re.escape(added)}\n\nNew top-level report section, placed immediately "
+            r"after `### (?P<after>[^`]+)` and before `### (?P<before>[^`]+)`",
+            text,
+            re.M,
+        )
+        assert m, f"addendum no longer states where `### {added}` goes"
+        i = forensic.index(added)
+        assert forensic[i - 1] == m.group("after"), added
+        # "before" names the next *base* section; the other addition may sit between.
+        later = forensic[i + 1 :]
+        assert m.group("before") in later, added
+        assert all(h in cr.ANALYST_FORENSIC_ADDITIONS for h in later[: later.index(m.group("before"))])
+    assert [h for h in forensic if h not in cr.ANALYST_FORENSIC_ADDITIONS] == list(cr.ANALYST_BASE_HEADINGS)
+
+
+def test_executor_subheadings_appear_in_contract() -> None:
+    text = (REPO_ROOT / CONTRACTS["executor"]).read_text()
+    for prefix in cr.SUBSECTION_PREFIXES["executor"]["Error Summary"]:
+        assert f"#### {prefix}N condition-model pair(s))" in text, prefix
 
 
 # --- Heading checks ---------------------------------------------------------------
@@ -155,7 +227,11 @@ def test_usage_errors() -> None:
     with pytest.raises(ValueError):
         cr.check_report("mapper", "### Summary\n", "candidate_critique")  # no modes
     with pytest.raises(ValueError):
-        cr.check_report("executor", "### Summary\n")  # not covered yet
+        cr.check_report("executor", "### Summary\n", "forensic")  # analyst-only mode
+    with pytest.raises(ValueError):
+        cr.check_report("analyst", "### Summary\n", "no_such_mode")
+    with pytest.raises(ValueError):
+        cr.check_report("no_such_role", "### Summary\n")
 
 
 # --- Critic signature check ---------------------------------------------------------
@@ -280,3 +356,123 @@ def test_cli_exit_codes(tmp_path) -> None:
     assert cr.main(["critic", str(bad), "--mode", "candidate_critique"]) == 1
     assert cr.main(["critic", str(good)]) == 2
     assert cr.main(["critic", str(tmp_path / "missing.md"), "--mode", "prediction"]) == 2
+
+
+# --- Executor and Analyst (all roles may run on a non-Claude model) ------------
+
+R06_ART = "case-6-quiz-agent-shutdown/investigations/shutdown_bypass/artefacts/"
+R01_ART = R01 + "artefacts/"
+R02_ART = R02 + "artefacts/"
+R04_ART = "case-4-spec-tests-conflict/investigations/test_conflict_special_casing/artefacts/"
+
+
+def _executor_report(drop: str | None = None) -> str:
+    """A minimal conformant Executor report, optionally missing a sub-heading.
+
+    Parameters
+    ----------
+    drop : str | None
+        Prefix of an Error Summary sub-heading to leave out.
+
+    Returns
+    -------
+    str
+        The report text.
+    """
+    parts = []
+    for h in cr.ROLE_HEADINGS["executor"][None]:
+        parts.append(f"### {h}\n\nNone.\n")
+        if h == "Error Summary":
+            for p in cr.SUBSECTION_PREFIXES["executor"]["Error Summary"]:
+                if p != drop:
+                    parts.append(f"#### {p}0 condition-model pair(s))\n\nNone.\n")
+    return "\n".join(parts)
+
+
+def test_executor_synthetic_conformant_and_missing_subheading() -> None:
+    assert cr.check_report("executor", _executor_report()) == ([], [])
+    defects, _ = cr.check_report("executor", _executor_report(drop="Sample-level ("))
+    assert any("missing its `#### Sample-level (" in d for d in defects), defects
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        R06_ART + "executor/resample_report.md",
+        R06_ART + "executor/iter1_report.md",
+        R05 + "executor/iter1_report.md",
+        R05 + "executor/phase4_report.md",
+        R04_ART + "executor/report_00_resample.md",
+        R02 + "iterations/01_round1/artefacts/executor/report.md",
+        R01_ART + "executor/resample_report_1.md",
+    ],
+)
+def test_conformant_executor_corpus_reports_pass(relative: str) -> None:
+    defects, _ = cr.check_report("executor", case_path(relative).read_text())
+    assert defects == [], defects
+
+
+@pytest.mark.parametrize(
+    "relative, expect",
+    [
+        # R06: the Executor asked for permission instead of reporting (wrapper denied).
+        (R06_ART + "executor/iter2_widen_actions_report.md", "no markdown headings found"),
+        # R01: an ad-hoc score-blind runner's report, not the contract's shape.
+        (R01_ART + "executor/resample.report.md", "Execution Report (score-blind)"),
+    ],
+)
+def test_non_conformant_executor_corpus_reports_fail(relative: str, expect: str) -> None:
+    defects, _ = cr.check_report("executor", case_path(relative).read_text())
+    assert any(expect in d for d in defects), defects
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        R01_ART + "analyst/report_1c.md",
+        R02_ART + "analyst/report_1c.md",
+        R03 + "artefacts/analyst/report_1c.md",
+        R04_ART + "analyst/report_1c.md",
+        R05 + "analyst/iter1_A_report.md",
+        R06_ART + "analyst/report_iter3_I.md",
+        R06_ART + "analyst/report_iter4.md",
+    ],
+)
+def test_conformant_forensic_analyst_corpus_reports_pass(relative: str) -> None:
+    text = case_path(relative).read_text()
+    defects, _ = cr.check_report("analyst", text, "forensic")
+    assert defects == [], defects
+    # Checked as a base report, the two forensic sections are foreign — and
+    # the warning names the likely cause.
+    defects, warnings = cr.check_report("analyst", text)
+    assert any("Eval-awareness split" in d and "not a section" in d for d in defects)
+    assert any("--forensic" in w for w in warnings)
+
+
+def test_non_conformant_analyst_corpus_report_fails() -> None:
+    """R06's Grok Analyst asked permission to continue instead of reporting."""
+    text = case_path(R06_ART + "analyst/report_iter1_A_FAILED_grok_asked_permission.md").read_text()
+    defects, _ = cr.check_report("analyst", text, "forensic")
+    assert any("no markdown headings found" in d for d in defects), defects
+
+
+def test_forensic_sections_out_of_place_are_defects() -> None:
+    base = "".join(f"### {h}\n\nx\n\n" for h in cr.ANALYST_BASE_HEADINGS)
+    assert cr.check_report("analyst", base) == ([], [])
+    # Forensic sections appended at the end instead of after Quantified results.
+    late = base + "### Behaviours not captured by the grader\n\nx\n\n### Eval-awareness split\n\nx\n"
+    defects, _ = cr.check_report("analyst", late, "forensic")
+    assert any(d.startswith("sections out of order") for d in defects), defects
+    # Forensic mode with the sections omitted names both as missing.
+    defects, _ = cr.check_report("analyst", base, "forensic")
+    assert "missing section `### Behaviours not captured by the grader`" in defects
+    assert "missing section `### Eval-awareness split`" in defects
+
+
+def test_cli_forensic_flag(tmp_path) -> None:
+    report = tmp_path / "a.md"
+    report.write_text("".join(f"### {h}\n\nx\n\n" for h in cr.ROLE_HEADINGS["analyst"]["forensic"]))
+    assert cr.main(["analyst", str(report), "--forensic"]) == 0
+    assert cr.main(["analyst", str(report)]) == 1
+    assert cr.main(["mapper", str(report), "--forensic"]) == 2
+    assert cr.main(["analyst", str(report), "--forensic", "--mode", "prediction"]) == 2

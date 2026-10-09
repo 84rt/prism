@@ -67,6 +67,13 @@ The set is **de-identified**: it never says which check bears on which condition
 
 A path to a shared artefacts directory for the investigation. When provided, the analyst creates an `analyst/` subdirectory within it and writes all file outputs there (scripts, scan results, validation sets, reports). This keeps all investigation artefacts co-located. If not provided, the analyst writes to the current working directory.
 
+### Re-ask fields (optional; sent only together)
+
+- **`conformance_defects`** — an array of strings: the defect lines `scripts/check_report.py analyst` printed for the previous attempt at this same request.
+- **`previous_report`** — the absolute path of that non-conformant report.
+
+Their presence makes the invocation the **one re-ask**; the request is otherwise identical to the failed one (same artefacts directory), and both are never sent on a first attempt. Read the previous report and emit it again restructured into the Report Format's exact headings below: carry its content and numbers across unchanged under the right headings, and rebuild a section the defects show was genuinely missing **only from your own saved artefacts** (scanner definitions, validation results, scan results in the artefacts directory). Never re-run a scan, re-validate a scanner or rebuild a grader on a re-ask: that would cost a full analysis and could change the numbers. A reformatting request never arrives through `constraints`. One field without the other, or a `previous_report` that is not an existing file, is rejected as an agent error.
+
 ---
 
 ## Analyst → Orchestrator: Report Format

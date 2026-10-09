@@ -86,6 +86,7 @@ def test_sample_shape_reads_shape_only(tmp_path):
     assert shape == {
         "samples": 3,
         "sample_errors": 1,
+        "credential_sample_errors": 0,  # "boom" is not a credit refusal
         "sample_retries": 0,
         "termination": {"no_assistant_msg": 1, "limit_hit": 0, "error_terminated": 1},
     }

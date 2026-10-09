@@ -41,6 +41,13 @@ A free-form string describing any Diagnostician-side preferences that narrow or 
 
 This field is best-effort. The Mapper respects it where possible but does not treat it as binding. There is no tooling-level enforcement.
 
+### Re-ask fields (optional; sent only together)
+
+- **`conformance_defects`** — an array of strings: the defect lines `scripts/check_report.py mapper` printed for the previous attempt at this same request.
+- **`previous_report`** — the absolute path of that non-conformant briefing.
+
+Their presence makes the invocation the **one re-ask**; the request is otherwise identical to the failed one, and both are never sent on a first attempt. Read the previous briefing and emit it again restructured into the Report Format's exact headings below: carry its content across under the right headings, and re-read the environment only for a section the defects show was genuinely missing. A reformatting request never arrives through `constraints`. One field without the other, or a `previous_report` that is not an existing file, is rejected as an agent error.
+
 ---
 
 ## Mapper → Diagnostician: Report Format

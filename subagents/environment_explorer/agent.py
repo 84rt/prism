@@ -3,7 +3,7 @@
 from typing import Any
 
 from subagents.environment_explorer.system_prompt import SYSTEM_PROMPT
-from subagents.runner import contract_section, run_agent
+from subagents.runner import contract_section, reask_section, run_agent
 
 ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
 DISALLOWED_TOOLS = ["Edit", "Bash", "WebSearch", "WebFetch"]
@@ -40,7 +40,23 @@ RESTRICTED_FILES: dict[str, str] = {
 
 
 async def run_environment_explorer(cwd: str | None = None, **data: Any) -> str:
-    """Run the environment explorer agent and return its markdown report."""
+    """Run the environment explorer agent and return its markdown report.
+
+    Parameters
+    ----------
+    cwd : str | None
+        Working directory for the agent. Defaults to the project root.
+    **data : Any
+        Fields from the invocation JSON. Required: ``experiment_description``,
+        ``hypothesis``, ``environment_path``. Optional: ``constraints``; the
+        re-ask pair ``conformance_defects`` + ``previous_report`` (see
+        `runner.reask_section`); and the shared ``subagent_*`` fields.
+
+    Returns
+    -------
+    str
+        The Explorer's markdown report, per `explorer_interface_contract.md`.
+    """
     prompt = f"""\
 ## Experiment Description
 
@@ -57,6 +73,17 @@ async def run_environment_explorer(cwd: str | None = None, **data: Any) -> str:
     constraints = data.get("constraints")
     if constraints:
         prompt += f"\n## Constraints\n\n{constraints}\n"
+
+    # The one re-ask after a failed conformance check (validated; malformed
+    # raises, so the CLI exits 2 rather than silently re-running from scratch).
+    reask = reask_section(
+        "Environment explorer",
+        data.get("conformance_defects"),
+        data.get("previous_report"),
+        "Re-read the environment only for such a section.",
+    )
+    if reask:
+        prompt += f"\n{reask}\n"
 
     # Absolute contract path first, so the read-first instruction resolves from
     # any working directory (see runner.contract_section).

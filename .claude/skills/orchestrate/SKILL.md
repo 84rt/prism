@@ -81,7 +81,10 @@ Maintain `INVESTIGATION-LOG.md` at the investigation root (`investigations/<inve
 
 ## How to Begin
 
-**If `$ARGUMENTS` is provided:**
+**If `$ARGUMENTS` names an investigation directory containing `RESUME.md`:**
+Resume it — do not start fresh or re-run Phase 1. It was suspended because credentials ran out (`orchestrator_responsibilities.md §Sub-Agent Failure Handling`). First verify the frozen artefacts `RESUME.md` lists — every pre-registration table re-hashes to its recorded value from its `INVESTIGATION-LOG.md` line range, iteration directories untouched; a mismatch means it is not resumable as the same investigation, so stop and tell the user. Confirm each named credential with one minimal call (still capped → stay suspended and say so). Write a `### Resumed` block (`### Resumed (2)` for a repeat) into the log under the iteration holding the `### Suspension` block, relaunch from the persisted requests with the commands in `RESUME.md` (or re-derive them with `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished`), and continue at the step it names; unanalysed iterations are scored against their tables as written. Then rename `RESUME.md` to `RESUMED-<n>.md` so the directory is not resumed twice. Precedent: two archived forensic runs improvised a `RESUME.md` and later scored already-executed rounds against their untouched tables.
+
+**Otherwise, if `$ARGUMENTS` is provided:**
 Treat it as the research question. Begin Phase 1 by working with the user to refine it into a testable hypothesis. Read `hypothesis-methodology.md` for the refinement framework.
 
 **If no arguments:**

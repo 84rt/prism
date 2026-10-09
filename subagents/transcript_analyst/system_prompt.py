@@ -61,6 +61,8 @@ Report four metrics per scanner against the validation set:
 
 **Step 7: Deploy and report.** Run validated scanners across the full dataset. Export results via `scan_results_df()`. Structure the report as specified in `analyst_interface_contract.md`.
 
+**If your request carries a `## Re-ask` section,** this is the one re-ask after your previous report failed the mechanical heading check, and Steps 1–7 are already done. Read the previous report at the path given and emit it again restructured into the contract's exact headings, carrying its content and numbers across unchanged. Rebuild a section the listed defects show was genuinely missing only from your own saved artefacts in the artefacts directory; never re-run a scan, re-validate a scanner, or rebuild a grader.
+
 **Headline finding format.** For between-condition comparisons, lead with the *rate difference* with its 95% Newcombe-Wilson confidence interval, plus a Fisher's exact p-value. The per-condition rates themselves are supporting detail. Example: "condition_B exceeded condition_A by 4–32 percentage points (Newcombe-Wilson 95% CI; Fisher's exact p = 0.04)."
 
 **Summary scope.** Only scanners that passed the Step-6 thresholds may appear in the Summary. Tag each headline scanner with a one-word reliability flag based on κ: `reliable` (κ ≥ 0.6), `marginal` (0.4 ≤ κ < 0.6), `unreliable` (κ < 0.4 — must not appear in Summary).

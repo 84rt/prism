@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from subagents.runner import contract_section, run_agent
+from subagents.runner import contract_section, reask_section, run_agent
 from subagents.variant_designer.system_prompt import SYSTEM_PROMPT
 
 ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
@@ -69,9 +69,10 @@ async def run_variant_designer(cwd: str | None = None, **data: Any) -> str:
         Fields from the invocation JSON. Required: ``mapper_report_path``,
         ``environment_path``, ``candidates``, ``regime``, ``environment_rate``,
         ``variant_budget``. Optional: ``environment_delta``,
-        ``variations_tried``, ``elimination_targets``, ``constraints``, and the
-        shared ``subagent_model`` / ``subagent_thinking`` / ``subagent_route``
-        infrastructure fields.
+        ``variations_tried``, ``elimination_targets``, ``constraints``, the
+        re-ask pair ``conformance_defects`` + ``previous_report`` (see
+        `runner.reask_section`), and the shared ``subagent_model`` /
+        ``subagent_thinking`` / ``subagent_route`` infrastructure fields.
 
     Returns
     -------
@@ -168,6 +169,18 @@ The measured rate of the target behaviour in the environment supplied above.
     constraints = data.get("constraints")
     if constraints:
         prompt += f"\n## Constraints\n\n{constraints}\n"
+
+    # The one re-ask after a failed conformance check (validated; malformed
+    # raises, so the CLI exits 2 rather than silently re-running from scratch).
+    # Re-designing would change the variants, so the diffs are carried over.
+    reask = reask_section(
+        "Variant designer",
+        data.get("conformance_defects"),
+        data.get("previous_report"),
+        "Keep every proposed variant and its diff exactly as proposed; do not re-design.",
+    )
+    if reask:
+        prompt += f"\n{reask}\n"
 
     # Absolute contract path first, so the read-first instruction resolves from
     # any working directory (see runner.contract_section).

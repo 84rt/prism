@@ -3,7 +3,7 @@
 import json
 from typing import Any
 
-from subagents.runner import contract_section, run_agent
+from subagents.runner import contract_section, reask_section, run_agent
 from subagents.transcript_analyst.system_prompt import (
     CONSTRUAL_CHECKS_RULE,
     FORENSIC_WORK_ORDER,
@@ -141,7 +141,25 @@ def _construal_checks_section(checks: list[dict[str, str]]) -> str:
 
 
 async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
-    """Run the transcript analyst agent and return its analysis report."""
+    """Run the transcript analyst agent and return its analysis report.
+
+    Parameters
+    ----------
+    cwd : str | None
+        Working directory for the agent. Defaults to the project root.
+    **data : Any
+        Fields from the invocation JSON. Required: ``topic``,
+        ``transcript_source``. Optional: ``scanning_model``, ``constraints``,
+        ``construal_checks`` (Orchestrator mode), ``behaviour_spec`` (forensic
+        mode), ``artefacts_dir``, the re-ask pair ``conformance_defects`` +
+        ``previous_report`` (see `runner.reask_section`), and the shared
+        ``subagent_*`` fields.
+
+    Returns
+    -------
+    str
+        The Analyst's markdown report, per `analyst_interface_contract.md`.
+    """
     sections = [
         f"## Neutral Topic Description\n\n{data['topic']}",
         f"## Transcript Source\n\n```json\n{json.dumps(data['transcript_source'], indent=2)}\n```",
@@ -201,6 +219,20 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
 
     if data.get("artefacts_dir"):
         sections.append(f"## Artefacts Directory\n\n{data['artefacts_dir']}")
+
+    # The one re-ask after a failed conformance check (validated; malformed
+    # raises → exit 2). Re-running scans would cost a full analysis and could
+    # move the numbers, so a missing section is rebuilt from saved artefacts.
+    reask = reask_section(
+        "Transcript analyst",
+        data.get("conformance_defects"),
+        data.get("previous_report"),
+        "Rebuild such a section only from your own saved artefacts under the "
+        "artefacts directory (scanner definitions, validation results, scan "
+        "results); never re-run a scan, re-validate a scanner, or rebuild the grader.",
+    )
+    if reask:
+        sections.append(reask)
 
     # Absolute paths of the documents to read first. The forensic addendum is
     # named only in forensic mode, so an Orchestrator-mode analyst is never

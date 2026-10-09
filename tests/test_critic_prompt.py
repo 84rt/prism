@@ -90,13 +90,27 @@ def test_reminder_is_candidate_critique_only(mode: str) -> None:
     assert "## Before Proposing" not in agent._build_prompt(REQUESTS[mode])
 
 
-def test_conformance_defects_render_as_reask() -> None:
-    """The one-re-ask field is read by the builder and rendered verbatim."""
-    data = dict(REQUESTS["prediction"], conformance_defects=["missing section `### Prediction`", "x"])
+def test_conformance_defects_render_as_reask(tmp_path) -> None:
+    """The one-re-ask pair is read by the builder and rendered verbatim."""
+    previous = tmp_path / "report_phase3_critic_1.md"
+    previous.write_text("## Prediction\n...")
+    data = dict(
+        REQUESTS["prediction"],
+        conformance_defects=["missing section `### Prediction`", "x"],
+        previous_report=str(previous),
+    )
     prompt = agent._build_prompt(data)
     assert "## Re-ask: Conformance Defects In Your Previous Report" in prompt
     assert "- missing section `### Prediction`" in prompt
+    assert f"`{previous}`" in prompt
     assert prompt.index("## Report Headings") < prompt.index("## Re-ask")
+
+
+def test_defects_without_previous_report_is_an_agent_error() -> None:
+    """The pair travels together; half a re-ask raises (exit 2), never runs."""
+    data = dict(REQUESTS["prediction"], conformance_defects=["x"])
+    with pytest.raises(RuntimeError, match="malformed re-ask"):
+        agent._build_prompt(data)
 
 
 def test_missing_contract_is_an_agent_error(monkeypatch) -> None:

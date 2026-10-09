@@ -19,15 +19,21 @@ Checks
 * **Critic, `candidate_critique` only:** every candidate proposed under
   `### Proposed Additional Candidates` carries a non-empty discriminating
   signature — the Critic contract's one non-negotiable.
+* **Executor only:** `### Error Summary` carries its four fixed `####`
+  category sub-headings (`Structural (N …)`, `Sample-level (N …)`,
+  `Transient, recovered (N …)`, `Pinned provider unavailable (N …)`), in order
+  — they are parameterised by count, so they are matched by prefix.
 
 Text before the first heading is reported as a warning, not a defect: the
 contracts forbid it, but the Diagnostician disregards it by rule and a re-ask
 for a preamble alone would waste an invocation.
 
-Roles covered: ``critic`` (modes ``candidate_critique``, ``diff_review``,
-``prediction``), ``mapper``, ``designer``, ``explorer``. The Executor and
-Analyst contracts are being revised in parallel work-packages and carry
-parameterised sub-headings; add them to ``ROLE_HEADINGS`` once they settle.
+Roles covered — all six: ``critic`` (modes ``candidate_critique``,
+``diff_review``, ``prediction``; ``--mode`` required), ``mapper``,
+``designer``, ``explorer``, ``executor``, and ``analyst`` (base contract by
+default; ``--forensic`` adds the Model Forensics addendum's two top-level
+sections in their specified position). Any role can run on a non-Claude model
+via ``subagent_route: "openrouter"``, which is when this check matters most.
 
 Usage
 -----
@@ -35,6 +41,7 @@ Usage
 
     uv run --no-project python scripts/check_report.py critic report.md --mode candidate_critique
     uv run --no-project python scripts/check_report.py designer artefacts/designer/report_iter2.md
+    uv run --no-project python scripts/check_report.py analyst artefacts/analyst/report_iter1_analyst_1.md --forensic
 
 Exit codes: ``0`` conformant; ``1`` defects found (listed on stdout); ``2``
 usage error (unknown role, missing or inapplicable ``--mode``, unreadable
@@ -57,7 +64,9 @@ from pathlib import Path
 # verbatim and in order. The Critic's tuples are duplicated in
 # `subagents/redteam_critic/agent.py` (which renders them into the request as
 # a checklist); `tests/test_check_report.py` asserts the two copies match and
-# that every heading here appears in its contract.
+# that each tuple equals, in order, the `###` headings of its contract's
+# Report Format section (and, for forensic mode, the addendum's insertion
+# points) — so a contract edit that is not mirrored here fails the suite.
 
 CRITIC_HEADINGS: dict[str, tuple[str, ...]] = {
     "candidate_critique": (
@@ -81,7 +90,51 @@ CRITIC_HEADINGS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Roles without modes key their single heading list under `None`.
+# The Analyst's base report, from `analyst_interface_contract.md`.
+ANALYST_BASE_HEADINGS: tuple[str, ...] = (
+    "Summary",
+    "Scanner definitions",
+    "Validation metrics",
+    "Quantified results",
+    "Scan results path",
+    "Transcript exclusions",
+    "Transcript excerpts",
+    "Additional observations",
+)
+
+# Forensic mode adds two top-level sections, both "placed immediately after"
+# the section named here (`analyst_forensic_addendum.md`), in this order.
+ANALYST_FORENSIC_ADDITIONS: tuple[str, ...] = (
+    "Behaviours not captured by the grader",
+    "Eval-awareness split",
+)
+ANALYST_FORENSIC_ANCHOR = "Quantified results"
+
+
+def _insert_after(base: tuple[str, ...], anchor: str, added: tuple[str, ...]) -> tuple[str, ...]:
+    """Insert `added` into `base` directly after `anchor`.
+
+    Parameters
+    ----------
+    base : tuple[str, ...]
+        Headings in contract order.
+    anchor : str
+        The heading the additions follow.
+    added : tuple[str, ...]
+        Headings to insert, in order.
+
+    Returns
+    -------
+    tuple[str, ...]
+        e.g. ``(..., "Quantified results", "Behaviours not captured by the
+        grader", "Eval-awareness split", "Scan results path", ...)``.
+    """
+    i = base.index(anchor) + 1
+    return base[:i] + added + base[i:]
+
+
+# Roles without modes key their single heading list under `None`; a role with
+# a default mode keys it under `None` alongside its named modes (the Analyst).
 ROLE_HEADINGS: dict[str, dict[str | None, tuple[str, ...]]] = {
     "critic": CRITIC_HEADINGS,
     "mapper": {
@@ -116,6 +169,38 @@ ROLE_HEADINGS: dict[str, dict[str | None, tuple[str, ...]]] = {
             "Variant Dependencies",
             "Global Risk Assessment",
             "Uncertainty & Open Questions",
+        )
+    },
+    "executor": {
+        None: (
+            "Summary",
+            "Parent Log Directory",
+            "Preflight Exclusions",
+            "Condition-Model Execution Matrix",
+            "Error Summary",
+            "Transcript Termination Metadata",
+            "Concurrency Decision",
+            "Execution Summary",
+            "Additional Notes",
+        )
+    },
+    "analyst": {
+        None: ANALYST_BASE_HEADINGS,
+        "forensic": _insert_after(
+            ANALYST_BASE_HEADINGS, ANALYST_FORENSIC_ANCHOR, ANALYST_FORENSIC_ADDITIONS
+        ),
+    },
+}
+
+# Fixed level-4 sub-headings inside a section, matched by prefix because they
+# carry a count (`#### Structural (2 condition-model pair(s))`).
+SUBSECTION_PREFIXES: dict[str, dict[str, tuple[str, ...]]] = {
+    "executor": {
+        "Error Summary": (
+            "Structural (",
+            "Sample-level (",
+            "Transient, recovered (",
+            "Pinned provider unavailable (",
         )
     },
 }
@@ -269,6 +354,61 @@ def check_headings(
             + "; contract: "
             + " > ".join(contract_order)
         )
+    return defects
+
+
+# --- Fixed sub-headings -------------------------------------------------------
+
+
+def check_subsections(
+    lines: list[str], headings: list[Heading], role: str
+) -> list[str]:
+    """Check a role's fixed level-4 sub-headings inside their sections.
+
+    Parameters
+    ----------
+    lines : list[str]
+        The report split into lines.
+    headings : list[Heading]
+        All headings in the report.
+    role : str
+        The role being checked.
+
+    Returns
+    -------
+    list[str]
+        Defects; empty when every fixed sub-heading is present in order (an
+        absent parent section is a heading defect, reported elsewhere).
+    """
+    defects: list[str] = []
+    for section, prefixes in SUBSECTION_PREFIXES.get(role, {}).items():
+        start = next(
+            (h for h in headings if h.text == section and h.level == SECTION_LEVEL), None
+        )
+        if start is None:
+            continue
+        # Sub-headings of this section: level-4 headings before the next
+        # heading at the section level or shallower.
+        subs: list[Heading] = []
+        for h in headings:
+            if h.line <= start.line:
+                continue
+            if h.level <= SECTION_LEVEL:
+                break
+            if h.level == SECTION_LEVEL + 1:
+                subs.append(h)
+        found = [next((p for p in prefixes if h.text.startswith(p)), None) for h in subs]
+        for p in prefixes:
+            if p not in found:
+                defects.append(
+                    f"section `### {section}` is missing its `#### {p}N …)` sub-heading"
+                )
+        ordered = [p for p in found if p]
+        if ordered != [p for p in prefixes if p in ordered]:
+            defects.append(
+                f"`### {section}` sub-headings out of order — observed: "
+                + " > ".join(ordered)
+            )
     return defects
 
 
@@ -505,8 +645,8 @@ def check_report(
     text : str
         The report's full text.
     mode : str | None
-        The active mode for roles that have modes (the Critic); ``None``
-        otherwise.
+        The active mode: required for the Critic; ``"forensic"`` or ``None``
+        (base contract) for the Analyst; ``None`` for every other role.
 
     Returns
     -------
@@ -520,18 +660,17 @@ def check_report(
         role without modes.
     """
     if role not in ROLE_HEADINGS:
-        raise ValueError(
-            f"unknown role {role!r}; known: {', '.join(ROLE_HEADINGS)} "
-            "(executor and analyst are not yet covered — see module docstring)"
-        )
+        raise ValueError(f"unknown role {role!r}; known: {', '.join(ROLE_HEADINGS)}")
     modes = ROLE_HEADINGS[role]
-    if None in modes:
-        if mode is not None:
-            raise ValueError(f"role {role!r} has no modes; drop --mode")
-    elif mode not in modes:
-        raise ValueError(
-            f"role {role!r} needs --mode, one of: {', '.join(m for m in modes if m)}"
-        )
+    named = [m for m in modes if m]
+    if mode not in modes:
+        if not named:
+            raise ValueError(f"role {role!r} has no modes; drop --mode/--forensic")
+        if None in modes:
+            raise ValueError(
+                f"role {role!r} takes no mode or one of: {', '.join(named)} (got {mode!r})"
+            )
+        raise ValueError(f"role {role!r} needs --mode, one of: {', '.join(named)}")
     expected = modes[mode]
 
     lines = text.splitlines()
@@ -548,10 +687,21 @@ def check_report(
             "says the report begins with its first section heading (read structurally)"
         )
 
+    defects.extend(check_subsections(lines, headings, role))
+
     if role == "critic" and mode == "candidate_critique":
         sig_defects, sig_warnings = check_critic_signatures(lines, headings)
         defects.extend(sig_defects)
         warnings.extend(sig_warnings)
+
+    # A base-mode Analyst report carrying the forensic sections usually means
+    # the caller forgot --forensic; say so beside the "not a section" defects.
+    if role == "analyst" and mode is None:
+        if any(h.text in ANALYST_FORENSIC_ADDITIONS for h in headings):
+            warnings.append(
+                "the report carries forensic-mode sections; if the request sent "
+                "`behaviour_spec`, re-run with --forensic"
+            )
     return defects, warnings
 
 
@@ -569,8 +719,8 @@ def main(argv: list[str] | None = None) -> int:
         Process exit code (see module docstring).
     """
     parser = argparse.ArgumentParser(
-        description="Check a sub-agent report's headings (and Critic signatures) "
-        "against its interface contract."
+        description="Check a sub-agent report's headings (plus Critic signatures "
+        "and Executor sub-headings) against its interface contract."
     )
     parser.add_argument("role", help=f"one of: {', '.join(ROLE_HEADINGS)}")
     parser.add_argument("report", type=Path, help="path to the saved report")
@@ -579,7 +729,18 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="active mode for the critic: " + ", ".join(CRITIC_HEADINGS),
     )
+    parser.add_argument(
+        "--forensic",
+        action="store_true",
+        help="analyst only: check against the Model Forensics addendum (the "
+        "request carried `behaviour_spec`)",
+    )
     args = parser.parse_args(argv)
+    if args.forensic:
+        if args.mode not in (None, "forensic"):
+            print("error: --forensic and --mode are exclusive", file=sys.stderr)
+            return 2
+        args.mode = "forensic"
 
     try:
         text = args.report.read_text()

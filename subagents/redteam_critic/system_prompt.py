@@ -28,7 +28,7 @@ You have read-only filesystem access via `Read`, `Glob`, and `Grep`. You cannot 
 
 Your active mode is given at the top of your prompt. **Follow only that mode's section below**, and emit only that mode's report sections. A report carrying another mode's sections is malformed, not thorough.
 
-Your prompt ends with `## Report Headings`: the mode's section headings, verbatim and in order. Use exactly those strings as level-3 markdown headings (`### ...`), not bold text, numbered titles, or your own paraphrase. The Diagnostician checks the saved report mechanically against that list; a report with a substituted, merged, or reworded heading is sent back once with the defects named, and if your prompt carries a `## Re-ask` section this is that one re-ask — produce the whole report again with every listed defect fixed.
+Your prompt ends with `## Report Headings`: the mode's section headings, verbatim and in order. Use exactly those strings as level-3 markdown headings (`### ...`), not bold text, numbered titles, or your own paraphrase. The Diagnostician checks the saved report mechanically against that list; a report with a substituted, merged, or reworded heading is sent back once with the defects named, and if your prompt carries a `## Re-ask` section this is that one re-ask — read your previous report at the path given and produce the whole report again, restructured into the mode's headings with every listed defect fixed, carrying its content across rather than re-reasoning it (a proposal named as lacking a discriminating signature gets one now).
 
 ---
 

@@ -1,10 +1,14 @@
 """Shared Agent SDK runner for all sub-agents."""
 
 import fnmatch
+import functools
+import importlib.util
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
+from types import ModuleType
 from typing import Any
 
 from claude_agent_sdk import (
@@ -78,6 +82,90 @@ def contract_section(*relpaths: str) -> str:
         "path; each file is where its path says it is.\n\n" + listing
     )
 
+
+# Heading of the one-re-ask section; tests and the docs refer to it verbatim.
+REASK_HEADING = "## Re-ask: Conformance Defects In Your Previous Report"
+
+
+def reask_section(
+    agent_name: str,
+    conformance_defects: Any,
+    previous_report: Any,
+    rebuild_note: str,
+) -> str | None:
+    """Render the one-re-ask section, or None on a first attempt.
+
+    A lead agent that finds a sub-agent report non-conformant
+    (`scripts/check_report.py` exits non-zero) re-invokes the same request
+    once, adding `conformance_defects` (the printed defect lines) and
+    `previous_report` (the failed report's absolute path). The agent is asked
+    to *restructure* that report into the contract's headings rather than
+    redo the work: the content is usually all there under the wrong headings,
+    and redoing it would cost a full run and could change the findings.
+
+    The two fields travel together. A re-ask with one but not the other, a
+    non-list or empty defect list, or a report path that is relative or
+    missing is malformed and raises, so the CLI exits 2 instead of the
+    sub-agent silently running a first attempt again (the `**data` hazard:
+    a key no builder reads is dropped without a trace).
+
+    Parameters
+    ----------
+    agent_name : str
+        Used in the error message, e.g. "Environment explorer".
+    conformance_defects : Any
+        `data.get("conformance_defects")` — expected list[str] or None.
+    previous_report : Any
+        `data.get("previous_report")` — expected absolute path or None.
+    rebuild_note : str
+        The role's rule for re-deriving a genuinely missing section, e.g. the
+        Analyst's "from your saved artefacts; never re-run a scan".
+
+    Returns
+    -------
+    str | None
+        A markdown section starting with `REASK_HEADING`, or None when
+        neither field was sent.
+
+    Raises
+    ------
+    RuntimeError
+        On a malformed re-ask (see above).
+    """
+    if conformance_defects is None and previous_report is None:
+        return None
+
+    # --- Validate: both fields, the right shapes, a readable report --------
+    problems: list[str] = []
+    if not (
+        isinstance(conformance_defects, list)
+        and conformance_defects
+        and all(isinstance(d, str) and d.strip() for d in conformance_defects)
+    ):
+        problems.append("conformance_defects must be a non-empty list of non-empty strings")
+    if not isinstance(previous_report, str) or not os.path.isabs(previous_report):
+        problems.append("previous_report must be an absolute path")
+    elif not os.path.isfile(previous_report):
+        problems.append(f"previous_report not found: {previous_report}")
+    if problems:
+        raise RuntimeError(f"{agent_name}: malformed re-ask — {'; '.join(problems)}")
+
+    # --- Render ---------------------------------------------------------------
+    defects = "\n".join(f"- {d}" for d in conformance_defects)
+    return (
+        f"{REASK_HEADING}\n\n"
+        "This is the one re-ask for this request. Your previous report failed the "
+        "mechanical conformance check (`scripts/check_report.py`) with these defects:\n\n"
+        f"{defects}\n\n"
+        f"Read your previous report first: `{previous_report}`\n\n"
+        "Then emit the complete report again, restructured into the contract's exact "
+        "section headings — verbatim, at level 3, in order, once each, nothing before "
+        "the first. Carry the previous report's content across under the right "
+        "headings without re-doing the work behind it; re-derive content only for a "
+        f"section (or item) the defects show was genuinely missing. {rebuild_note} "
+        "Emit the whole report, not a patch, a diff, or an apology."
+    )
+
 # Model every sub-agent runs on unless the invocation overrides it via the
 # `subagent_model` input field. Kept as a single default so the override is the
 # only thing that ever varies (e.g. a less refusal-prone model on a
@@ -121,6 +209,108 @@ COST_FILE_ENV = "PRISM_COST_FILE"
 # sub-agent model really is "infrastructure, not experiment".
 OPENROUTER_ANTHROPIC_BASE_URL = "https://openrouter.ai/api"
 
+# The Claude Code CLI only knows Claude models' context windows. For any other
+# model it prints `[claude-code:unrecognized_model]` (a warning, not a
+# rejection) and assumes a Claude-sized window, so a 1M-window model is
+# silently compacted at ~200k tokens. These two variables switch that
+# assumption off and state the real window; R01 diagnosed both by hand (D27).
+WINDOW_ENFORCEMENT_ENV = "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"
+MAX_CONTEXT_ENV = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
+
+# One public, key-free catalogue request per model per process; short, because
+# it sits in front of every non-Claude invocation and must never stall one.
+CONTEXT_FETCH_TIMEOUT = 10.0
+
+
+@functools.lru_cache(maxsize=1)
+def _load_openrouter_endpoints() -> ModuleType:
+    """Import `scripts/openrouter_endpoints.py` (stdlib-only) by path.
+
+    Loaded from the scaffold checkout rather than imported as a package:
+    `scripts/` is not a package, and the checkout always holds the file even
+    when a target's symlinks are incomplete.
+
+    Returns
+    -------
+    ModuleType
+        The loaded module (cached, so tests can patch its `_get_json`).
+    """
+    path = os.path.join(SCAFFOLD_ROOT, "scripts", "openrouter_endpoints.py")
+    spec = importlib.util.spec_from_file_location("prism_openrouter_endpoints", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@functools.lru_cache(maxsize=None)
+def _openrouter_context_length(model: str) -> int | None:
+    """The model's context window from OpenRouter's public catalogue, or None.
+
+    Offline-safe by design: any failure (no network, unlisted model, malformed
+    payload) returns None after one stderr line, and the caller then leaves
+    the CLI's default window enforcement in place. A sub-agent invocation is
+    never failed over this. Cached per process, so the line appears once.
+
+    Parameters
+    ----------
+    model : str
+        The sub-agent model string, e.g. ``"google/gemini-3-pro"``.
+
+    Returns
+    -------
+    int | None
+        The window in tokens, or None when it could not be resolved.
+    """
+    try:
+        window = _load_openrouter_endpoints().model_context_length(
+            model, timeout=CONTEXT_FETCH_TIMEOUT
+        )
+    except Exception as exc:  # deliberately broad: telemetry-grade lookup
+        print(
+            f"[route] context window for {model!r} not resolved from the OpenRouter "
+            f"catalogue ({exc}); leaving the CLI's default window enforcement in place",
+            file=sys.stderr,
+        )
+        return None
+    if window is None:
+        print(
+            f"[route] OpenRouter catalogue lists no context length for {model!r}; "
+            "leaving the CLI's default window enforcement in place",
+            file=sys.stderr,
+        )
+    return window
+
+
+def _context_window_env(model: str) -> dict[str, str]:
+    """Window-enforcement overrides for a non-Claude model on OpenRouter.
+
+    Parameters
+    ----------
+    model : str
+        The sub-agent model string.
+
+    Returns
+    -------
+    dict[str, str]
+        Both variables when the window resolved, otherwise empty (CLI
+        default). A value the user already exported wins over the catalogue.
+
+    Examples
+    --------
+    ``{"CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576"}``
+    """
+    if "claude" in model.lower():
+        return {}  # the CLI knows Claude windows; nothing to override
+    if os.environ.get(MAX_CONTEXT_ENV):
+        return {WINDOW_ENFORCEMENT_ENV: "1", MAX_CONTEXT_ENV: os.environ[MAX_CONTEXT_ENV]}
+    window = _openrouter_context_length(model)
+    if window is None:
+        return {}
+    return {WINDOW_ENFORCEMENT_ENV: "1", MAX_CONTEXT_ENV: str(window)}
+
 
 def _resolve_route_env(route: str | None, model: str) -> dict[str, str]:
     """Build the environment overrides that select a sub-agent's provider.
@@ -140,7 +330,9 @@ def _resolve_route_env(route: str | None, model: str) -> dict[str, str]:
     -------
     dict[str, str]
         Environment variables to pass to the Claude Code subprocess. Empty for
-        the direct route.
+        the direct route. For a non-Claude model on OpenRouter it also carries
+        the context-window overrides from `_context_window_env` when the
+        catalogue lookup succeeds.
 
     Raises
     ------
@@ -166,7 +358,69 @@ def _resolve_route_env(route: str | None, model: str) -> dict[str, str]:
         "ANTHROPIC_BASE_URL": OPENROUTER_ANTHROPIC_BASE_URL,
         "ANTHROPIC_AUTH_TOKEN": api_key,
         "ANTHROPIC_API_KEY": "",
+        **_context_window_env(model),
     }
+
+
+# --- Credential exhaustion ----------------------------------------------------
+#
+# A provider refusing on account credit or a usage cap is its own failure
+# class: it is not transient (retrying fails identically until credit is
+# restored), not a refusal, and not a scaffold bug — and when it takes both
+# routes it is the trigger for the lead docs' Suspension procedure. Provider
+# caps are not observable in advance, so this is detected reactively, from
+# the error text. Every pattern is the provider's own wording, lower-cased;
+# the archive provenance is noted per entry. Kept identical to
+# `scripts/execute_evals.py`'s `_CREDENTIAL_PATTERNS` (a test pins the two).
+
+FAILURE_CREDENTIALS_EXHAUSTED = "credentials_exhausted"
+
+CREDENTIAL_PATTERNS: tuple[str, ...] = (
+    # Anthropic workspace spend cap. Archive: R04/R05 stderr verbatim,
+    # "API Error: 400 You have reached your specified workspace API usage
+    # limits. You will regain access on 2026-10-01 at 00:00 UTC." (also R06,
+    # R03, R01 logs).
+    "reached your specified workspace api usage limits",
+    # OpenRouter workspace budget. Archive: R02 log, "Failed to authenticate.
+    # API Error: 403 Workspace lifetime budget of $150.00 exceeded." (also R01,
+    # R04 logs). Note the "Failed to authenticate" prefix: it is not a bad key.
+    "workspace lifetime budget",
+    # Anthropic prepaid credit and OpenRouter 402 wording — the providers'
+    # documented messages, not observed in the archive.
+    "credit balance is too low",
+    "requires more credits",
+    "insufficient credits",
+)
+
+# A bare "402" also matches sample ids and hashes, so the status code counts
+# only where an error line states it as one.
+CREDENTIAL_STATUS_RE = re.compile(r"(?:error code|api error|http|status(?:[ _]code)?)[:=\s]*402\b", re.I)
+
+
+def classify_failure(text: str | None) -> str | None:
+    """Name the failure class of an SDK/CLI error, where one is recognised.
+
+    Parameters
+    ----------
+    text : str | None
+        Exception text or an error result's text.
+
+    Returns
+    -------
+    str | None
+        ``"credentials_exhausted"`` for a credit/usage-cap refusal, else None.
+
+    Examples
+    --------
+    >>> classify_failure("API Error: 400 You have reached your specified workspace API usage limits.")
+    'credentials_exhausted'
+    """
+    if not text:
+        return None
+    low = text.lower()
+    if any(p in low for p in CREDENTIAL_PATTERNS) or CREDENTIAL_STATUS_RE.search(text):
+        return FAILURE_CREDENTIALS_EXHAUSTED
+    return None
 
 
 def _resolve_thinking(
@@ -483,9 +737,9 @@ async def run_agent(
         **({"hooks": hooks} if hooks else {}),
     )
 
+    result: str | None = None
+    result_message: ResultMessage | None = None
     try:
-        result: str | None = None
-        result_message: ResultMessage | None = None
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, ResultMessage):
                 result = message.result
@@ -495,10 +749,28 @@ async def run_agent(
             f"{agent_name}: Claude Code CLI not found. "
             "Install with: pip install claude-agent-sdk"
         )
-    except CLIConnectionError as exc:
-        raise RuntimeError(f"{agent_name}: connection error: {exc}")
-    except ProcessError as exc:
-        raise RuntimeError(f"{agent_name}: process error: {exc}")
+    except (CLIConnectionError, ProcessError) as exc:
+        kind = "connection error" if isinstance(exc, CLIConnectionError) else "process error"
+        # The CLI emits its error result before exiting non-zero, so the
+        # usage of a failed run is usually still in hand: record it, tagged.
+        # Older SDKs raise a generic "Command failed with exit code 1"
+        # ProcessError and leave the provider's text only in the error
+        # result, so classify both.
+        error_result = result_message.result if result_message is not None else None
+        _raise_if_credentials_exhausted(
+            agent_name, resolved_model, route,
+            "\n".join(t for t in (f"{exc}", error_result) if t), result_message,
+        )
+        if result_message is not None:
+            _write_cost_sidecar(agent_name, resolved_model, route, result_message)
+        raise RuntimeError(f"{agent_name}: {kind}: {exc}")
+
+    # An API failure can also arrive as an error result with the provider's
+    # text in `result` and no exception; that text is not a report.
+    if result_message is not None and result_message.is_error:
+        _raise_if_credentials_exhausted(
+            agent_name, resolved_model, route, result_message.result, result_message
+        )
 
     if result_message is not None:
         _write_cost_sidecar(agent_name, resolved_model, route, result_message)
@@ -518,8 +790,58 @@ async def run_agent(
     return result
 
 
+def _raise_if_credentials_exhausted(
+    agent_name: str,
+    model: str,
+    route: str | None,
+    text: str | None,
+    message: ResultMessage | None,
+) -> None:
+    """Raise the distinct credential-exhaustion error if `text` is one.
+
+    The message carries the marker ``credentials_exhausted (route=<route>)``,
+    which `scripts/launch_subagent.py` copies into the receipt; the cost
+    sidecar records the same class and route, written even when the SDK
+    yielded no result message, so the lead agent can tell "this route is out
+    of credit" from a bug without reading prose.
+
+    Parameters
+    ----------
+    agent_name : str
+        Human-readable role name.
+    model : str
+        The resolved sub-agent model.
+    route : str | None
+        The resolved route.
+    text : str | None
+        The exception or error-result text to classify.
+    message : ResultMessage | None
+        The SDK's final message, if one arrived.
+
+    Raises
+    ------
+    RuntimeError
+        When `text` is a credit/usage-cap refusal; otherwise returns None.
+    """
+    if classify_failure(text) != FAILURE_CREDENTIALS_EXHAUSTED:
+        return
+    route_name = route or "direct"
+    _write_cost_sidecar(
+        agent_name, model, route, message, failure_class=FAILURE_CREDENTIALS_EXHAUSTED
+    )
+    raise RuntimeError(
+        f"{agent_name}: {FAILURE_CREDENTIALS_EXHAUSTED} (route={route_name}, model={model}): "
+        f"the provider refused on account credit or a usage cap — not transient and "
+        f"not a scaffold bug; see the Suspension procedure. Provider text: {text}"
+    )
+
+
 def _write_cost_sidecar(
-    agent_name: str, model: str, route: str | None, message: ResultMessage
+    agent_name: str,
+    model: str,
+    route: str | None,
+    message: ResultMessage | None,
+    failure_class: str | None = None,
 ) -> None:
     """Record the invocation's SDK usage and cost.
 
@@ -536,29 +858,37 @@ def _write_cost_sidecar(
         The resolved sub-agent model.
     route : str | None
         The resolved route.
-    message : ResultMessage
-        The SDK's final message for the query.
+    message : ResultMessage | None
+        The SDK's final message for the query; None when a failure arrived
+        before one (usage fields are then recorded as null).
+    failure_class : str | None
+        A recognised failure class (``"credentials_exhausted"``), else None.
     """
+    def field(name: str) -> Any:
+        return getattr(message, name, None) if message is not None else None
+
     record = {
         "prism_cost": 1,
         "agent": agent_name,
         "model": model,
         "route": route or "direct",
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "subtype": message.subtype,
-        "stop_reason": message.stop_reason,
-        "is_error": message.is_error,
-        "num_turns": message.num_turns,
-        "duration_ms": message.duration_ms,
-        "duration_api_ms": message.duration_api_ms,
-        "total_cost_usd": message.total_cost_usd,
-        "usage": message.usage,
-        "model_usage": message.model_usage,
-        "permission_denials": message.permission_denials,
+        "failure_class": failure_class,
+        "subtype": field("subtype"),
+        "stop_reason": field("stop_reason"),
+        "is_error": True if failure_class else field("is_error"),
+        "num_turns": field("num_turns"),
+        "duration_ms": field("duration_ms"),
+        "duration_api_ms": field("duration_api_ms"),
+        "total_cost_usd": field("total_cost_usd"),
+        "usage": field("usage"),
+        "model_usage": field("model_usage"),
+        "permission_denials": field("permission_denials"),
     }
     print(
-        f"[cost] agent={agent_name!r} model={model} total_cost_usd={message.total_cost_usd} "
-        f"turns={message.num_turns} subtype={message.subtype}",
+        f"[cost] agent={agent_name!r} model={model} total_cost_usd={field('total_cost_usd')} "
+        f"turns={field('num_turns')} subtype={field('subtype')}"
+        + (f" failure_class={failure_class} route={route or 'direct'}" if failure_class else ""),
         file=sys.stderr,
     )
     path = os.environ.get(COST_FILE_ENV)
