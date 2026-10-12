@@ -388,6 +388,156 @@ def test_mixed_iteration_sources_warn(tmp_path, capsys):
     assert "differently shaped directories" in out
 
 
+# --- The original episode as a condition (the /diagnose smoke-run leak) ---
+
+
+def _reference_log(tmp_path: Path) -> str:
+    """The user's flagged log: another task name, more epochs, another day.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Workspace root; the log sits in its `logs/`, outside the investigation.
+
+    Returns
+    -------
+    str
+        The reference `.eval` path.
+    """
+    return write_fixture_log(
+        str(tmp_path / "logs" / "2026-09-09T00-40-10-00-00_agentic-misalignment_QNpHMtyJ.eval"),
+        epochs=3, task="agentic_misalignment", task_file="agentic_misalignment.py",
+        tags=[], metadata={}, created="2026-09-09T00:40:10+00:00",
+    )
+
+
+def _smoke_request(tmp_path: Path, mapping: dict[str, str], reference: str, notes: list[str]) -> str:
+    """A whole forensic Analyst request carrying the reference transcript.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Where to write it.
+    mapping : dict[str, str]
+        Label → directory.
+    reference : str
+        `behaviour_spec.reference_transcript`.
+    notes : list[str]
+        `execution_notes`.
+
+    Returns
+    -------
+    str
+    """
+    data = {
+        "topic": "How the assistant works through its inbox.",
+        "transcript_source": mapping,
+        "behaviour_spec": {"description": "sends a conditional email", "reference_transcript": reference},
+        "execution_notes": notes,
+    }
+    p = tmp_path / "request.json"
+    p.write_text(json.dumps(data))
+    return str(p)
+
+
+def _round0(tmp_path: Path, cid: str) -> Path:
+    """The 1b resample pool's log directory for one id."""
+    return tmp_path / "inv" / "iterations" / "00_round0" / "logs" / cid
+
+
+def test_copied_reference_as_condition_blocks(tmp_path, capsys):
+    # The smoke-run layout: a fresh resample under c_420b, and the original
+    # flagged log copied into c_9bb5 and sent as condition_B beside it.
+    import shutil
+
+    ref = _reference_log(tmp_path)
+    fresh = _round0(tmp_path, "c_420b")
+    write_fixture_log(str(fresh / "2026-10-12T14-59-32-00-00_episode_oXp2dm.eval"), epochs=2, task="episode",
+                      task_file="c_420b/task.py", tags=["exp:iter_00", "cond:c_420b"], metadata={"condition": "c_420b"})
+    leaked = _round0(tmp_path, "c_9bb5")
+    leaked.mkdir(parents=True)
+    shutil.copy2(ref, leaked / os.path.basename(ref))
+    label_map = tmp_path / "inv" / "CONDITION_LABEL_MAP_iter0.json"
+    label_map.write_text(json.dumps({"iteration": 0, "conditions": {
+        "c_420b": {"name": "fresh_pool"}, "c_9bb5": {"name": "reference_pool_30ep_unpinned"}}}))
+    req = _smoke_request(tmp_path, {"condition_A": str(fresh), "condition_B": str(leaked)}, ref, [
+        "condition_A: 20 of 20 samples completed; no sample errors, retries, or limit hits.",
+        "condition_B: 30 of 30 samples completed (an earlier run of the same task); no errors recorded.",
+    ])
+    code, out = _run(capsys, str(label_map), req)
+    assert code == 1, out
+    assert "[reference] condition_B" in out
+    assert "[reference] condition_A" not in out
+    # The header differences and the provenance word are named as well.
+    for field in ("task", "epochs", "created"):
+        assert f"conditions differ in header {field}" in out, field
+    assert "role/provenance word(s) earlier" in out
+
+
+def test_reference_itself_as_condition_blocks(tmp_path, capsys):
+    # Pointing a label straight at the reference's own directory (same realpath).
+    ref = _reference_log(tmp_path)
+    arms = _opaque_layout(tmp_path)
+    arms["condition_B"] = os.path.dirname(ref)
+    code, out = _run(capsys, _map(tmp_path), _smoke_request(tmp_path, arms, ref, []))
+    assert code == 1, out
+    assert "[reference] condition_B" in out
+
+
+def test_clean_forensic_request_with_reference_stays_clean(tmp_path, capsys):
+    # The reference is named but not among the sources; notes are neutral.
+    ref = _reference_log(tmp_path)
+    req = _smoke_request(tmp_path, _opaque_layout(tmp_path), ref,
+                         ["condition_K: 2 of 2 samples completed", "condition_B: 1 sample hit the message limit"])
+    code, out = _run(capsys, _map(tmp_path), req)
+    assert code == 0, out
+    assert "BLOCK" not in out and "WARN" not in out
+
+
+@pytest.mark.parametrize("note, words", [
+    ("condition_B: the previous round's pool", "previous"),
+    ("condition_A: reran the original episode", "original"),
+    ("condition_B: flagged samples only; the control arm", "control, flagged"),
+    ("condition_A: no priority changes", None),
+])
+def test_execution_notes_provenance_words_warn(tmp_path, capsys, note, words):
+    req = _smoke_request(tmp_path, _opaque_layout(tmp_path), "", [note])
+    code, out = _run(capsys, _map(tmp_path), req)
+    assert code == 0, out
+    if words:
+        assert f"role/provenance word(s) {words}" in out
+    else:
+        assert "WARN" not in out
+
+
+def test_header_epoch_difference_warns(tmp_path, capsys):
+    src = {"condition_K": _arm(tmp_path, VAR, VAR), "condition_B": _arm(tmp_path, CTL, CTL)}
+    # Rewrite the control with more epochs: same task, same day.
+    write_fixture_log(os.path.join(src["condition_B"], "2026-10-08T00-00-00-00-00_fixture-task_AbC123.eval"),
+                      epochs=3, task_file=f"{CTL}/task.py", tags=["exp:iter_01", f"cond:{CTL}"],
+                      metadata={"condition": CTL, "model": "mockllm/model", "route": "direct"})
+    code, out = _run(capsys, _map(tmp_path), _source(tmp_path, src))
+    assert code == 0, out
+    assert "conditions differ in header epochs" in out
+    assert "differ in header task" not in out and "differ in header created" not in out
+
+
+def test_profile_created_tolerates_midnight_and_unset_epochs():
+    # A round straddling midnight UTC is one run; a month apart is another.
+    adjacent = {"A": {"created": {"2026-10-11"}}, "B": {"created": {"2026-10-12"}}}
+    assert cb.profile_warnings(adjacent) == []
+    apart = {"A": {"created": {"2026-09-09"}}, "B": {"created": {"2026-10-12"}}}
+    assert "differ in header created" in cb.profile_warnings(apart)[0]
+
+
+def test_reference_that_is_not_an_eval_warns(tmp_path, capsys):
+    dump = tmp_path / "ref.txt"
+    dump.write_text("episode text")
+    req = _smoke_request(tmp_path, _opaque_layout(tmp_path), str(dump), [])
+    code, out = _run(capsys, _map(tmp_path), req)
+    assert code == 0 and "not a readable .eval file" in out
+
+
 # --- Usage errors ---
 
 

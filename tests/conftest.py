@@ -180,6 +180,7 @@ def write_fixture_log(
     metadata: dict | None = None,
     task_args: dict | None = None,
     dataset_name: str | None = None,
+    created: str | None = None,
 ) -> str:
     """Write a small **scored** .eval log so the blackout tests have something to leak.
 
@@ -212,6 +213,9 @@ def write_fixture_log(
         The header's ``task_args`` (the ``-T`` values).
     dataset_name : str | None
         The header's dataset name (the blinding tests' dataset channel).
+    created : str | None
+        The header's ``created`` timestamp (defaults to now); the blinding
+        tests use an older one to stand in for a log from another run.
 
     Returns
     -------
@@ -238,7 +242,7 @@ def write_fixture_log(
     now = datetime.now(timezone.utc).isoformat()
     spec = EvalSpec(
         run_id="fixture-run",
-        created=now,
+        created=created or now,
         task=task,
         task_id="t1",
         task_version=0,

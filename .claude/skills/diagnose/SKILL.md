@@ -43,6 +43,14 @@ Two invocation rules with no exceptions:
 
 **Run sub-agents through the detached launcher.** Write the input JSON to a file, launch it with `scripts/launch_subagent.py launch <role> …` with the iteration's `artefacts/` as `--artefacts-dir`, and poll with `wait` (`subagent_invocation.md §General Pattern`). The launcher persists the request and writes each report to `artefacts/<role>/report_<tag>_<role>_<n>.md` — there is no separate save step; the Analyst additionally writes its own outputs via `artefacts_dir`. Never run a sub-agent's CLI in the foreground or with `nohup … &`: the Executor runs for as long as the evals do, and either form dies with the session.
 
+**Working rules for an unattended run** — each one cost a smoke run turns or stalled it on a permission prompt (details: `diagnostician_responsibilities.md §State Management`):
+
+- **Never read or source `.env`** — no `cat`, `grep`, `source`, or `dotenv` one-liner, through any interpreter. Check keys with `uv run --no-project python scripts/check_keys.py` (presence only, never values); the launcher and Inspect load `.env` themselves.
+- **Write and append files with the Write/Edit tools**, never shell redirection (`cat > file <<EOF`, `>> INVESTIGATION-LOG.md`).
+- **No shell loops** (`for`/`while` are denied): one command per item, or a script. Mint opaque ids with `uv run --no-project python scripts/new_ids.py <N> --map investigations/<name>`.
+- **Request drafts live under `investigations/<name>/requests/drafts/`** — candidate ledgers exported for the Designer or Critic included; never `request_drafts/` or a scratchpad, where the Analyst could read them.
+- **Hash with `sha256sum <files>`** (or `find … | sort | xargs sha256sum`), never `find -exec`.
+
 ## The Firewall in This Mode
 
 The rule most likely to be violated by a Diagnostician carrying Orchestrator habits — in both directions. Verbatim from `diagnostician_responsibilities.md`:
@@ -110,7 +118,7 @@ The eval environment and target model are **frozen at Phase 0**; the baseline is
 
 **If `$ARGUMENTS` names an investigation directory containing `RESUME.md`:** resume it — do not start fresh, and do not re-run Phase 0. The investigation was suspended because credentials ran out (`diagnostician_responsibilities.md §Sub-Agent Failure Handling`), and everything needed to continue is on disk:
 
-1. **Verify the frozen artefacts first**, before launching anything: re-run the grader-file `find … -exec sha256sum {} +` command `RESUME.md` gives and compare with the hashes pasted there, check the grader hash recorded under `### Grader` (the Analyst re-reports it on load), and every pre-registration table re-hashed from its recorded `INVESTIGATION-LOG.md` line range. Any mismatch is an instrument change: stop and tell the user — it is not resumable as the same investigation.
+1. **Verify the frozen artefacts first**, before launching anything: re-run the grader-file hash command `RESUME.md` gives (`find … | sort | xargs sha256sum`; if an older `RESUME.md` gives a `find … -exec` form, which the settings deny, run the pipe form over the same directory instead) and compare with the hashes pasted there, check the grader hash recorded under `### Grader` (the Analyst re-reports it on load), and every pre-registration table re-hashed from its recorded `INVESTIGATION-LOG.md` line range. Any mismatch is an instrument change: stop and tell the user — it is not resumable as the same investigation.
 2. **Confirm each credential `RESUME.md` names** with one minimal call; if a route is still capped, say so and stay suspended.
 3. **Write a `### Resumed` block** (`### Resumed (2)` for a second resumption in the same section) into the log under the section holding the `### Suspension` block: when, what was verified, which credentials are back, any route change (recorded as a `### Deviation`).
 4. **Relaunch from the persisted requests** with the commands in `RESUME.md` (re-derive them with `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished` if anything changed), then continue at the step it names. Executed-but-ungraded rounds are scored against their tables as written.
@@ -126,7 +134,7 @@ The archive is the precedent: three runs graded already-executed rounds days lat
 1. Behaviour description — observable, explanation-free — and the **contrast class** fixed in "X rather than Y" form
 2. Eval environment path confirmed to exist and run; environment and target model frozen
 3. Reference transcript located, and the episode's **sample id** identified (1b requires it)
-4. Cross-family Critic gate passed: `OPENROUTER_API_KEY` present, Critic model resolved by cost and announced
+4. Cross-family Critic gate passed: `OPENROUTER_API_KEY` present per `scripts/check_keys.py`, Critic model resolved by cost from the live catalogue (`openrouter_endpoints.py --list <family prefix>`) and announced
 5. Models and routes resolved (Orchestrator's tiered routing rules, by reference); budget agreed per the defaults table; any user-supplied lead recorded as an ordinary candidate with **no special status**
 6. `investigations/<name>/` initialised with `INVESTIGATION-LOG.md` (Agreed Scope filled) and `CANDIDATES.md`
 

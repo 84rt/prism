@@ -17,6 +17,13 @@ these figures: the Diagnostician's budget exit (``diagnostician_responsibilities
 §Stopping rule) and the Orchestrator's spend check before each Decision
 (``orchestrator_responsibilities.md`` Step 2j).
 
+Known limitation — the total under-counts: eval usage is not priced in USD,
+and the Transcript Analyst's own scanner and validator model calls (made from
+inside its scans, not through the SDK result the sidecar records) are not
+captured at all. Callers keep headroom below the cap rather than spending to
+it. Dollar pricing for eval usage and capture of the Analyst's scanner spend
+are future work.
+
 Usage
 -----
     uv run python scripts/spend.py investigations/<name> [--json]

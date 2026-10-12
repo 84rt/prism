@@ -20,6 +20,41 @@ class AgentCLIConfig:
     directory_dict_field: str | None = None
 
 
+def strip_preamble(report: str) -> str:
+    """Drop any text before the report's first ``### `` heading.
+
+    Every contract says a report begins at its first section heading, but
+    agents occasionally narrate a line first ("Now I have everything I need.
+    Here is the report:") — five of the smoke runs' reports did. The leads read
+    reports structurally, so the line is noise at best and a parsing hazard
+    at worst; it is removed once, here, where every report is emitted.
+    ``scripts/check_report.py`` still warns on a preamble for callers that
+    hand it a report from anywhere else.
+
+    Parameters
+    ----------
+    report : str
+        The agent's final message.
+
+    Returns
+    -------
+    str
+        The report from its first line that starts with ``### ``; unchanged
+        when there is no such line (a malformed report is left for
+        ``check_report.py`` to flag, never truncated to nothing).
+
+    Examples
+    --------
+    >>> strip_preamble("Here it is:\\n\\n### Summary\\nok")
+    '### Summary\\nok'
+    """
+    lines = report.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.startswith("### "):
+            return "".join(lines[i:])
+    return report
+
+
 def run_cli(config: AgentCLIConfig) -> None:
     """Generic CLI entry point for any sub-agent.
 
@@ -112,4 +147,10 @@ def run_cli(config: AgentCLIConfig) -> None:
         print(f"Agent error: {exc}", file=sys.stderr)
         sys.exit(2)
 
-    print(report)
+    # The stripped preamble goes to stderr (the invocation's stderr log), so a
+    # caveat an agent wrote above its first heading is kept, not discarded.
+    emitted = strip_preamble(report)
+    if emitted != report:
+        stripped = report[: len(report) - len(emitted)].strip()
+        print(f"[report] preamble stripped before the first heading: {stripped[:500]!r}", file=sys.stderr)
+    print(emitted)

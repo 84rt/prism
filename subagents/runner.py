@@ -234,6 +234,40 @@ ISOLATION_ENV: dict[str, str] = {
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
 }
 
+# --- No auto-backgrounding inside a sub-agent ---------------------------------
+#
+# The CLI's default Bash timeout is 120 s, and a command that outruns it can be
+# moved to the background rather than killed. In one smoke run an Analyst scan
+# did exactly that: the command left the agent's view and slipped past the
+# no-background guard in `_build_hooks`, which only sees the call as issued.
+# So every sub-agent runs with a 10-minute default (long enough for the
+# Executor's 540 s `launch_subagent.py wait` poll and a typical scan) and a
+# 60-minute ceiling an agent may request explicitly for a long scan, and with
+# background tasks disabled so a timeout ends the command instead of
+# detaching it. All three names were checked against the bundled CLI of the
+# pinned `claude-agent-sdk` (0.2.165, CLI 2.1.294); a user's own exported
+# value wins, as with the context-window override — so a user who exports a
+# default below the Executor's 540 s poll reintroduces the problem.
+BASH_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000  # 600000
+BASH_MAX_TIMEOUT_MS = 60 * 60 * 1000  # 3600000
+
+
+def _bash_timeout_env() -> dict[str, str]:
+    """Bash timeout and background-task settings for every sub-agent.
+
+    Returns
+    -------
+    dict[str, str]
+        ``{"BASH_DEFAULT_TIMEOUT_MS": "600000", "BASH_MAX_TIMEOUT_MS":
+        "3600000", "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}``, with any
+        timeout the user exported taking precedence.
+    """
+    return {
+        "BASH_DEFAULT_TIMEOUT_MS": os.environ.get("BASH_DEFAULT_TIMEOUT_MS") or str(BASH_DEFAULT_TIMEOUT_MS),
+        "BASH_MAX_TIMEOUT_MS": os.environ.get("BASH_MAX_TIMEOUT_MS") or str(BASH_MAX_TIMEOUT_MS),
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    }
+
 # The one project setting sub-agents relied on, passed explicitly now that
 # project settings are not loaded: secrets in `.env` files are never read.
 SUBAGENT_SETTINGS: dict[str, Any] = {
@@ -1260,7 +1294,7 @@ async def run_agent(
         permission_mode="bypassPermissions",
         max_turns=max_turns or DEFAULT_MAX_TURNS,
         cwd=working_dir,
-        env={**ISOLATION_ENV, **route_env},
+        env={**ISOLATION_ENV, **_bash_timeout_env(), **route_env},
         **({"hooks": hooks} if hooks else {}),
     )
 

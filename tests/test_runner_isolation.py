@@ -165,6 +165,30 @@ def test_openrouter_route_keeps_the_isolation_env(monkeypatch):
     env = built[0].kwargs["env"]
     assert env["ANTHROPIC_BASE_URL"] == runner.OPENROUTER_ANTHROPIC_BASE_URL
     assert env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"
+    assert env["BASH_DEFAULT_TIMEOUT_MS"] == "600000"
+
+
+@pytest.mark.parametrize("route", [None, "openrouter"])
+def test_bash_timeouts_reach_the_options_on_every_route(monkeypatch, route):
+    """A long command must not outrun the CLI's 120 s default and be auto-backgrounded."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.delenv("BASH_DEFAULT_TIMEOUT_MS", raising=False)
+    monkeypatch.delenv("BASH_MAX_TIMEOUT_MS", raising=False)
+    built = _stub_sdk(monkeypatch, _result())
+    asyncio.run(runner.run_agent("p", "s", ["Bash"], [], "X", model="anthropic/claude-opus-4-8", route=route))
+    env = built[0].kwargs["env"]
+    assert env["BASH_DEFAULT_TIMEOUT_MS"] == "600000"
+    assert env["BASH_MAX_TIMEOUT_MS"] == "3600000"
+    assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+    # The Executor's `wait` poll (540 s) fits under the default.
+    assert int(env["BASH_DEFAULT_TIMEOUT_MS"]) > 540_000
+
+
+def test_user_exported_bash_timeout_wins(monkeypatch):
+    monkeypatch.setenv("BASH_MAX_TIMEOUT_MS", "7200000")
+    built = _stub_sdk(monkeypatch, _result())
+    asyncio.run(runner.run_agent("p", "s", ["Bash"], [], "X"))
+    assert built[0].kwargs["env"]["BASH_MAX_TIMEOUT_MS"] == "7200000"
 
 
 def test_real_options_accept_the_isolation_fields():
@@ -219,7 +243,7 @@ def test_every_builder_passes_its_list_and_the_runner_denies_the_label_map(monke
     assert _decide(hooks["Read"], "Read", {"file_path": label_map})
     assert _decide(hooks["Grep"], "Grep", {"pattern": "c_", "path": label_map})
     assert _decide(hooks["Bash"], "Bash", {"command": f"cat {label_map}"})
-    assert not _decide(hooks["Read"], "Read", {"file_path": f"{INV}/iter_01/transcripts/a.txt"})
+    assert not _decide(hooks["Read"], "Read", {"file_path": f"{INV}/iter_01/logs/c_3f9a/a.eval"})
 
 
 def test_analyst_list_covers_requests_reports_and_resume():
@@ -453,6 +477,42 @@ def test_requests_denial_is_anchored_to_the_investigation_layout():
     assert not _decide(read, "Read", {"file_path": "/venv/lib/python3.12/site-packages/requests/api.py"})
     assert not _decide(read, "Read", {"file_path": "/w/target/env/requests/task.json"})
     assert _decide(read, "Read", {"file_path": f"{INV}/requests/iter_01_designer_1.json"})
+
+
+@pytest.mark.parametrize("path, blocked", [
+    # Request drafts: the documented `requests/drafts/` and the smoke run's legacy sibling.
+    (f"{INV}/requests/drafts/candidates_iter1.json", True),
+    (f"{INV}/request_drafts/critic_01_cand.json", True),
+    # Transcript dumps under any iteration layout, and the reference dump.
+    (f"{INV}/iterations/00_round0/transcripts/c_420b/log/s_epoch_1.txt", True),
+    (f"{INV}/iter_01/transcripts/c_3f9a/log/s_epoch_2.txt", True),
+    (f"{INV}/artefacts/reference/log/s_epoch_1.txt", True),
+    # What the Analyst needs stays readable: its logs and its own artefacts.
+    (f"{INV}/iterations/00_round0/logs/c_420b/x.eval", False),
+    (f"{INV}/iterations/00_round0/artefacts/analyst/grader.py", False),
+    (f"{INV}/artefacts/analyst/grader/README.md", False),
+    # An eval environment's own `transcripts/` outside an investigation is not caught.
+    ("/w/target/env/transcripts/fixture.txt", False),
+])
+def test_analyst_denied_drafts_and_transcript_dumps(path, blocked):
+    """Every new Analyst pattern, through the real hooks, across Read, Grep and Bash."""
+    hooks = runner._build_hooks("A", analyst.RESTRICTED_FILES, None, False, cwd="/w")
+    m = {x.matcher: x.hooks for x in hooks["PreToolUse"]}
+    assert _decide(m["Read"], "Read", {"file_path": path}) is blocked
+    assert _decide(m["Bash"], "Bash", {"command": f"cat {path}"}) is blocked
+
+
+def test_analyst_grep_over_iteration_with_dumps_is_denied(tmp_path):
+    """A recursive search rooted above a dump directory is denied (narrow it to `logs/`)."""
+    inv = tmp_path / "investigations" / "inv1"
+    (inv / "iterations" / "00_round0" / "transcripts" / "c_420b").mkdir(parents=True)
+    (inv / "iterations" / "00_round0" / "transcripts" / "c_420b" / "s.txt").write_text("### SCORE\n1")
+    (inv / "iterations" / "00_round0" / "logs" / "c_420b").mkdir(parents=True)
+    hooks = runner._build_hooks("A", analyst.RESTRICTED_FILES, None, False, cwd=str(tmp_path))
+    grep = {x.matcher: x.hooks for x in hooks["PreToolUse"]}["Grep"]
+    assert _decide(grep, "Grep", {"pattern": "SCORE", "path": str(inv / "iterations")}, cwd=str(tmp_path))
+    assert not _decide(grep, "Grep", {"pattern": "SCORE", "path": str(inv / "iterations" / "00_round0" / "logs")},
+                       cwd=str(tmp_path))
 
 
 def test_reask_reports_stay_readable():

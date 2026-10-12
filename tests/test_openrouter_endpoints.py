@@ -129,3 +129,44 @@ def test_duplicate_slugs_keep_the_best_ranked_record():
 def test_model_id_must_name_an_author(bad):
     with pytest.raises(RuntimeError):
         oe.resolve_model_id(bad)
+
+
+# --- `--list`: the live catalogue in place of a written Critic shortlist ---
+
+MODELS = {
+    f"{oe.OPENROUTER_API}/models": {
+        "data": [
+            {"id": "google/gemini-2.5-pro", "created": 1740000000, "context_length": 1048576,
+             "pricing": {"prompt": "0.00000125", "completion": "0.00001"}},
+            {"id": "google/gemini-3-pro", "created": 1780000000, "context_length": 1048576,
+             "pricing": {"prompt": "0.000002", "completion": "0.000012"}},
+            {"id": "openai/gpt-5", "created": 1760000000, "context_length": 400000,
+             "pricing": {"prompt": "0.00000125", "completion": "0.00001"}},
+            {"id": "google/gemma-3-27b-it", "created": 1750000000, "context_length": 131072, "pricing": {}},
+        ]
+    }
+}
+
+
+def test_list_filters_by_prefix_newest_first(monkeypatch, capsys):
+    fetched: list[str] = []
+    monkeypatch.setattr(oe, "_get_json", lambda url, timeout: fetched.append(url) or MODELS[url])
+    models = oe.list_models("openrouter/Google/Gemini", 5.0)
+    assert [m["id"] for m in models] == ["google/gemini-3-pro", "google/gemini-2.5-pro"]
+    assert models[0]["prompt_per_m"] == 2.0 and models[0]["completion_per_m"] == 12.0
+    assert fetched == [f"{oe.OPENROUTER_API}/models"]  # one public, key-free request
+
+    oe.main(["--list", "google/gem"])
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("google/gemini-3-pro") and "$2.00/M in" in out[0] and "1048576 ctx" in out[0]
+    gemma = next(ln for ln in out if ln.startswith("google/gemma-3-27b-it"))
+    assert "? in" in gemma and len(out) == 3
+
+
+def test_list_reports_no_match_and_rejects_ambiguous_use(monkeypatch, capsys):
+    monkeypatch.setattr(oe, "_get_json", lambda url, timeout: MODELS[url])
+    oe.main(["--list", "x-ai/"])
+    assert "no catalogue model id starts with" in capsys.readouterr().out
+    for argv in ([], ["openai/gpt-5", "--list", "openai/"]):
+        with pytest.raises(SystemExit):
+            oe.main(argv)

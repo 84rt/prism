@@ -88,6 +88,12 @@ echo "OPENROUTER_API_KEY=sk-or-..." >> .env  # optional
 # /path/to/prism/uninstall.sh .
 ```
 
+### Running unattended
+
+An investigation can run for hours, so you will often want to leave it alone. Claude Code's auto mode still stops for a permission prompt on two things: any command matching an `ask` rule, and access to a protected file such as `.env`. In an unattended session a prompt is a silent stall. Prism therefore ships **no `ask` rules** — its `.claude/settings.json` only allows or denies, and a denied command returns to the agent at once with a reason, so it adapts. It also gives the lead agent sanctioned routes for what it would otherwise need a prompt for: `scripts/check_keys.py` reports which API keys are present without reading values into the transcript (the sub-agent launcher and Inspect load `.env` themselves, so the lead never reads or sources it), and the lead docs steer it to the Write/Edit tools for files and away from shell loops and `find -exec`. If you add your own permission rules for a target repo, prefer `deny` with an alternative over `ask`.
+
+What the settings can and cannot enforce: Bash routes to `.env` by name (`cat .env`, `. ./.env`, `grep KEY .env`, a `load_dotenv` / `dotenv_values` one-liner through any interpreter, including `.venv/bin/python`) are denied, but pattern rules cannot catch indirection — a variable holding the filename, a glob such as `.e*`, or a script that opens the file itself — nor `printenv` / `echo $VAR` of keys already exported in the shell. Those rest on the lead docs' rule, made easy to keep by `check_keys.py`.
+
 ## Using models from any provider
 
 Adding `OPENROUTER_API_KEY` to your `.env` is the main setup step needed to evaluate models from any provider — Meta, Google, DeepSeek, Qwen, Mistral and the rest — alongside or instead of Anthropic and OpenAI models. Name them with an `openrouter/` prefix when you agree the model set with the Orchestrator, e.g. `openrouter/meta-llama/llama-3.3-70b-instruct`.
@@ -152,6 +158,8 @@ prism/
 │   ├── ledger_to_json.py          # CANDIDATES.md -> Designer/Critic candidates JSON
 │   ├── check_report.py            # Sub-agent report conformance check (headings, signatures)
 │   ├── check_blinding.py          # Pre-Analyst blinding check (condition names in paths, log headers)
+│   ├── check_keys.py              # Which provider API keys are present (never their values)
+│   ├── new_ids.py                 # Fresh opaque condition ids (c_<4 hex>), collision-free
 │   ├── dump_transcripts.py        # .eval logs -> plain-text per-sample dumps for sub-agents
 │   └── lint_log.py                # Investigation-log lint (duplicate/stranded blocks)
 ├── docs/

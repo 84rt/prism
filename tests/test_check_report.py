@@ -268,6 +268,21 @@ def test_preamble_is_a_warning_not_a_defect() -> None:
     assert any("precede the first heading" in w for w in warnings)
 
 
+def test_cli_strips_preamble_before_emitting_the_report() -> None:
+    """The emitted report starts at its first `###`; check_report then sees no preamble."""
+    from subagents.cli import strip_preamble
+
+    report = _critique("Empty — nothing to add.")
+    emitted = strip_preamble("Now I have everything I need. Here is the report:\n\n" + report)
+    assert emitted == report and emitted.startswith("### ")
+    _, warnings = cr.check_report("critic", emitted, "candidate_critique")
+    assert not any("precede the first heading" in w for w in warnings)
+    # No `###` line at all: left untouched for check_report to flag, never emptied.
+    assert strip_preamble("**Summary** only bold\n") == "**Summary** only bold\n"
+    # A `####` sub-heading or a `##` title is not the first section heading.
+    assert strip_preamble("## Title\n#### x\n### Summary\nok") == "### Summary\nok"
+
+
 def test_no_headings_at_all_is_named() -> None:
     text = "**### Summary**\n\nbold pseudo-headings only\n"
     defects, _ = cr.check_report("critic", text, "diff_review")

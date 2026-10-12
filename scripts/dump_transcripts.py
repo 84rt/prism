@@ -15,9 +15,12 @@ computes no rates.
 (no scorer output reaches the Diagnostician before the Analyst reports) is the
 invariant most easily broken by a convenience tool, and the dumps are typically
 made *before* the Analyst reports — to brief the Critic on a round's transcripts,
-say. Emitting scores by default would make every dump a leak surface. Pass the
-flag only for logs whose scores are already known to the Diagnostician (the
-reference episode; logs the Analyst has already reported on).
+say. Emitting scores by default would make every dump a leak surface. The lead
+does not pass the flag for anything that is, or will become, a transcript
+source — the reference episode and the resample pool included (the episode's
+flag status is already in the user's brief, and a smoke-run lead used scored
+dumps to pick which epochs to read). Critic dumps are always score-free. The
+flag remains for post-hoc inspection of logs the Analyst has reported on.
 
 Usage:
     uv run python scripts/dump_transcripts.py <log.eval | dir> [...] --out <dir>

@@ -21,6 +21,12 @@ before any key check.
 Usage:
     uv run --no-project python scripts/openrouter_endpoints.py <model-id> \
         [--prefer fidelity|cost] [--timeout SECONDS]
+    uv run --no-project python scripts/openrouter_endpoints.py --list <id-prefix>
+
+`--list` prints the live catalogue models whose id starts with the prefix
+(e.g. `google/gemini`), newest first, with prompt/completion price per million
+tokens and context length — how the Diagnostician finds the cross-family
+Critic's candidates instead of trusting a written shortlist.
 
 Example:
     uv run --no-project python scripts/openrouter_endpoints.py \
@@ -751,15 +757,109 @@ def majority_context_length(lengths: list[int]) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# Catalogue listing
+# ---------------------------------------------------------------------------
+
+
+def list_models(prefix: str, timeout: float) -> list[dict[str, Any]]:
+    """Live catalogue models whose id starts with ``prefix``, newest first.
+
+    The Diagnostician picks the cross-family Critic as the cheapest non-Claude
+    frontier model that can sustain the role. A shortlist written into the
+    docs goes stale within months (a smoke-run lead found it so and fetched
+    ``/api/v1/models`` by hand), so the candidates are listed from the live,
+    key-free catalogue instead.
+
+    Parameters
+    ----------
+    prefix : str
+        Id prefix, e.g. ``"google/gemini"`` or ``"openai/gpt-5"``; matched
+        case-insensitively, with any ``openrouter/`` prefix dropped.
+    timeout : float
+        Socket timeout in seconds.
+
+    Returns
+    -------
+    list[dict]
+        One entry per match: ``{"id", "prompt_per_m", "completion_per_m",
+        "context_length", "created"}`` (prices in USD per million tokens,
+        ``created`` as a Unix timestamp), sorted newest first.
+
+    Raises
+    ------
+    RuntimeError
+        On a network failure, HTTP error or invalid JSON.
+    """
+    want = prefix.lower().removeprefix("openrouter/")
+    payload = _get_json(f"{OPENROUTER_API}/models", timeout)
+    out: list[dict[str, Any]] = []
+    for m in payload.get("data") or []:
+        mid = str(m.get("id") or "")
+        if not mid.lower().startswith(want):
+            continue
+        out.append({
+            "id": mid,
+            "prompt_per_m": _price_per_million(m.get("pricing"), "prompt"),
+            "completion_per_m": _price_per_million(m.get("pricing"), "completion"),
+            "context_length": m.get("context_length"),
+            "created": m.get("created") or 0,
+        })
+    return sorted(out, key=lambda e: (-int(e["created"] or 0), e["id"]))
+
+
+def format_model_list(models: list[dict[str, Any]]) -> str:
+    """Render `list_models` output as an aligned table.
+
+    Parameters
+    ----------
+    models : list[dict]
+        Output of `list_models`.
+
+    Returns
+    -------
+    str
+        One line per model, e.g.
+        ``google/gemini-3-pro  $2.00/M in  $12.00/M out  1048576 ctx  2026-05-01``.
+    """
+    from datetime import datetime, timezone
+
+    def price(v: float | None) -> str:
+        return "?" if v is None else f"${v:.2f}/M"
+
+    width = max((len(m["id"]) for m in models), default=0)
+    lines = []
+    for m in models:
+        day = datetime.fromtimestamp(m["created"], tz=timezone.utc).date().isoformat() if m["created"] else "?"
+        lines.append(
+            f"{m['id'].ljust(width)}  {price(m['prompt_per_m'])} in  {price(m['completion_per_m'])} out  "
+            f"{m['context_length'] or '?'} ctx  {day}"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    """Command-line entry point.
+
+    Parameters
+    ----------
+    argv : list[str] | None
+        Arguments (defaults to ``sys.argv[1:]``).
+    """
     parser = argparse.ArgumentParser(
         description="Enumerate OpenRouter endpoints and recommend a provider to pin."
     )
-    parser.add_argument("model", help="Model id, e.g. meta-llama/llama-3.3-70b-instruct")
+    parser.add_argument("model", nargs="?", help="Model id, e.g. meta-llama/llama-3.3-70b-instruct")
+    parser.add_argument(
+        "--list",
+        metavar="PREFIX",
+        help="List live catalogue models whose id starts with PREFIX (e.g. google/gemini), "
+        "with price and context, newest first; no model argument.",
+    )
     parser.add_argument(
         "--prefer",
         choices=["fidelity", "cost"],
@@ -769,7 +869,20 @@ def main() -> None:
     parser.add_argument(
         "--timeout", type=float, default=30.0, help="Per-request timeout in seconds."
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if (args.list is None) == (args.model is None):
+        parser.error("give either a model id or --list PREFIX")
+
+    # --- Listing mode: a table, not the selection report ---
+    if args.list is not None:
+        try:
+            models = list_models(args.list, args.timeout)
+        except RuntimeError as exc:
+            # Plain text on stderr: stdout in this mode is a table, not JSON.
+            print(f"openrouter_endpoints: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(format_model_list(models) if models else f"no catalogue model id starts with {args.list!r}")
+        return
 
     try:
         report = select(args.model, args.prefer, args.timeout)

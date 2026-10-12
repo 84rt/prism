@@ -65,6 +65,29 @@ RESTRICTED_FILES: dict[str, str] = {
         "Persisted sub-agent requests: hypotheses, candidates and condition "
         "rationales the analyst's blinding withholds."
     ),
+    # The lead drafts requests under `requests/drafts/` (covered above, since
+    # directory patterns match beneath); one smoke-run lead used a sibling
+    # `request_drafts/` holding candidate ledgers and Critic/Designer requests.
+    "investigations/*/request_drafts/": (
+        "Draft sub-agent requests (legacy layout): hypotheses, candidates and "
+        "condition rationales the analyst's blinding withholds."
+    ),
+    # Plain-text dumps made by `scripts/dump_transcripts.py` for the lead's own
+    # reading and the Critic (`<iteration>/transcripts/`), and the reference
+    # episode's dump for the Mapper (`artefacts/reference/`). A dump may carry
+    # scores, and its directory tree mirrors the lead's choices; the analyst
+    # reads `.eval` logs through Scout and the Inspect API and never needs them.
+    "investigations/*/transcripts/": (
+        "Transcript dumps prepared for other roles; they may carry scores. Read "
+        "the .eval logs your request names through Scout or the Inspect API instead."
+    ),
+    # Reasons are mode-neutral on purpose: a denial message reaches whichever
+    # mode tripped it, and the Orchestrator-mode Analyst must meet no
+    # forensic-only term.
+    "artefacts/reference/": (
+        "A plain-text dump prepared for another role. Read the .eval logs your "
+        "request names through Scout or the Inspect API instead."
+    ),
     # Other roles' outputs under any artefacts tree. The Analyst's own
     # (`artefacts/analyst/`) and the Executor's run records stay readable.
     "artefacts/designer/": (
@@ -97,7 +120,9 @@ RESTRICTED_FILES[LABEL_MAP_PATTERN] = (
 )
 
 
-def normalise_construal_checks(spec: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
+def normalise_construal_checks(
+    spec: dict[str, Any], id_prefix: str = "M"
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Split a behaviour spec into the grader part and the construal-check set.
 
     The contract's only shape is `construal_checks`: a list of de-identified
@@ -111,6 +136,11 @@ def normalise_construal_checks(spec: dict[str, Any]) -> tuple[dict[str, Any], li
     ----------
     spec : dict
         The request's `behaviour_spec`, as sent.
+    id_prefix : str
+        Prefix for ids assigned to checks sent without one: `M` in Orchestrator
+        mode, `K` in forensic mode, where `M1` is already the ledger's
+        must-exclude candidate and a check called `M1` would be ambiguous in
+        every table that cites both.
 
     Returns
     -------
@@ -150,7 +180,7 @@ def normalise_construal_checks(spec: dict[str, Any]) -> tuple[dict[str, Any], li
             item = {"property": item}
         if not isinstance(item, dict) or not str(item.get("property", "")).strip():
             raise ValueError(f"construal check #{i} has no non-empty 'property'")
-        checks.append({"id": str(item.get("id") or f"M{i}"), "property": str(item["property"]).strip()})
+        checks.append({"id": str(item.get("id") or f"{id_prefix}{i}"), "property": str(item["property"]).strip()})
 
     ids = [c["id"] for c in checks]
     if len(set(ids)) != len(ids):
@@ -277,7 +307,7 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
         # `run_cli` maps RuntimeError → exit 2 (agent error); a bare ValueError
         # would escape as a traceback with exit 1 and be misread as an SDK crash.
         try:
-            grader_spec, checks = normalise_construal_checks(data["behaviour_spec"])
+            grader_spec, checks = normalise_construal_checks(data["behaviour_spec"], id_prefix="K")
         except ValueError as exc:
             raise RuntimeError(f"Transcript analyst: malformed behaviour_spec — {exc}") from exc
         sections.append(

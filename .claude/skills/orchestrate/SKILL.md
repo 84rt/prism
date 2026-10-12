@@ -53,6 +53,14 @@ The pipeline is not optional and is not a default you may opt out of when the ev
 
 **Artefacts management.** Create an `artefacts/` directory within each iteration directory at `investigations/<investigation_name>/<iteration_name>/artefacts/` and pass it to the launcher as `--artefacts-dir`, with the iteration name as `--tag`. The launcher writes each report to `artefacts/<role>/report_<tag>_<role>_<n>.md` — there is no separate save step; cite that path in the log. Pass the same `artefacts/` path to the Transcript Analyst via its `artefacts_dir` input field — it writes its own outputs to `artefacts/analyst/`. This keeps all iteration outputs co-located.
 
+**Working rules for an unattended run** — each one cost a smoke run turns or stalled it on a permission prompt (details: `orchestrator_responsibilities.md §State Management`):
+
+- **Never read or source `.env`** — no `cat`, `grep`, `source`, or `dotenv` one-liner, through any interpreter. Check keys with `uv run --no-project python scripts/check_keys.py` (presence only, never values); the launcher and Inspect load `.env` themselves.
+- **Write and append files with the Write/Edit tools**, never shell redirection (`cat > file <<EOF`, `>> INVESTIGATION-LOG.md`).
+- **No shell loops** (`for`/`while` are denied): one command per item, or a script. Mint opaque ids with `uv run --no-project python scripts/new_ids.py <N> --map investigations/<name>`.
+- **Request drafts live under `investigations/<name>/requests/drafts/`** — never in a session scratchpad or another directory the Analyst could read; the hypothesis is in the Explorer's request.
+- **Hash with `sha256sum <files>`** (or `find … | sort | xargs sha256sum`), never `find -exec`.
+
 ## Pipeline
 
 The full pipeline has three phases:

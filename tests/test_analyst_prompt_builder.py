@@ -153,6 +153,15 @@ def test_orchestrator_mode_never_meets_forensic_terms(monkeypatch):
             assert term not in text, f"forensic-only term {term!r} in the Orchestrator-mode {where}"
 
 
+def test_denial_reasons_carry_no_forensic_terms():
+    """A denial reason reaches whichever mode trips the pattern, the Orchestrator's included."""
+    from subagents.transcript_analyst.agent import RESTRICTED_FILES
+
+    for pattern, reason in RESTRICTED_FILES.items():
+        for term in FORENSIC_ONLY_TERMS:
+            assert term not in reason, f"{term!r} in the denial reason for {pattern!r}"
+
+
 def test_orchestrator_mode_construal_checks_render_without_forensic_text(monkeypatch):
     """Orchestrator mode sends checks at the top level; they render, and nothing forensic leaks in."""
     got = _build(monkeypatch, **BASE_REQUEST, construal_checks=CHECKS)
@@ -196,6 +205,18 @@ def test_normaliser_assigns_ids_and_strips_check_fields():
     grader, checks = normalise_construal_checks({"description": "d", "construal_checks": ["p one", {"property": "p two"}]})
     assert grader == {"description": "d"}
     assert checks == [{"id": "M1", "property": "p one"}, {"id": "M2", "property": "p two"}]
+
+
+def test_forensic_mode_assigns_k_ids(monkeypatch):
+    # Forensic mode must not mint `M1`: the ledger's must-exclude candidate is M1.
+    _, checks = normalise_construal_checks({"construal_checks": ["p"]}, id_prefix="K")
+    assert checks == [{"id": "K1", "property": "p"}]
+    spec = {"description": "d", "construal_checks": ["p one"]}
+    prompt = _build(monkeypatch, **BASE_REQUEST, behaviour_spec=spec)["prompt"]
+    assert '"id": "K1"' in prompt and '"id": "M1"' not in prompt
+    # Orchestrator mode keeps `M<n>`.
+    prompt = _build(monkeypatch, **BASE_REQUEST, construal_checks=["p one"])["prompt"]
+    assert '"id": "M1"' in prompt
 
 
 @pytest.mark.parametrize(

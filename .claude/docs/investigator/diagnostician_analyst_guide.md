@@ -21,7 +21,7 @@ Forensic requests and reports are specified across two documents, split delibera
 
 Two occasions, both mandatory in the pipeline:
 
-- **Step 1c (build).** The grader does not exist yet. The invocation carries the reference transcript and an unpopulated `grader_dir`; the Analyst designs the grader from the original episode, validates it against the resample pool, persists it, and reports the baseline rate.
+- **Step 1c (build).** The grader does not exist yet. The invocation carries the reference transcript and an unpopulated `grader_dir`; the Analyst designs the grader from the original episode, validates it against the resample pool, persists it, and reports the baseline rate. The transcript source is the **fresh 1b resample pool only**; the reference transcript travels in `behaviour_spec.reference_transcript` and is **never a condition** — not as the original file, not as a copy staged under a `logs/<id>/` directory, not as "an earlier run of the same task". Sending it as one measures the selected episode as if it were a draw and hands the Analyst the same file under two roles; `check_blinding.py` blocks it (same realpath or same content hash).
 - **Step 3c (measure).** Every subsequent iteration. The invocation carries the same `grader_dir`, now populated; the Analyst loads the grader unmodified and applies it across this round's conditions, alongside a fresh open-ended scan and this round's manipulation check.
 
 Never invoke the Analyst to "just get the numbers" without the neutral topic: forensic mode is two measurements per invocation, always both. The open-ended half is a primary source of new candidates (3d step 7), not decoration, and the addendum forbids dropping it for budget.
@@ -33,7 +33,7 @@ Never invoke the Analyst to "just get the numbers" without the neutral topic: fo
     "description": "...",
     "reference_transcript": "...",
     "grader_dir": "/abs/path/to/investigations/<name>/artefacts/analyst/grader",
-    "construal_checks": [{"id": "M1", "property": "..."}, {"id": "M2", "property": "..."}]
+    "construal_checks": [{"id": "K1", "property": "..."}, {"id": "K2", "property": "..."}]
 }
 ```
 
@@ -60,7 +60,7 @@ Pass the **same absolute path every round** — the investigation-level director
 
 ### `construal_checks` — one de-identified set per round
 
-Every variant's manipulation check, written at 3a, goes into **one set** on the round's single Analyst invocation. Each entry is an observable construal property — what an independent blinded judge should look for to confirm the model's *reading* shifted — with an opaque id (`M1`, `M2`, …) and **no indication of which condition it bears on**. The Analyst builds one validated scanner per entry, rates every entry across every condition, reports the full pairwise difference matrix and a scorability label, and states **no verdict**.
+Every variant's manipulation check, written at 3a, goes into **one set** on the round's single Analyst invocation. Each entry is an observable construal property — what an independent blinded judge should look for to confirm the model's *reading* shifted — with an opaque id (`K1`, `K2`, … — not `M<n>`, which collides with the ledger's must-exclude candidate `M1`; `agent.py` assigns `K<n>` in this mode to any check sent without an id) and **no indication of which condition it bears on**. The Analyst builds one validated scanner per entry, rates every entry across every condition, reports the full pairwise difference matrix and a scorability label, and states **no verdict**.
 
 - **Record the private mapping before sending.** Beside the label mapping in the log, write the check→variant table with each check's **intended direction** (which rate should rise or fall, in which condition, against which control). The verdicts are derived from this after the report arrives (§Deriving the verdicts); a direction not written down before the rates were read is not pre-registered.
 - The test of a good check is that **it could come out negative**. *"The deadline sentence is absent"* cannot fail and is worthless; *"the reasoning treats the deadline as binding — reasoning about time pressure, prioritising speed, declining to verify"* can.

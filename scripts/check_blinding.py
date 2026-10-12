@@ -46,6 +46,13 @@ What blocks
   construal checks). Role words are not checked there: a behaviour
   description may legitimately say "control".
 * A source whose ``.eval`` headers all fail to read (fail closed: unverified).
+* A transcript-source ``.eval`` that **is the original episode**: the same
+  file (realpath) as the request's ``behaviour_spec.reference_transcript``, or a
+  byte-identical copy of it (same SHA-256). The reference defines the behaviour
+  class and is never a measured condition — in one smoke run the lead copied
+  the flagged log into the round's ``logs/<id>/`` and sent it beside the fresh
+  resample, and the Analyst spotted the identical file. (Only checkable when the
+  whole request is given: a bare mapping carries no reference.)
 
 Path components are checked from the investigation directory (the label map's
 directory) down when the sources sit beneath it — so a role-word directory such
@@ -62,7 +69,13 @@ sources living under differently shaped directories, or task files of
 differently shaped paths once opaque ids are masked (the odd one out can be
 singled out — e.g. a control running the unprefixed ``task.py``); a role word in
 a value common to every condition; a source with no ``.eval`` files; a header
-that could not be read; map ids not in ``c_<4 hex>`` form.
+that could not be read; map ids not in ``c_<4 hex>`` form. Conditions whose
+headers differ in **task name, epoch count or ``created`` date** (a log from
+another run or another day sits among the round's arms, and the Analyst can
+single it out). ``execution_notes`` that use a **role or provenance word**
+(``earlier``, ``original``, ``reference``, ``previous``, ``prior``, ``flagged``,
+or a role word): the notes carry non-directional execution facts, and "an
+earlier run" tells the Analyst where a condition came from.
 
 Usage
 -----
@@ -91,6 +104,7 @@ the check is safe to run during the score blackout.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -106,6 +120,14 @@ from typing import Any
 # Words that name an arm's role rather than its content. Any of them on a
 # discriminating channel tells the Analyst which condition is the comparator.
 ROLE_WORDS: tuple[str, ...] = ("baseline", "control", "treatment", "resample")
+
+# Words that say where a condition came from rather than how it ran. In
+# `execution_notes` ("condition_B: an earlier run of the same task") they tell
+# the Analyst which source is the original or a frozen pool, so they warn.
+PROVENANCE_WORDS: tuple[str, ...] = ("earlier", "original", "reference", "previous", "prior", "flagged")
+
+# Hash in 1 MiB blocks so a large log never sits in memory whole.
+_HASH_BLOCK = 1 << 20
 
 # The opaque execution id the lead agent assigns every condition (`c_3f9a`).
 OPAQUE_ID_RE = re.compile(r"c_[0-9a-f]{4}")
@@ -304,6 +326,55 @@ def load_transcript_source(path: str) -> tuple[dict[str, str], list[tuple[str, s
             raise UsageError(f"transcript source for {label!r} does not exist: {d}")
         sources[str(label)] = os.path.abspath(d)
     return sources, request_strings
+
+
+def load_request_extras(path: str) -> tuple[str | None, list[str]]:
+    """The reference transcript and execution notes of a whole Analyst request.
+
+    Parameters
+    ----------
+    path : str
+        The transcript-source JSON given on the command line (already
+        validated by `load_transcript_source`).
+
+    Returns
+    -------
+    tuple[str | None, list[str]]
+        ``(reference_transcript, execution_notes)``: the request's
+        ``behaviour_spec.reference_transcript`` (``None`` for a bare mapping or
+        an Orchestrator-mode request) and its ``execution_notes`` as a list of
+        strings (empty when absent).
+    """
+    data = _load_json(path, "transcript source")
+    if not isinstance(data, dict) or "transcript_source" not in data:
+        return None, []
+    spec = data.get("behaviour_spec")
+    ref = spec.get("reference_transcript") if isinstance(spec, dict) else None
+    notes = data.get("execution_notes")
+    if isinstance(notes, str):
+        notes = [notes]
+    notes = [str(n) for n in notes] if isinstance(notes, list) else []
+    return (ref if isinstance(ref, str) and ref.strip() else None), notes
+
+
+def sha256_file(path: str) -> str:
+    """Hex SHA-256 of a file's bytes.
+
+    Parameters
+    ----------
+    path : str
+        File to hash.
+
+    Returns
+    -------
+    str
+        The digest.
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(_HASH_BLOCK), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -515,7 +586,7 @@ def _flatten(prefix: str, node: Any) -> list[tuple[str, str]]:
     return [(prefix, "" if node is None else str(node))]
 
 
-def header_fields(eval_path: str) -> tuple[list[tuple[str, str, str]], dict[str, Any]]:
+def header_fields(eval_path: str) -> tuple[list[tuple[str, str, str]], dict[str, Any], dict[str, str]]:
     """Read the naming fields of one ``.eval`` header.
 
     Only naming fields are returned; scorer results are never touched (the
@@ -528,11 +599,13 @@ def header_fields(eval_path: str) -> tuple[list[tuple[str, str, str]], dict[str,
 
     Returns
     -------
-    tuple[list[tuple[str, str, str]], dict[str, Any]]
-        ``(fields, task_args)`` where each field is ``(channel, field, value)``
-        — e.g. ``("tags", "tags", "cond:c_3f9a")``,
-        ``("metadata", "condition", "c_3f9a")`` — and ``task_args`` is the
-        header's full ``task_args`` mapping.
+    tuple[list[tuple[str, str, str]], dict[str, Any], dict[str, str]]
+        ``(fields, task_args, profile)`` where each field is
+        ``(channel, field, value)`` — e.g. ``("tags", "tags", "cond:c_3f9a")``,
+        ``("metadata", "condition", "c_3f9a")`` —, ``task_args`` is the
+        header's full ``task_args`` mapping, and ``profile`` is the run's shape
+        (``{"task": "episode", "epochs": "20", "created": "2026-10-12"}``),
+        compared across conditions to spot a log from another run.
     """
     from inspect_ai.log import read_eval_log
 
@@ -555,7 +628,16 @@ def header_fields(eval_path: str) -> tuple[list[tuple[str, str, str]], dict[str,
         # The key is checked as well as the value: a task that records
         # `{"treatment_arm": true}` leaks through its key.
         fields.append(("metadata", key, f"{key}={value}"))
-    return fields, dict(spec.task_args or {})
+    # The run's shape: same task, same epoch count, same day for every arm of a
+    # round. `created` is ISO-8601, so its first ten characters are the date.
+    config = getattr(spec, "config", None)
+    profile = {
+        "task": str(spec.task or ""),
+        # Unset epochs means one epoch, so `None` and `1` compare equal.
+        "epochs": str(getattr(config, "epochs", None) or 1),
+        "created": str(spec.created or "")[:10],
+    }
+    return fields, dict(spec.task_args or {}), profile
 
 
 def recorded_condition(fields: list[tuple[str, str, str]]) -> list[str]:
@@ -602,6 +684,14 @@ def check(label_map_path: str, source_path: str) -> tuple[list[Finding], list[st
     """
     real_names, map_ids, warnings = load_label_map(label_map_path)
     sources, request_strings = load_transcript_source(source_path)
+    reference, notes = load_request_extras(source_path)
+    if reference and (not os.path.isfile(reference) or not reference.endswith(".eval")):
+        # The Analyst reads the reference as a log; a text dump here is both a
+        # request error and a reference this check cannot compare with logs.
+        warnings.append(
+            f"behaviour_spec.reference_transcript is not a readable .eval file ({reference}) — "
+            "could not confirm the original episode is absent from the transcript source"
+        )
     tokens = build_tokens(real_names)
     real_tokens = [t for t in tokens if t.kind == "real name"]
     # The map lives in the investigation directory, so paths are judged from
@@ -659,9 +749,18 @@ def check(label_map_path: str, source_path: str) -> tuple[list[Finding], list[st
     per_cond_fields: dict[str, set[tuple[str, str, str]]] = {}
     per_cond_args: dict[str, list[dict[str, Any]]] = {}
     per_cond_taskfile_shape: dict[str, set[str]] = {}
+    per_cond_profile: dict[str, dict[str, set[str]]] = {}
     file_of: dict[tuple[str, tuple[str, str, str]], str] = {}
     for label, root in sources.items():
         names, evals, link_targets = walk_source(root)
+        # The original episode is never a condition (block, any channel).
+        for ev in reference_copies(evals, reference):
+            findings.append(Finding(
+                "reference", label, ev, "reference_transcript",
+                "this .eval is the request's behaviour_spec.reference_transcript (same file or "
+                "byte-identical copy); the original episode defines the behaviour class and is never a "
+                "measured condition — the transcript source is the fresh resample pool only",
+            ))
         for target in link_targets:
             if _is_under(target, link_root):
                 comps = Path(os.path.relpath(target, link_root)).parts
@@ -687,11 +786,13 @@ def check(label_map_path: str, source_path: str) -> tuple[list[Finding], list[st
         readable = 0
         for ev in evals:
             try:
-                fields, task_args = header_fields(ev)
+                fields, task_args, profile = header_fields(ev)
             except Exception as exc:  # noqa: BLE001 — any unreadable header is reported, not fatal
                 warnings.append(f"{label}: could not read header of {ev} ({type(exc).__name__}: {exc}) — header channels unchecked for this file")
                 continue
             readable += 1
+            for key, value in profile.items():
+                per_cond_profile.setdefault(label, {}).setdefault(key, set()).add(value)
             for f in fields:
                 per_cond_fields.setdefault(label, set()).add(f)
                 file_of.setdefault((label, f), ev)
@@ -754,9 +855,147 @@ def check(label_map_path: str, source_path: str) -> tuple[list[Finding], list[st
             "singled out — name every arm's environment copy by its id, the control's included"
         )
 
+    # --- Run shape: task name, epoch count, created date (warn) ---
+    warnings.extend(profile_warnings(per_cond_profile))
+
     # --- Channel 5: task_args (warn, never block) ---
     warnings.extend(task_args_warnings(per_cond_args, tokens))
+
+    # --- execution_notes: role and provenance words (warn) ---
+    warnings.extend(notes_warnings(notes))
     return findings, warnings
+
+
+def reference_copies(evals: list[str], reference: str | None) -> list[str]:
+    """The transcript-source logs that are the reference transcript itself.
+
+    Parameters
+    ----------
+    evals : list[str]
+        ``.eval`` paths under one transcript source.
+    reference : str | None
+        The request's ``behaviour_spec.reference_transcript``, if any.
+
+    Returns
+    -------
+    list[str]
+        Every entry of ``evals`` that resolves to the same file as
+        ``reference`` or has identical bytes (sizes are compared first, so
+        only a same-sized log is ever hashed).
+    """
+    if not reference or not os.path.isfile(reference):
+        return []
+    ref_real = os.path.realpath(reference)
+    ref_size = os.path.getsize(ref_real)
+    ref_hash: str | None = None
+    out: list[str] = []
+    for ev in evals:
+        real = os.path.realpath(ev)
+        if real == ref_real:
+            out.append(ev)
+            continue
+        try:
+            if os.path.getsize(real) != ref_size:
+                continue
+            ref_hash = ref_hash or sha256_file(ref_real)
+            if sha256_file(real) == ref_hash:
+                out.append(ev)
+        except OSError:
+            # A dangling link or unreadable log is not the reference; its
+            # header failure is reported by the header channel.
+            continue
+    return out
+
+
+def profile_warnings(per_cond_profile: dict[str, dict[str, set[str]]]) -> list[str]:
+    """Name every run-shape field that differs between conditions.
+
+    Parameters
+    ----------
+    per_cond_profile : dict[str, dict[str, set[str]]]
+        Label → field (``task``, ``epochs``, ``created``) → the values seen
+        across that condition's logs.
+
+    Returns
+    -------
+    list[str]
+        One warning per differing field, e.g. ``conditions differ in header
+        epochs (condition_A: 20; condition_B: 30)``.
+    """
+    if len(per_cond_profile) < 2:
+        return []
+    out: list[str] = []
+    for key in ("task", "epochs", "created"):
+        values = {lbl: frozenset(p.get(key, set())) for lbl, p in per_cond_profile.items()}
+        differs = len(set(values.values())) > 1
+        if differs and key == "created":
+            # A round that straddles midnight UTC spans two adjacent dates;
+            # only a gap of more than a day says "another run".
+            differs = _date_span_days(set().union(*values.values())) > 1
+        if differs:
+            shown = "; ".join(f"{lbl}: {', '.join(sorted(v)) or '?'}" for lbl, v in sorted(values.items()))
+            out.append(
+                f"conditions differ in header {key} ({shown}) — a log from another run or another day "
+                "sits among this invocation's arms and the Analyst can single it out. Every condition "
+                "should come from the same execution; if one is a frozen pool, record the exposure"
+            )
+    return out
+
+
+def _date_span_days(dates: set[str]) -> int:
+    """Days between the earliest and latest of some ISO dates.
+
+    Parameters
+    ----------
+    dates : set[str]
+        ``YYYY-MM-DD`` strings; unparseable or empty ones are ignored.
+
+    Returns
+    -------
+    int
+        ``{"2026-10-11", "2026-10-12"}`` -> 1; 0 when fewer than two parse.
+    """
+    from datetime import date
+
+    parsed = []
+    for d in dates:
+        try:
+            parsed.append(date.fromisoformat(d))
+        except ValueError:
+            continue
+    return (max(parsed) - min(parsed)).days if len(parsed) > 1 else 0
+
+
+def notes_warnings(notes: list[str]) -> list[str]:
+    """Flag role and provenance words in ``execution_notes``.
+
+    Parameters
+    ----------
+    notes : list[str]
+        The request's execution notes.
+
+    Returns
+    -------
+    list[str]
+        One warning per note naming the words it uses
+        (``"an earlier run"`` -> ``earlier``).
+    """
+    # Role words reuse `build_tokens`' inflection rules (`resampled`, not
+    # `controller`); provenance words allow only a plural or adverb ending, so
+    # `previously` and `references` hit but `priority` does not.
+    role_tokens = [t for t in build_tokens([]) if t.kind == "role word"]
+    provenance = re.compile(rf"(?<![a-z])({'|'.join(PROVENANCE_WORDS)})(?:s|ly)?(?![a-z])", re.I)
+    out: list[str] = []
+    for note in notes:
+        hits = sorted({t.text for t in find_tokens(note, role_tokens)}
+                      | {m.group(1).lower() for m in provenance.finditer(note)})
+        if hits:
+            out.append(
+                f"execution_notes use role/provenance word(s) {', '.join(hits)} in {note[:120]!r} — "
+                "notes carry non-directional execution facts only; where a condition came from "
+                "(an earlier run, the original episode) is a role disclosure"
+            )
+    return out
 
 
 def task_args_warnings(per_cond_args: dict[str, list[dict[str, Any]]], tokens: list[Token]) -> list[str]:
