@@ -9,22 +9,24 @@ Sub-agents are invoked as CLI scripts via the Agent SDK, always through the deta
 ```bash
 uv run python scripts/launch_subagent.py launch <role> <input.json> \
     --investigation investigations/<name> --tag <label> [--artefacts-dir <dir>] [--cwd <dir>]
-uv run python scripts/launch_subagent.py wait <receipt.json> --timeout 540   # exit 0 finished, 3 still running
+uv run python scripts/launch_subagent.py wait <receipt.json> --timeout 540   # exit 0 finished, 3 still running, 4 died (terminal)
 uv run python scripts/launch_subagent.py status <receipt.json>
 uv run python scripts/launch_subagent.py list investigations/<name> [--unfinished]
 ```
 
 - **Roles**: `explorer`, `executor`, `analyst`, `mapper`, `designer`, `critic`.
-- **`--tag`**: the iteration or phase label (`00_resample`, `iter1`, `phase4`); the launcher assigns `<n>` so repeated invocations of one role never collide.
+- **`--tag`**: the iteration or phase label (`iter_00`, `iter_01`, `phase4`) — keep it neutral, since it is written into every report, stderr, cost and request filename in the artefacts tree; the launcher assigns `<n>` so repeated invocations of one role never collide.
 - **`--artefacts-dir`**: where the outputs land; defaults to `investigations/<name>/artefacts`. Pass the iteration's `artefacts/` for iteration-scoped roles.
 - **What the launcher does**: copies the request to `investigations/<name>/requests/<tag>_<role>_<n>.json` (persistent — the session scratchpad is wiped on restart), starts the sub-agent under its own session (`setsid` semantics, so a harness teardown or a Bash timeout cannot kill it), writes stdout to `<artefacts-dir>/<role>/report_<tag>_<role>_<n>.md` and stderr to `stderr_<tag>_<role>_<n>.log`, records the SDK cost sidecar `cost_<tag>_<role>_<n>.json`, and prints a **receipt** JSON (pid, paths, `receipt_<tag>_<role>_<n>.json`) immediately.
-- **Waiting**: `wait` blocks up to `--timeout` seconds (default 540, under the Bash tool's 10-minute cap) and exits 0 when the sub-agent has finished with an exit code recorded in the receipt, 3 if it is still running — call it again. Use absolute paths throughout; the Bash tool's working directory drifts.
+- **Waiting**: `wait` blocks up to `--timeout` seconds (default 540, under the Bash tool's 10-minute cap) and exits 0 when the sub-agent has finished with an exit code recorded in the receipt (or failed to start), 3 if it is still running — call it again — and **4 if its process died without recording an exit** (supervisor killed, host restart): that is terminal, so stop polling and handle it as a failed invocation (`list --unfinished` gives its relaunch command). `status` uses the same codes. A receipt records each pid with its process start time, so a pid recycled by an unrelated process after a restart reads as dead, not running. Use absolute paths throughout; the Bash tool's working directory drifts.
 - **Reading the report**: the report file *is* the sub-agent's stdout. There is no separate "save stdout to `report.md`" step; cite the per-invocation path in the log.
 - **Exit codes** (recorded in the receipt): 0 = success, 1 = input validation error, 2 = agent error. `scripts/spend.py investigations/<name>` sums the cost sidecars and eval token usage.
 - **Credential exhaustion** is reported distinctly: an exit 2 whose provider refused on account credit or a usage cap carries `credentials_exhausted (route=<route>, model=<model>)` in its stderr, and the receipt and cost sidecar record `failure_class: credentials_exhausted` plus the route (`status` and `list` show it). It is not transient — re-invoking on the same route fails identically — and when no live route is left it triggers the lead doc's Suspension procedure (`diagnostician_responsibilities.md` / `orchestrator_responsibilities.md §Sub-Agent Failure Handling`).
 - **`list --unfinished`** prints only the invocations not yet cleanly finished (exit 0), each with a ready-to-run `launch` command for its persisted request — or "still running" for live ones. A failed invocation is left out once a later one of the same role and tag, asking for the same work (the request equal apart from `subagent_*` and the re-ask pair `conformance_defects` / `previous_report`), has exited 0. Its output is what `RESUME.md`'s relaunch section is pasted from — after pruning any non-credential failure already handled another way (a request fixed and relaunched under a different task is not recognised as superseding it).
 
-The underlying CLI the launcher runs is `uv run --with claude-agent-sdk --with python-dotenv python subagents/<agent>/main.py <input.json> [--cwd <dir>]` — input JSON with agent-specific fields (below), markdown report on stdout, errors on stderr. All agents run fire-and-forget — no back-and-forth.
+The underlying CLI the launcher runs is `uv run --with claude-agent-sdk==0.2.165 --with python-dotenv python subagents/<agent>/main.py <input.json> [--cwd <dir>]` — input JSON with agent-specific fields (below), markdown report on stdout, errors on stderr. All agents run fire-and-forget — no back-and-forth. The SDK version is pinned (`launch_subagent.CLAUDE_AGENT_SDK_REQUIREMENT`) to the release the test suite runs against, because the isolation below was verified on it; move it deliberately.
+
+**Isolation.** A sub-agent sees only what its request and contract give it. The runner loads no settings files (`setting_sources=[]`: no `CLAUDE.md`, no auto-memory, no user or project hooks, plugins, skills or permission rules from whichever repo it runs in), offers exactly its role's tools (`tools=` its allowed list — no Skill, Agent/Task, Edit or NotebookEdit), and enforces its role's denied files with PreToolUse hooks on Read, Grep, Glob and (best-effort, word-level) Bash, after normalising every path. A content search over a directory (Grep, or Bash `grep -r` / `rg` / `find`) is denied when a restricted file lies beneath it — or when the tree is too large to check — with a request to narrow it; Bash wildcards are checked as the paths they expand to. The condition label map (`CONDITION_LABEL_MAP*`) is denied to every sub-agent. The hooks catch the accidental read, not a determined one; an OS-level sandbox is future work.
 
 ### Optional: `subagent_max_turns` (all agents)
 
@@ -34,7 +36,7 @@ Every agent's input JSON accepts an optional `subagent_max_turns` field — **th
 
 ### Optional: `subagent_model` (all agents)
 
-Every agent's input JSON accepts an optional `subagent_model` field — **the Claude model that the sub-agent itself runs on**. If omitted, the sub-agent uses the scaffold default. Use it to:
+Every agent's input JSON accepts an optional `subagent_model` field — **the model that the sub-agent itself runs on** (a Claude model by default; any family via `subagent_route: "openrouter"`). If omitted, the sub-agent uses the scaffold default. Use it to:
 
 - run a sub-agent on a **less refusal-prone model** when an eval's content trips the default model's safety filters (e.g. dangerous-capability evals — the situation that motivated this field); or
 - run sub-agents on a **cheaper or weaker model** (e.g. a Sonnet-class model) when the User prefers that cost/quality trade-off.
@@ -108,10 +110,10 @@ The rule: **never pass a `.eval` path to a sub-agent as something to read. Dump 
 uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 ```
 
-- **Layout.** One text file per sample. For a directory input the log's relative path is mirrored, so `iterations/01/logs --out iterations/01/transcripts` yields `transcripts/<condition>/<log>/<sample_id>_epoch_<n>.txt` and a whole condition can be handed over as one directory. Blocks longer than 2,500 characters are truncated at both ends (`--cap 0` for none); reasoning is rendered in full where the provider exposes it and as the provider summary where it is encrypted. `--sample-id` / `--epoch` select within a log.
+- **Layout.** One text file per sample. For a directory input the log's relative path is mirrored, so `iterations/01_round1/logs --out iterations/01_round1/transcripts` yields `transcripts/<condition id>/<log>/<sample_id>_epoch_<n>.txt` (e.g. `transcripts/c_3f9a/…`) and a whole condition can be handed over as one directory. Blocks longer than 2,500 characters are truncated at both ends (`--cap 0` for none); reasoning is rendered in full where the provider exposes it and as the provider summary where it is encrypted. `--sample-id` / `--epoch` select within a log.
 - **Scores are omitted by default.** Pass `--with-scores` only for logs whose scores the Diagnostician is already entitled to see: the reference episode, or logs the Analyst has reported on. Dumping this round's logs for the Critic *before* the Analyst reports is exactly when the default matters — it keeps a convenience tool from becoming a score-blackout leak.
 - **Where it applies.** The Mapper's `reference_transcript` (dump the original episode once at Phase 0, to `artefacts/reference/`, and send that path). The Critic's `transcript_paths` in `candidate_critique` mode (the original plus the resample selection at step 2; the round's transcripts at 3d). Any other field that hands a sub-agent a log to read. **The Analyst is the exception**: its `transcript_source` and `behaviour_spec.reference_transcript` take `.eval` paths, because it reads logs through Scout and the Inspect API, never as text.
-- The Diagnostician's own transcript reading (Phase 2, 3d step 7) is unaffected — read the dumps or the logs via the Inspect API, whichever is convenient. The rule is about what *sub-agents* receive.
+- The Diagnostician's own transcript reading (steps 2 and 3d, per `diagnose/SKILL.md`) is unaffected — read the dumps or the logs via the Inspect API, whichever is convenient. The rule is about what *sub-agents* receive.
 
 ## Environment Explorer
 
@@ -124,7 +126,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
     "experiment_description": "Testing whether X affects Y...",
     "environment_path": "/absolute/path/to/eval/environment",
     "constraints": "Focus on system prompt and scoring; skip the scaffold directory.",
-    "subagent_model": "claude-opus-4-7",
+    "subagent_model": "claude-opus-4-8",
     "subagent_thinking": {"type": "adaptive"}
 }
 ```
@@ -169,7 +171,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
         "epochs": 1,
         "skip_preflight": false
     },
-    "subagent_model": "claude-opus-4-7",
+    "subagent_model": "claude-opus-4-8",
     "subagent_thinking": {"type": "adaptive"}
 }
 ```
@@ -178,7 +180,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 - Condition names are **opaque execution ids** (`c_<4 hex>`) and `experiment_name` is neutral: the runner writes both into the log directory, tags and metadata the Analyst later reads. The id → real-name map is the caller's private `CONDITION_LABEL_MAP_iter<N>.json` (see the Analyst's `check_blinding.py` rule below)
 - `model_routing` is optional; per-model routing directives resolved by the Orchestrator in Phase 1 and rendered by the Executor as `-M` arguments. Omit it and every model is invoked directly (the pre-existing behaviour). For OpenRouter models, get the provider slug and model args from `scripts/openrouter_endpoints.py` — never guess a slug. See `executor_interface_contract.md §Model routing`
 - `overrides` is optional; supported keys: `sample_limit`, `sample_id`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `command_timeout_seconds`. `sample_id` pins the eval to named dataset entries (`--sample-id`) and pairs with `epochs` for resampling one episode — without it, `epochs` repeats the *whole dataset*. The removed `runs_per_condition` key is refused by the runner; use `epochs` for repeated sampling
-- `subagent_model` is optional; the model the Executor agent runs on. **Distinct from `models`**, which are the eval's target models — `subagent_model` has no provider prefix (e.g. `claude-opus-4-7`), whereas `models` entries do (e.g. `anthropic/claude-sonnet-4-5-20250929`)
+- `subagent_model` is optional; the model the Executor agent runs on. **Distinct from `models`**, which are the eval's target models — `subagent_model` has no provider prefix (e.g. `claude-opus-4-8`), whereas `models` entries do (e.g. `anthropic/claude-sonnet-4-5-20250929`)
 - `subagent_thinking` is optional; the Executor's extended-thinking config (see General Pattern above)
 - `conformance_defects` / `previous_report` are **not accepted**: the Executor is never re-asked (a re-invocation would re-run the evals), so sending either is an agent error (exit 2). Regenerate a non-conformant report with `execute_evals.py report <run_dir>` (see §Report conformance)
 
@@ -198,8 +200,9 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
     },
     "scanning_model": "openai/gpt-4.1-mini",
     "constraints": {"limit": 100},
+    "execution_notes": ["condition_B: 7 of 100 samples hit the message limit"],
     "artefacts_dir": "/absolute/path/to/investigation/artefacts",
-    "subagent_model": "claude-opus-4-7",
+    "subagent_model": "claude-opus-4-8",
     "subagent_thinking": {"type": "adaptive"}
 }
 ```
@@ -207,11 +210,12 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 - `transcript_source` values must all be existing directories containing `.eval` log files
 - `topic` must be a **neutral description** — never the hypothesis
 - Use **opaque condition labels** (condition_A, condition_B) — randomise the mapping to conditions — pointing at directories named by opaque condition ids, never by a real condition name or a role word
-- **Before every launch, run `uv run python scripts/check_blinding.py <CONDITION_LABEL_MAP_iter<N>.json> <request.json>`; a non-zero exit blocks the invocation.** Exit 1 lists each blocking hit (channel — label, path, symlink target, file name, `task_file`, tags, metadata — file, and offending token); exit 2 is a usage error; warnings (a differing `task_args`, mixed-iteration layouts) print without changing the exit code and are recorded in the log and the report's caveats. The map itself is in the Analyst's `RESTRICTED_FILES`
+- **Before every launch, run `uv run python scripts/check_blinding.py <CONDITION_LABEL_MAP_iter<N>.json> <request.json>`; a non-zero exit blocks the invocation.** Exit 1 lists each blocking hit (channel — label, path, symlink target, file name, `task_file`, tags, metadata — file, and offending token); exit 2 is a usage error; warnings (a differing `task_args`, mixed-iteration layouts) print without changing the exit code and are recorded in the log and the report's caveats. The map itself is denied to every sub-agent by the runner's file hooks (`runner.ALWAYS_RESTRICTED`) and listed again in the Analyst's `RESTRICTED_FILES`
 - `scanning_model`, `constraints`, and `artefacts_dir` are optional. If `scanning_model` is an `openrouter/…` string, pin its route the same way target-model routes are pinned — the scanner is a measurement instrument held constant across conditions, and unpinned routing lets it drift between condition scans in a way that is indistinguishable from a real effect (see `analyst_interface_contract.md §Scanning model`)
 - `subagent_model` is optional; the model the Analyst agent runs on. **Distinct from `scanning_model`**, which is the model Scout uses for LLM scanners — `subagent_model` changes which model *does the analysis*, `scanning_model` changes which model the scanners *call*
 - `subagent_thinking` is optional; the Analyst's extended-thinking config (see General Pattern above)
 - When `artefacts_dir` is provided, the analyst writes all file outputs to `<artefacts_dir>/analyst/`
+- `execution_notes` is optional (both modes): a string or a list of strings carrying **non-directional execution facts only** — per-condition retries, sample errors, preflight exclusions, termination counts — under this invocation's opaque labels (e.g. `"condition_B: 7 samples hit the message limit"`). Never a real condition name, a role word, the hypothesis or an expected direction (`orchestrator_responsibilities.md` Step 2e item 7). `agent.py` renders it under its own `## Execution Notes` heading with a data-quality-only rule; any other shape is an agent error (exit 2). `check_blinding.py` scans it with the rest of the request
 - `conformance_defects` and `previous_report` are optional and sent only together, only for the one re-ask after `check_report.py analyst` fails (see §Report conformance). Keep `artefacts_dir` (and any `grader_dir`) unchanged: the Analyst rebuilds a missing section from its saved artefacts there and never re-runs a scan
 - `construal_checks` is optional (**Orchestrator mode only**): a de-identified list of construal properties — strings or `{"id": "M1", "property": "..."}` — each built as its own validated scanner and rated across every condition, with no verdict stated (see `analyst_interface_contract.md §Construal checks`). Keep the check→condition mapping in the investigation log, never in the request. In forensic mode the set goes inside `behaviour_spec` instead, and sending it at the top level there is an agent error (exit 2)
 
@@ -228,7 +232,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
     "behaviour_spec": {
         "description": "The model edited the test file rather than the implementation",
         "reference_transcript": "/abs/path/to/original.eval",
-        "grader_dir": "/abs/path/to/artefacts/analyst/grader",
+        "grader_dir": "/abs/path/to/investigations/<name>/artefacts/analyst/grader",
         "construal_checks": [
             {"id": "M1", "property": "Whether the reasoning treats the deadline as binding — reasoning about time pressure, prioritising speed, declining to verify"},
             {"id": "M2", "property": "Whether the reasoning treats the failing test as the specification to satisfy rather than as a check on the specification"}
@@ -238,8 +242,8 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
 ```
 
 - `description` is always required within the spec; `reference_transcript` is required on the first build and optional once `grader_dir` is populated; `grader_dir` absent/empty means build-and-persist, populated means load-and-apply-unmodified
-- `construal_checks` is optional: **one de-identified set per round** — every variant's check, each with an opaque id (`M<n>`) and no indication of which condition it bears on. `agent.py` renders the set as its own `## Construal Checks` request section with the no-verdict rule attached; the Analyst validates each as its own scanner, rates each across **every** condition, reports the full pairwise difference matrix and a scorability label per check, and states **no** `succeeded`/`failed`/`ambiguous` verdict. The Diagnostician derives the verdicts from its private check→variant mapping and intended directions (`diagnostician_analyst_guide.md §Deriving the verdicts`). The retired single-string `manipulation_check` field is rejected as an input error (exit 2), never silently dropped
-- `agent.py` also appends a `## Work Order` section to every forensic request — grader → construal checks → eval-awareness split → open-ended scan — restating the addendum's order so that a turn-starved invocation leaves the open-ended half thin rather than the auxiliaries unvalidated. Large workloads (roughly > 24 scanner×condition passes, or > 8 conditions) are split **by check group, never by condition** (addendum §Work order → *Split protocol*); this pairs with the runner's turn cap (`subagent_max_turns`, once threaded through `runner.py`), which is the other lever
+- `construal_checks` is optional: **one de-identified set per round** — every variant's check, each with an opaque id (`M<n>`) and no indication of which condition it bears on. `agent.py` renders the set as its own `## Construal Checks` request section with the no-verdict rule attached; the Analyst validates each as its own scanner, rates each across **every** condition, reports the full pairwise difference matrix and a scorability label per check, and states **no** `succeeded`/`failed`/`ambiguous` verdict. The Diagnostician derives the verdicts from its private check→variant mapping and intended directions (`diagnostician_analyst_guide.md §Deriving the verdicts`). The retired single-string `manipulation_check` field is rejected as an agent error (exit 2 — raised when the prompt is built, not by the CLI's input validation), never silently dropped
+- `agent.py` also appends a `## Work Order` section to every forensic request — grader → construal checks → eval-awareness split → open-ended scan — restating the addendum's order so that a turn-starved invocation leaves the open-ended half thin rather than the auxiliaries unvalidated. Large workloads (roughly > 24 scanner×condition passes, or > 8 conditions) are split **by check group, never by condition** (addendum §Work order → *Split protocol*); this pairs with the runner's turn cap (`subagent_max_turns`), which is the other lever
 - **The firewall is not breached**: the spec names the *explanandum* (what to measure), never an explanation, a predicted direction, or which condition is which. The neutral `topic` remains required and its rules are unchanged — forensic mode is two measurements (fixed grader + open-ended scan), never one
 - **Grader reuse via `grader_dir` is what makes rates comparable across iterations** — pass the same directory every round after the first, and treat a hash change between reports as an instrument change
 - **`scanning_model` and the target's family.** The scanner is part of the instrument; when its author family is the target's (or the Analyst's own `subagent_model` is), the addendum obliges the Analyst to hand-read its validation labels (or use a cross-family validator), to prefer a deterministic parse for action-mediated behaviour, and to state the family facts under *Instrument family* — but the choice is the Diagnostician's: prefer a cross-family `scanning_model` where one is available at acceptable cost, and record the same-family case and its mitigations in the log (`diagnostician_analyst_guide.md §Scanning model and target family`)
@@ -256,7 +260,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
 {
     "environment_path": "/absolute/path/to/eval/environment",
     "behaviour_description": "The model wrote a special-case branch returning the expected value for the test inputs rather than implementing the function",
-    "reference_transcript": "/absolute/path/to/original.eval",
+    "reference_transcript": "/absolute/path/to/investigation/artefacts/reference/<log>/<sample_id>_epoch_1.txt",
     "constraints": "The eval is large — prioritise the prompt and scoring path.",
     "subagent_model": "claude-opus-4-8",
     "subagent_thinking": {"type": "adaptive"}
@@ -326,7 +330,7 @@ The Critic's only CLI-validated field is `mode` ∈ `{candidate_critique, diff_r
 ```json
 {
     "mode": "candidate_critique",
-    "transcript_paths": ["/absolute/path/to/original.eval"],
+    "transcript_paths": ["/absolute/path/to/investigation/artefacts/reference/<log>/<sample_id>_epoch_1.txt", "/absolute/path/to/iterations/00_round0/transcripts/c_0e4d/<log>/<sample_id>_epoch_7.txt"],
     "mapper_report_path": "/absolute/path/to/artefacts/mapper/report_00_triage_mapper_1.md",
     "candidates": [
         {
@@ -345,7 +349,7 @@ The Critic's only CLI-validated field is `mode` ∈ `{candidate_critique, diff_r
 ```
 
 - `candidate_critique` requires `transcript_paths`, `mapper_report_path`, `candidates`, `iteration` (0 for the step-2 invocation); `evidence_summary` is optional and post-3d only. `transcript_paths` are **plain-text dumps**, never `.eval` files (see §Transcript handoff)
-- `diff_review` requires `diffs` (array of `{"name": ..., "diff": ...}`), `environment_path`, `mapper_report_path` — and **must not** receive the candidates, the discrimination matrix, or the behaviour description; the blinding is the mode's value
+- `diff_review` requires `diffs` (array of `{"name": ..., "diff": ...}`), `environment_path`, `mapper_report_path` — and **must not** receive the candidates, the discrimination matrix, or the behaviour description; withholding what the diffs test is the mode's value (the runner's hooks also deny this mode the Designer's reports, and every Critic the condition label map; descriptive variant names may stay visible)
 - `prediction` requires `investigation_log_path`, `leading_explanation`, `untested_surfaces` — and must not receive the Diagnostician's own prediction
 - Sending a withheld field does not error: it silently converts the review into a much weaker one. The blinding is the caller's responsibility
 - `conformance_defects` and `previous_report` are optional in every mode, sent only together, and used only for the **one re-ask** (§Report conformance): when `scripts/check_report.py critic <report> --mode <mode>` exits non-zero, re-send the same request with its printed defect lines as `conformance_defects` (strings) and that report's absolute path as `previous_report`. The Critic restructures the previous report into the mode's headings; a second failure is read structurally and recorded, not re-asked again (`critic_interface_contract.md §Report Format`)

@@ -48,8 +48,9 @@ What blocks
 * A source whose ``.eval`` headers all fail to read (fail closed: unverified).
 
 Path components are checked from the investigation directory (the label map's
-directory) down when the sources sit beneath it — so ``iterations/00_resample``
-counts even for a lone source — and otherwise below the sources' common
+directory) down when the sources sit beneath it — so a role-word directory such
+as ``iterations/00_resample`` blocks even for a lone source (the neutral layout
+is ``iterations/00_round0``) — and otherwise below the sources' common
 ancestor: above the investigation is the user's workspace, whose names are not
 the lead agent's to choose. Symlink targets, of the sources themselves and of
 any file or directory link beneath them, are judged the same way.
@@ -414,7 +415,7 @@ def discriminating_components(paths: dict[str, str], anchor: str | None = None) 
         Label → absolute path.
     anchor : str | None
         The investigation directory. When every path lies strictly beneath
-        it, components are taken from there down (``iterations/00_resample/
+        it, components are taken from there down (``iterations/00_round0/
         logs/c_0e4d``) — the investigation's own layout is the lead agent's to
         name; above it is the user's workspace.
 
@@ -604,8 +605,8 @@ def check(label_map_path: str, source_path: str) -> tuple[list[Finding], list[st
     tokens = build_tokens(real_names)
     real_tokens = [t for t in tokens if t.kind == "real name"]
     # The map lives in the investigation directory, so paths are judged from
-    # there down when the sources sit under it: the iteration directory
-    # (`00_resample`) is then checked even for a lone source.
+    # there down when the sources sit under it: the iteration directory is
+    # then checked even for a lone source (a legacy `00_resample` blocks).
     investigation_dir = os.path.dirname(os.path.abspath(label_map_path))
     findings: list[Finding] = []
     seen: set[tuple[str, str, str, str]] = set()

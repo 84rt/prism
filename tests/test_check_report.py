@@ -145,6 +145,29 @@ def test_forensic_analyst_table_follows_the_addendum() -> None:
     assert [h for h in forensic if h not in cr.ANALYST_FORENSIC_ADDITIONS] == list(cr.ANALYST_BASE_HEADINGS)
 
 
+def test_forensic_analyst_system_prompt_skeleton_matches_the_table() -> None:
+    """The forensic system prompt's literal report skeleton equals the checker's list, in order.
+
+    The forensic overlay tells the Analyst which headings to emit and where the
+    two addendum sections go; a drift there (a renamed base heading, the
+    additions moved) produces reports the checker then rejects, so the prompt's
+    own statement is parsed and compared, not just grepped for.
+    """
+    from subagents.transcript_analyst.system_prompt import FORENSIC_SECTION
+
+    para = next(p for p in FORENSIC_SECTION.split("\n\n") if p.startswith("**The report skeleton"))
+    base_list = re.search(r"verbatim and in order \((.*?)\), with the addendum", para, re.S)
+    added_list = re.search(r"the addendum's two top-level sections \((.*?)\) inserted", para, re.S)
+    place = re.search(r"inserted between `### ([^`]+)` and `### ([^`]+)`", para)
+    assert base_list and added_list and place, "the skeleton sentence no longer has its parsed shape"
+    base = re.findall(r"`### ([^`]+)`", base_list.group(1))
+    added = re.findall(r"`### ([^`]+)`", added_list.group(1))
+    after, before = place.groups()
+    assert base.index(before) == base.index(after) + 1, "the additions must sit between adjacent base sections"
+    i = base.index(after) + 1
+    assert base[:i] + added + base[i:] == list(cr.ROLE_HEADINGS["analyst"]["forensic"])
+
+
 def test_executor_subheadings_appear_in_contract() -> None:
     text = (REPO_ROOT / CONTRACTS["executor"]).read_text()
     for prefix in cr.SUBSECTION_PREFIXES["executor"]["Error Summary"]:
@@ -193,9 +216,49 @@ def test_wrong_level_and_out_of_order_are_defects() -> None:
 
 
 def test_headings_inside_code_fences_are_ignored() -> None:
-    proposed = "```json\n[{\"id\": \"X1\", \"discriminating_signature\": \"### not a heading\"}]\n```"
-    defects, _ = cr.check_report("critic", _critique(proposed), "candidate_critique")
+    """A heading line at line start inside a fence is content, not structure.
+
+    The fenced block carries a stray section and a duplicate of a real one;
+    the same text unfenced must produce both defects, so the pass is for the
+    right reason (the fence handling) rather than because nothing looked like
+    a heading.
+    """
+    body = "### Findings\n### Blind Spots\n"
+    fenced = _critique(f"Nothing to add.\n\n```markdown\n{body}```")
+    assert cr.check_report("critic", fenced, "candidate_critique")[0] == []
+    unfenced, _ = cr.check_report("critic", _critique(f"Nothing to add.\n\n{body}"), "candidate_critique")
+    assert any("`### Findings` is not a section" in d for d in unfenced), unfenced
+    assert any("duplicate section `### Blind Spots`" in d for d in unfenced), unfenced
+
+
+def test_duplicate_section_is_a_defect() -> None:
+    text = _critique("Nothing to add.") + "\n### Blind Spots\n\nAgain.\n"
+    defects, _ = cr.check_report("critic", text, "candidate_critique")
+    assert any(d.startswith("line ") and "duplicate section `### Blind Spots` (first at line" in d for d in defects), defects
+
+
+def test_executor_subheadings_out_of_order_are_a_defect() -> None:
+    report = _executor_report()
+    swapped = report.replace("#### Structural (", "#### TMP (").replace("#### Sample-level (", "#### Structural (").replace("#### TMP (", "#### Sample-level (")
+    defects, _ = cr.check_report("executor", swapped)
+    assert any("sub-headings out of order" in d for d in defects), defects
+    assert cr.check_report("executor", report)[0] == []
+
+
+@pytest.mark.parametrize(
+    "proposed, expect",
+    [
+        # Ids mentioned, no block recognised, not marked empty.
+        ("C3 looks relevant here but I have not written it up as a candidate.", "mentions candidate ids"),
+        # Prose with no ids and no empty marker.
+        ("Some thoughts about the environment, but nothing structured.", "has content but no recognisable candidate"),
+    ],
+)
+def test_unrecognised_proposals_warn(proposed: str, expect: str) -> None:
+    """A Proposed section the parser cannot read is flagged for a hand check, not passed silently."""
+    defects, warnings = cr.check_report("critic", _critique(proposed), "candidate_critique")
     assert defects == []
+    assert any(expect in w for w in warnings), warnings
 
 
 def test_preamble_is_a_warning_not_a_defect() -> None:

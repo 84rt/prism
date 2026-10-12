@@ -99,9 +99,11 @@ Each item should name what the orchestrator needs to do to resolve it (read a sp
 
 **Each invocation is self-contained.** Every delegation from the orchestrator to the Explorer is a single-shot interaction: one request, one report, no follow-up within the same invocation. The Explorer has no persistent memory across invocations; it builds its understanding of the environment from scratch each time. If the orchestrator needs a different exploration, it constructs a new request.
 
-**Read-only, stdout-only.** The Explorer never modifies, creates, or deletes files. Its report is written to stdout and captured by the orchestrator, which saves it to `artefacts/explorer/report.md`.
+**Read-only, stdout-only.** The Explorer never modifies, creates, or deletes files. Its report is written to stdout; the detached launcher (`scripts/launch_subagent.py`) captures it to the per-invocation path `<artefacts-dir>/explorer/report_<tag>_explorer_<n>.md`, with no separate save step.
 
 **Section headings are markdown, and their text is verbatim.** Emit each report section as a markdown heading at the level shown in the Report Format above (`### Summary`, `### Pipeline Model`, …), using the exact heading text, in the order given. Plain-text section titles are not sufficient: the orchestrator locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read. This is stated explicitly rather than left to be inferred from the formatting of this document.
+
+**The report is the whole of stdout.** Everything printed is captured verbatim as the saved artefact, so begin directly with the first section heading — no preamble, no narration of readiness, no sign-off, and no horizontal rules outside sections. A leading "here is the report" line becomes a permanent part of a document that downstream agents read by structure.
 
 **Diff notation.** Use unified diff format with `-` / `+` line markers and sufficient context lines for the diff to apply unambiguously. Include the file path and line range for each diff so the orchestrator can apply it mechanically.
 

@@ -5,7 +5,7 @@ import os
 from typing import Any
 
 from subagents.redteam_critic.system_prompt import SYSTEM_PROMPT
-from subagents.runner import reask_section, run_agent
+from subagents.runner import INVESTIGATION_REQUESTS, reask_section, run_agent
 
 ALLOWED_TOOLS = ["Read", "Glob", "Grep"]
 DISALLOWED_TOOLS = ["Edit", "Write", "Bash", "WebSearch", "WebFetch"]
@@ -77,10 +77,11 @@ MODE_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 
 # Files this agent must not read. Mapping of filename pattern → reason.
 # The Critic reads its own contract; it is intentionally absent from this list.
-# The blinding here is mode-independent and deliberately conservative: the
-# Critic's value comes from reasoning that is decorrelated from the
-# Diagnostician's, and the Diagnostician's methodological references are
-# precisely the shared priors we are trying not to install.
+# This base list applies in every mode (diff_review adds to it, below) and is
+# deliberately conservative: the Critic's value comes from reasoning that is
+# decorrelated from the Diagnostician's, and the Diagnostician's
+# methodological references are precisely the shared priors we are trying not
+# to install.
 #
 # Known maintenance risk, flagged rather than solved: blocking the principles
 # doc also blocks the Critic from the admissibility bar it is held to (every
@@ -107,16 +108,56 @@ RESTRICTED_FILES: dict[str, str] = {
     # Investigation runtime state — with one deliberate exception. The ledger
     # arrives via the request in candidate_critique and must stay unseen in
     # diff_review, so the file itself is denied in every mode. The
-    # investigation log is NOT listed: prediction mode receives
-    # `investigation_log_path` and must read it, and this list is static
-    # across modes — in the other two modes the Diagnostician simply never
-    # sends the path.
+    # investigation log is NOT listed here: prediction mode receives
+    # `investigation_log_path` and must read it. diff_review adds it, with
+    # the other candidate-bearing files, in `DIFF_REVIEW_RESTRICTED_FILES`.
     "CANDIDATES.md": (
         "Candidate ledger file. candidate_critique receives the ledger via "
         "its request; diff_review must not see it at all."
     ),
     "FINDINGS-REPORT.md": "Investigation synthesis: explanations and evidence.",
 }
+
+# diff_review's value is a reading of the diffs that the candidates did not
+# shape, so in that mode only the files carrying them are denied as well: the
+# Designer's reports (candidates and the discrimination matrix), every
+# persisted request (the Designer's carries the candidates, a
+# candidate_critique Critic's the ledger), and the investigation log. The
+# condition label map is denied in every mode by the runner itself
+# (`runner.ALWAYS_RESTRICTED`). Earlier Critic reports under
+# `artefacts/critic/` stay readable: a re-ask must read its own previous report.
+DIFF_REVIEW_RESTRICTED_FILES: dict[str, str] = {
+    "artefacts/designer/": (
+        "Variant Designer reports: the candidate explanations and the "
+        "discrimination matrix that diff_review must not see."
+    ),
+    INVESTIGATION_REQUESTS: (
+        "Persisted sub-agent requests, which carry the candidate explanations "
+        "diff_review must not see."
+    ),
+    "INVESTIGATION-LOG.md": (
+        "Investigation history: the behaviour, the candidates and their evidence."
+    ),
+}
+
+
+def restricted_files_for(mode: str) -> dict[str, str]:
+    """The Critic's denied files in a given mode.
+
+    Parameters
+    ----------
+    mode : str
+        One of `VALID_MODES`.
+
+    Returns
+    -------
+    dict[str, str]
+        Pattern → denial reason: `RESTRICTED_FILES`, plus
+        `DIFF_REVIEW_RESTRICTED_FILES` in ``diff_review``.
+    """
+    if mode == "diff_review":
+        return {**RESTRICTED_FILES, **DIFF_REVIEW_RESTRICTED_FILES}
+    return dict(RESTRICTED_FILES)
 
 
 def _build_prompt(data: dict[str, Any]) -> str:
@@ -293,7 +334,7 @@ async def run_redteam_critic(cwd: str | None = None, **data: Any) -> str:
         disallowed_tools=DISALLOWED_TOOLS,
         agent_name="Red-teaming critic",
         cwd=cwd,
-        restricted_files=RESTRICTED_FILES,
+        restricted_files=restricted_files_for(data["mode"]),
         memory_file=None,
         model=data.get("subagent_model"),
         thinking=data.get("subagent_thinking"),

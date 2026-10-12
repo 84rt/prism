@@ -13,13 +13,13 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
 
 import execute_evals as ee
 import launch_subagent as ls
-from conftest import LEAK_TOKENS, case_path
-from test_execute_evals import make_request, substitute_fake_eval
+from conftest import LEAK_TOKENS, case_path, make_request, substitute_fake_eval
 
 runner = pytest.importorskip("subagents.runner")
 
@@ -208,13 +208,13 @@ INSPECT_OPENROUTER_402 = (
 
 @pytest.mark.parametrize("text", CREDENTIAL_STRINGS + [INSPECT_ANTHROPIC, INSPECT_OPENROUTER_BUDGET, INSPECT_OPENROUTER_402])
 def test_execute_evals_keeps_credentials_structural(text: str) -> None:
-    assert ee.classify_error(1, text, None) == "structural"
+    assert ee.classify_error(1, text) == "structural"
     assert ee.is_credential_exhaustion(text)
 
 
 def test_routing_and_other_classes_unchanged() -> None:
-    assert ee.classify_error(1, "No allowed providers are available for the selected model", None) == "routing"
-    assert ee.classify_error(1, "RuntimeError: sample 402 errored", None) == "transient"
+    assert ee.classify_error(1, "No allowed providers are available for the selected model") == "routing"
+    assert ee.classify_error(1, "RuntimeError: sample 402 errored") == "transient"
     assert not ee.is_credential_exhaustion("RuntimeError: sample 402 errored")
     for text in NOT_CREDENTIALS:
         assert not ee.is_credential_exhaustion(text), text
@@ -288,7 +288,7 @@ def test_mid_run_cap_is_tagged_at_sample_level_and_score_free(tmp_path) -> None:
     assert "treatment / openai/gpt-5 2 of 4 (2 [credentials])" in report
 
     # --- Blackout: no scorer output, and no raw error text, anywhere readable -
-    status_text = open(os.path.join(run_dir, "status.json")).read()
+    status_text = Path(run_dir, "status.json").read_text()
     for text, where in ((report, "report"), (status_text, "status.json"), (ee.render_status(data), "status")):
         for tok in LEAK_TOKENS:
             assert tok not in text, f"scorer token {tok!r} leaked into {where}"
@@ -329,7 +329,7 @@ def test_runner_process_error_becomes_credentials_exhausted(tmp_path, monkeypatc
     monkeypatch.setattr(runner, "query", fake_query)
     with pytest.raises(RuntimeError, match=r"credentials_exhausted \(route=direct, model=claude-opus-4-8\)"):
         asyncio.run(runner.run_agent("p", "s", ["Bash"], [], "Experiment executor"))
-    record = json.load(open(cost))
+    record = json.loads(Path(cost).read_text())
     assert record["failure_class"] == "credentials_exhausted" and record["route"] == "direct"
 
 
@@ -366,7 +366,7 @@ def test_runner_sidecar_without_result_message(tmp_path, monkeypatch) -> None:
     path = tmp_path / "cost.json"
     monkeypatch.setenv(runner.COST_FILE_ENV, str(path))
     runner._write_cost_sidecar("Critic", "google/gemini-3-pro", "openrouter", None, failure_class="credentials_exhausted")
-    record = json.load(open(path))
+    record = json.loads(Path(path).read_text())
     assert record["failure_class"] == "credentials_exhausted"
     assert record["total_cost_usd"] is None and record["is_error"] is True
 
@@ -431,5 +431,5 @@ def test_list_unfinished_gives_relaunch_commands_and_skips_superseded(tmp_path) 
 
     # An unreadable request is never treated as superseded by another.
     for r in (r1, r2):
-        open(r["request"], "w").write("{not json")
+        Path(r["request"]).write_text("{not json")
     assert [e["receipt"]["receipt"] for e in ls.unfinished(str(inv))] == [r1["receipt"], r3["receipt"]]

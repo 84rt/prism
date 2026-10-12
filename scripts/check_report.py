@@ -25,8 +25,8 @@ Checks
   — they are parameterised by count, so they are matched by prefix.
 
 Text before the first heading is reported as a warning, not a defect: the
-contracts forbid it, but the Diagnostician disregards it by rule and a re-ask
-for a preamble alone would waste an invocation.
+contracts forbid it, but both lead agents read a report structurally from its
+first heading, and a re-ask for a preamble alone would waste an invocation.
 
 Roles covered — all six: ``critic`` (modes ``candidate_critique``,
 ``diff_review``, ``prediction``; ``--mode`` required), ``mapper``,
@@ -39,9 +39,9 @@ Usage
 -----
 ::
 
-    uv run --no-project python scripts/check_report.py critic report.md --mode candidate_critique
-    uv run --no-project python scripts/check_report.py designer artefacts/designer/report_iter2.md
-    uv run --no-project python scripts/check_report.py analyst artefacts/analyst/report_iter1_analyst_1.md --forensic
+    uv run --no-project python scripts/check_report.py critic artefacts/critic/report_iter_01_critic_1.md --mode candidate_critique
+    uv run --no-project python scripts/check_report.py designer artefacts/designer/report_iter_02_designer_1.md
+    uv run --no-project python scripts/check_report.py analyst artefacts/analyst/report_iter_01_analyst_1.md --forensic
 
 Exit codes: ``0`` conformant; ``1`` defects found (listed on stdout); ``2``
 usage error (unknown role, missing or inapplicable ``--mode``, unreadable

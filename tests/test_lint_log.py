@@ -169,12 +169,29 @@ def test_r06_doubled_heading_and_stranded_iteration1_block():
     assert "duplicate-block" not in by_kind
 
 
-@needs_corpus
-def test_cli_exit_codes():
-    assert _run([R01_LOG]).returncode == 1
-    clean = Path(__file__).with_name("_clean_tmp.md")
+def test_cli_exit_codes(tmp_path):
+    """0 clean, 1 findings, 2 unreadable — synthetic files, so no corpus and no repo writes."""
+    clean = tmp_path / "clean.md"
     clean.write_text(CLEAN)
-    try:
-        assert _run([clean]).returncode == 0
-    finally:
-        clean.unlink()
+    dirty = tmp_path / "dirty.md"
+    dirty.write_text(CLEAN + "### Pre-registered Predictions\n| e | f |\n")
+    assert ll.main([str(clean)]) == 0
+    assert ll.main([str(dirty)]) == 1
+    assert ll.main([str(clean), str(dirty)]) == 1  # any finding in any file
+    assert ll.main([str(tmp_path / "missing.md")]) == 2
+    assert _run([clean]).returncode == 0  # and the script entry point agrees
+
+
+def test_cli_min_lines_flag_reaches_the_linter(tmp_path):
+    """A two-line pasted block is below the default threshold (3) and flagged at 2."""
+    body = "- line one\n- line two\n"
+    text = "# L\n## Iteration 1\n### Results\n" + body + "### Results (again)\n" + body
+    path = tmp_path / "log.md"
+    path.write_text(text)
+    assert ll.main([str(path)]) == 0
+    assert ll.main([str(path), "--min-lines", "2"]) == 1
+
+
+def test_duplicate_heading_match_ignores_case():
+    text = "# L\n## Iteration 1\n### Results\n- a\n### results\n- b\n"
+    assert ("duplicate-heading", 5) in kinds(text)

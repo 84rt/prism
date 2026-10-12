@@ -7,11 +7,15 @@ Sums two telemetry sources that the pipeline now writes:
   tokens) for every invocation launched through ``scripts/launch_subagent.py``.
 - **Eval token usage** — per condition-model pair, recorded in each batch
   run's ``status.json`` by ``scripts/execute_evals.py`` from the eval log
-  header's ``model_usage``.
+  header's ``model_usage``: every attempt's (``usage_attempts`` — preflight
+  probe, retest, and each full-run attempt including retried ones), or the
+  final attempt's alone in a status file written before that field existed.
 
 Eval spend is reported in tokens per model, not USD: the runner has no price
-table and the target models vary per investigation. The stopping policy that
-consumes these figures lives in ``diagnostician_responsibilities.md``.
+table and the target models vary per investigation. Both lead agents consume
+these figures: the Diagnostician's budget exit (``diagnostician_responsibilities.md``
+§Stopping rule) and the Orchestrator's spend check before each Decision
+(``orchestrator_responsibilities.md`` Step 2j).
 
 Usage
 -----
@@ -87,14 +91,20 @@ def collect(root: str) -> dict[str, Any]:
     run_summaries = []
     for r in runs:
         run_tokens = 0
-        for pid, e in r.get("pairs", {}).items():
+        for e in r.get("pairs", {}).values():
             pair_count += 1
-            for model, mu in (e.get("model_usage") or {}).items():
-                for k in ("input_tokens", "output_tokens", "total_tokens", "input_tokens_cache_read", "input_tokens_cache_write", "reasoning_tokens"):
-                    v = mu.get(k)
-                    if v:
-                        tokens[model][k] += int(v)
-                run_tokens += int(mu.get("total_tokens") or 0)
+            # All attempts where recorded; older status files kept only the
+            # final attempt's usage, which is then the best figure there is.
+            attempts = e.get("usage_attempts")
+            if attempts is None:
+                attempts = [e.get("model_usage") or {}]
+            for usage in attempts:
+                for model, mu in (usage or {}).items():
+                    for k in ("input_tokens", "output_tokens", "total_tokens", "input_tokens_cache_read", "input_tokens_cache_write", "reasoning_tokens"):
+                        v = mu.get(k)
+                        if v:
+                            tokens[model][k] += int(v)
+                    run_tokens += int(mu.get("total_tokens") or 0)
         run_summaries.append({"run_id": r.get("run_id"), "state": r.get("state"), "pairs": len(r.get("pairs", {})), "total_tokens": run_tokens, "path": r["_path"]})
 
     return {

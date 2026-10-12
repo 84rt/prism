@@ -9,6 +9,7 @@ rather than reading the diff.
 
 import asyncio
 import re
+from pathlib import Path
 
 import pytest
 
@@ -115,6 +116,43 @@ def test_orchestrator_mode_prompt_carries_no_forensic_text(monkeypatch):
     assert FORENSIC_WORK_ORDER not in got["system_prompt"]
 
 
+# Terms that exist only in forensic mode. The Orchestrator-mode Analyst must
+# never meet any of them — not in its system prompt, its request, or the base
+# contract it is pointed at — or it has a mode to wonder about.
+FORENSIC_ONLY_TERMS = (
+    "grader_dir",
+    "behaviour_spec",
+    "Behaviour Spec",
+    "Eval-awareness split",
+    "Behaviours not captured by the grader",
+    "Forensic mode",
+    "analyst_forensic_addendum",
+    "reference transcript",
+)
+
+
+def test_forensic_prompt_is_exactly_base_plus_overlay():
+    """One copy of the shared text: the modes cannot drift, and the overlay only adds."""
+    from subagents.transcript_analyst.system_prompt import FORENSIC_SECTION
+
+    assert SYSTEM_PROMPT_FORENSIC == SYSTEM_PROMPT + FORENSIC_SECTION
+    # No paragraph of the overlay has leaked into the base prompt.
+    for para in (p.strip() for p in FORENSIC_SECTION.split("\n\n")):
+        if len(para) > 40:
+            assert para not in SYSTEM_PROMPT, para[:80]
+
+
+def test_orchestrator_mode_never_meets_forensic_terms(monkeypatch):
+    """System prompt, built request (with every Orchestrator-mode field), and base contract."""
+    from subagents.runner import scaffold_doc
+
+    got = _build(monkeypatch, **BASE_REQUEST, scanning_model="openai/gpt-4.1-mini", constraints={"limit": 5}, construal_checks=CHECKS)
+    base_contract = Path(scaffold_doc(".claude/docs/contracts/analyst_interface_contract.md")).read_text()
+    for where, text in (("system prompt", got["system_prompt"]), ("request", got["prompt"]), ("base contract", base_contract)):
+        for term in FORENSIC_ONLY_TERMS:
+            assert term not in text, f"forensic-only term {term!r} in the Orchestrator-mode {where}"
+
+
 def test_orchestrator_mode_construal_checks_render_without_forensic_text(monkeypatch):
     """Orchestrator mode sends checks at the top level; they render, and nothing forensic leaks in."""
     got = _build(monkeypatch, **BASE_REQUEST, construal_checks=CHECKS)
@@ -185,9 +223,9 @@ def test_every_data_key_read_by_agent_is_documented_in_invocation_reference():
     import os
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src = open(os.path.join(root, "subagents", "transcript_analyst", "agent.py")).read()
+    src = Path(os.path.join(root, "subagents", "transcript_analyst", "agent.py")).read_text()
     keys = set(re.findall(r"data(?:\.get\(|\[)['\"](\w+)['\"]", src))
-    doc = open(os.path.join(root, ".claude", "docs", "investigator", "subagent_invocation.md")).read()
+    doc = Path(os.path.join(root, ".claude", "docs", "investigator", "subagent_invocation.md")).read_text()
     section = doc.split("## Transcript Analyst")[1].split("## Environment Mapper")[0]
     general = doc.split("## General Pattern")[1].split("## Environment Explorer")[0]
     missing = {k for k in keys if f"`{k}`" not in section and f'"{k}"' not in section and f"`{k}`" not in general}

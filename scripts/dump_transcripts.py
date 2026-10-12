@@ -30,14 +30,14 @@ mirrored, so the Executor's `logs/<condition>/` layout survives and a whole
 condition can be handed over as one directory; a file input lands directly
 under `--out`:
 
-    dump_transcripts.py iterations/01/logs --out iterations/01/transcripts
-    iterations/01/transcripts/
-      control/
+    dump_transcripts.py iterations/01_round1/logs --out iterations/01_round1/transcripts
+    iterations/01_round1/transcripts/
+      c_8b21/
         2026-09-08T22-44-52-00-00_agentic-misalignment_SBpaWBEn5936WCYGdiiumS/
           blackmail_explicit-america_restriction_epoch_1.txt
           blackmail_explicit-america_restriction_epoch_2.txt
           ...
-      no_deadline/
+      c_3f9a/
         ...
 
 Mirroring rather than flattening matters: Inspect log stems are unique per

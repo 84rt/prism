@@ -14,9 +14,15 @@ Usage
     uv run python scripts/launch_subagent.py wait <receipt.json> [--timeout S]
     uv run python scripts/launch_subagent.py list <investigation-dir> [--unfinished]
 
+``status`` and ``wait`` exit 0 when the receipt is terminal, 3 while the
+sub-agent runs, and 4 when its process died without recording an exit (also
+terminal: stop polling). Sub-agents run on the pinned
+``CLAUDE_AGENT_SDK_REQUIREMENT``.
+
 Roles: ``explorer``, ``executor``, ``analyst``, ``mapper``, ``designer``,
-``critic``. ``--tag`` is the iteration or phase label (``00_resample``,
-``iter1``, ``phase4``); ``<n>`` is assigned automatically so the outputs are::
+``critic``. ``--tag`` is the iteration or phase label (``iter_00``,
+``iter_01``, ``phase4``) — keep it neutral, since it is written into every
+output filename below; ``<n>`` is assigned automatically so the outputs are::
 
     <artefacts-dir>/<role>/report_<tag>_<role>_<n>.md     the sub-agent's stdout
     <artefacts-dir>/<role>/stderr_<tag>_<role>_<n>.log    its stderr
@@ -71,6 +77,20 @@ COST_FILE_ENV = "PRISM_COST_FILE"
 # (route=openrouter, model=…): …". Used when no cost sidecar recorded the class.
 CREDENTIALS_MARKER = re.compile(r"credentials_exhausted \(route=(?P<route>[A-Za-z_-]+)")
 
+# The Agent SDK version every sub-agent runs on: the one the test suite runs
+# against. Pinned because the runner's isolation options (`tools`, `skills`,
+# `setting_sources`, `settings`) and the CLI behaviour behind them — no
+# CLAUDE.md, no auto-memory, no user plugins or hooks — were verified on this
+# release; an unpinned install could silently change what a sub-agent sees.
+# Move it deliberately, re-running the tests (`tests/test_runner_isolation.py`).
+CLAUDE_AGENT_SDK_REQUIREMENT = "claude-agent-sdk==0.2.165"
+
+# Exit codes of `status` / `wait`: 0 = terminal receipt (finished or failed to
+# start), 3 = still running, 4 = the process died without recording an exit
+# (supervisor killed, host restart) — terminal, so a caller polling `wait`
+# must stop and treat the invocation as failed rather than loop.
+EXIT_TERMINAL, EXIT_RUNNING, EXIT_DEAD = 0, 3, 4
+
 # Request keys that select *how* a sub-agent runs rather than *what* it is asked
 # to do. A relaunch that changed only these (a route substitution, a re-ask
 # carrying `conformance_defects` + `previous_report`) supersedes the failed
@@ -82,8 +102,52 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def _pid_alive(pid: int | None) -> bool:
-    """True if `pid` exists and is not a zombie (see execute_evals._pid_alive)."""
+def _pid_start_time(pid: int | None) -> str | None:
+    """The process's start time in clock ticks since boot, or None.
+
+    Field 22 of ``/proc/<pid>/stat``. Recorded beside each pid so a later
+    liveness check can tell the same process from an unrelated one that was
+    given the recycled pid (after a host restart, say). The fields are counted
+    after the last ")", because the command name in field 2 may contain spaces.
+
+    Parameters
+    ----------
+    pid : int | None
+        A process id.
+
+    Returns
+    -------
+    str | None
+        e.g. ``"1234567"``; None where ``/proc`` is unavailable.
+    """
+    if not pid:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+    except OSError:
+        return None
+    fields = stat.rsplit(")", 1)[-1].split()
+    return fields[19] if len(fields) > 19 else None  # field 22 = index 19 after ")"
+
+
+def _pid_alive(pid: int | None, start_time: str | None = None) -> bool:
+    """True if `pid` exists, is not a zombie, and is the process recorded.
+
+    Parameters
+    ----------
+    pid : int | None
+        A process id from a receipt.
+    start_time : str | None
+        The start time recorded with it (`_pid_start_time`); when given and
+        the live process's differs, the pid has been reused and the recorded
+        process is dead. Mirrors `execute_evals._pid_alive`.
+
+    Returns
+    -------
+    bool
+        Whether the recorded process is still running.
+    """
     if not pid:
         return False
     try:
@@ -92,6 +156,10 @@ def _pid_alive(pid: int | None) -> bool:
         return False
     except PermissionError:
         return True
+    if start_time is not None:
+        current = _pid_start_time(pid)
+        if current is not None and current != start_time:
+            return False
     try:
         with open(f"/proc/{pid}/status") as f:
             for line in f:
@@ -102,25 +170,72 @@ def _pid_alive(pid: int | None) -> bool:
     return True
 
 
+def _receipt_alive(receipt: dict[str, Any]) -> bool:
+    """Whether the sub-agent or its supervisor named in a receipt is running."""
+    return _pid_alive(receipt.get("pid"), receipt.get("pid_start")) or _pid_alive(
+        receipt.get("supervisor_pid"), receipt.get("supervisor_start")
+    )
+
+
+def _write_json_atomic(path: str, obj: Any) -> None:
+    """Write JSON so a concurrent reader sees the old file or the new, never half.
+
+    Parameters
+    ----------
+    path : str
+        Destination path.
+    obj : Any
+        JSON-serialisable content.
+    """
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+    os.replace(tmp, path)
+
+
 # How long a receipt may sit in `launching` with no pid recorded before it is
 # treated as dead: the supervisor writes its pid on its first save, which
 # follows the sub-agent's Popen.
 LAUNCH_GRACE_SECONDS = 60.0
 
 
-def next_index(role_dir: str, tag: str, role: str) -> int:
-    """Smallest ``n`` for which no receipt ``receipt_<tag>_<role>_<n>.json`` exists."""
+def reserve_index(role_dir: str, tag: str, role: str) -> int:
+    """Claim the smallest free ``n`` by creating its receipt file exclusively.
+
+    ``O_CREAT | O_EXCL`` makes the check and the claim one atomic step, so two
+    launches of the same role and tag at the same moment can never both take
+    ``n`` and overwrite each other's request, report and receipt. The empty
+    file is replaced by the real receipt immediately afterwards.
+
+    Parameters
+    ----------
+    role_dir : str
+        ``<artefacts-dir>/<role>``.
+    tag : str
+        The invocation tag.
+    role : str
+        The role name.
+
+    Returns
+    -------
+    int
+        The reserved index.
+    """
     n = 1
-    while os.path.exists(os.path.join(role_dir, f"receipt_{tag}_{role}_{n}.json")):
-        n += 1
-    return n
+    while True:
+        path = os.path.join(role_dir, f"receipt_{tag}_{role}_{n}.json")
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return n
+        except FileExistsError:
+            n += 1
 
 
 def build_command(role: str, request_path: str, cwd: str | None) -> list[str]:
     """The sub-agent CLI invocation from `subagent_invocation.md §General Pattern`."""
     main_py = os.path.join(TARGET_ROOT, "subagents", ROLES[role], "main.py")
     cmd = [
-        "uv", "run", "--with", "claude-agent-sdk", "--with", "python-dotenv",
+        "uv", "run", "--with", CLAUDE_AGENT_SDK_REQUIREMENT, "--with", "python-dotenv",
         "python", main_py, request_path,
     ]
     if cwd:
@@ -176,7 +291,7 @@ def launch(
     os.makedirs(requests_dir, exist_ok=True)
     os.makedirs(role_dir, exist_ok=True)
 
-    n = next_index(role_dir, tag, role)
+    n = reserve_index(role_dir, tag, role)
     stem = f"{tag}_{role}_{n}"
     persisted_request = os.path.join(requests_dir, f"{stem}.json")
     if os.path.abspath(request_path) != persisted_request:
@@ -196,15 +311,16 @@ def launch(
         "cwd": os.path.abspath(cwd) if cwd else TARGET_ROOT,
         "state": "launching",
         "pid": None,
+        "pid_start": None,
         "supervisor_pid": None,
+        "supervisor_start": None,
         "exit_code": None,
         "failure_class": None,
         "failure_route": None,
         "started_at": _now(),
         "finished_at": None,
     }
-    with open(receipt_path, "w") as f:
-        json.dump(receipt, f, indent=2)
+    _write_json_atomic(receipt_path, receipt)
 
     # The supervisor (this script, `_supervise`) runs the sub-agent as its child
     # so the exit code can be recorded — a fully detached grandchild could not
@@ -231,10 +347,10 @@ def supervise(receipt_path: str) -> int:
     env = dict(os.environ)
     env[COST_FILE_ENV] = receipt["cost"]
     receipt["supervisor_pid"] = os.getpid()
+    receipt["supervisor_start"] = _pid_start_time(os.getpid())
 
     def save() -> None:
-        with open(receipt_path, "w") as f:
-            json.dump(receipt, f, indent=2)
+        _write_json_atomic(receipt_path, receipt)
 
     # A launch that cannot even start (bad cwd, missing interpreter) must
     # still leave a terminal receipt, or a caller polling `wait` is stranded.
@@ -249,6 +365,7 @@ def supervise(receipt_path: str) -> int:
                 env=env,
             )
             receipt["pid"] = proc.pid
+            receipt["pid_start"] = _pid_start_time(proc.pid)
             receipt["state"] = "running"
             save()
             code = proc.wait()
@@ -314,8 +431,9 @@ def load_receipt(path: str) -> dict[str, Any]:
 
 def describe(receipt: dict[str, Any]) -> str:
     """One-screen status for a receipt (score-free: sizes and states only)."""
-    alive = _pid_alive(receipt.get("pid")) or (
-        receipt.get("state") == "launching" and _pid_alive(receipt.get("supervisor_pid"))
+    alive = _pid_alive(receipt.get("pid"), receipt.get("pid_start")) or (
+        receipt.get("state") == "launching"
+        and _pid_alive(receipt.get("supervisor_pid"), receipt.get("supervisor_start"))
     )
     state = receipt.get("state")
     if state == "failed":
@@ -354,7 +472,7 @@ def wait_for(receipt_path: str, timeout: float, interval: float = 15.0) -> dict[
         # Dead without a terminal receipt (supervisor killed, host restart):
         # report it as terminal rather than stranding the caller. A receipt
         # still in `launching` with no pid gets a grace period first.
-        if not _pid_alive(r.get("pid")) and not _pid_alive(r.get("supervisor_pid")):
+        if not _receipt_alive(r):
             if r.get("state") == "launching" and not r.get("supervisor_pid"):
                 try:
                     started = datetime.fromisoformat(r["started_at"])
@@ -419,8 +537,8 @@ def relaunch_command(receipt: dict[str, Any]) -> list[str]:
     list[str]
         argv for this script, e.g. ``["uv", "run", "python",
         "scripts/launch_subagent.py", "launch", "analyst",
-        "<inv>/requests/iter2_analyst_1.json", "--investigation", "<inv>",
-        "--tag", "iter2", "--artefacts-dir", "<inv>/iter2/artefacts"]``.
+        "<inv>/requests/iter_02_analyst_1.json", "--investigation", "<inv>",
+        "--tag", "iter_02", "--artefacts-dir", "<inv>/iter_02/artefacts"]``.
     """
     request = receipt["request"]
     # Layout fixed by `launch`: <investigation>/requests/<stem>.json and
@@ -478,11 +596,38 @@ def unfinished(investigation: str) -> list[dict[str, Any]]:
         )
         if superseded:
             continue
-        alive = r.get("state") not in ("finished", "failed") and (
-            _pid_alive(r.get("pid")) or _pid_alive(r.get("supervisor_pid"))
-        )
+        alive = r.get("state") not in ("finished", "failed") and _receipt_alive(r)
         out.append({"receipt": r, "alive": alive, "relaunch": None if alive else relaunch_command(r)})
     return out
+
+
+def exit_code_for(receipt: dict[str, Any]) -> int:
+    """The `status`/`wait` exit code for a receipt (see `EXIT_TERMINAL`).
+
+    Parameters
+    ----------
+    receipt : dict
+        The receipt as last read.
+
+    Returns
+    -------
+    int
+        0 when the receipt is terminal, 3 while the process runs, 4 when it
+        died without recording an exit (a dead invocation is terminal: stop
+        polling and handle it as a failure).
+    """
+    if receipt.get("state") in ("finished", "failed"):
+        return EXIT_TERMINAL
+    if receipt.get("state") == "launching" and not receipt.get("supervisor_pid"):
+        # Inside the launch grace period nothing has recorded a pid yet.
+        try:
+            started = datetime.fromisoformat(receipt["started_at"])
+            age = (datetime.now(timezone.utc) - started).total_seconds()
+        except (KeyError, ValueError):
+            age = LAUNCH_GRACE_SECONDS
+        if age < LAUNCH_GRACE_SECONDS:
+            return EXIT_RUNNING
+    return EXIT_RUNNING if _receipt_alive(receipt) else EXIT_DEAD
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -493,7 +638,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("role", choices=sorted(ROLES))
     p.add_argument("request")
     p.add_argument("--investigation", required=True, help="investigations/<name> directory")
-    p.add_argument("--tag", required=True, help="iteration/phase label, e.g. 00_resample, iter1")
+    p.add_argument("--tag", required=True, help="neutral iteration/phase label, e.g. iter_00, iter_01, phase4")
     p.add_argument("--artefacts-dir", default=None, help="defaults to <investigation>/artefacts")
     p.add_argument("--cwd", default=None, help="--cwd for the sub-agent")
 
@@ -531,11 +676,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "status":
         r = load_receipt(args.receipt)
         print(json.dumps(r, indent=2) if args.json else describe(r))
-        return 0 if r.get("state") in ("finished", "failed") else 3
+        return exit_code_for(r)
     if args.cmd == "wait":
         r = wait_for(args.receipt, args.timeout, args.interval)
         print(json.dumps(r, indent=2) if args.json else describe(r))
-        return 0 if r.get("state") in ("finished", "failed") else 3
+        return exit_code_for(r)
     if args.cmd == "list" and args.unfinished:
         entries = unfinished(args.investigation)
         if not entries:

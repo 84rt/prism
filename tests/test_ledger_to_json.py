@@ -291,3 +291,41 @@ def test_unrecognised_tier_value_warns_and_is_untiered() -> None:
     result = l2j.parse_ledger(TIERED_LEDGER.replace("tested — by rank", "maybe"))
     assert result.candidates[0].tier is None
     assert any("neither `tested` nor `carried`" in w for w in result.warnings)
+
+
+# --- Parser edge cases that would otherwise pass silently ---------------------
+
+
+def test_blank_line_ends_a_wrapped_field() -> None:
+    """Prose after a blank line is not glued onto the field above it (X1's signature here)."""
+    ledger = TEMPLATE_LEDGER.replace(
+        "  should reduce the rate.\n",
+        "  should reduce the rate.\n\nA stray note under X1, not part of any field.\n",
+    )
+    x1 = next(c for c in l2j.parse_ledger(ledger).candidates if c.id == "X1")
+    assert x1.fields["discriminating_signature"] == "Some edit should reduce the rate."
+
+
+def test_repeated_field_keeps_the_first_and_warns() -> None:
+    ledger = TEMPLATE_LEDGER.replace(
+        "- *Recipe membership*: standalone\n",
+        "- *Recipe membership*: standalone\n- *Statement*: A second, conflicting statement.\n",
+    )
+    result = l2j.parse_ledger(ledger)
+    c1 = result.candidates[0]
+    assert c1.fields["statement"].startswith("The model read the failing test")
+    assert any("C1 has a second *Statement*" in w for w in result.warnings)
+
+
+def test_two_headings_on_one_line_warn() -> None:
+    ledger = TEMPLATE_LEDGER.replace(
+        "### X1 — `critic_idea` — rank 2", "### X1 — `critic_idea` — rank 2 ### X2 — `other` — rank 3"
+    )
+    result = l2j.parse_ledger(ledger)
+    assert any("two candidate headings on one line" in w for w in result.warnings)
+
+
+def test_unparsed_heading_under_live_section_warns() -> None:
+    ledger = TEMPLATE_LEDGER.replace("### X1 — `critic_idea` — rank 2", "### A Critic idea, written loosely")
+    result = l2j.parse_ledger(ledger)
+    assert any("did not parse" in w and "written loosely" in w for w in result.warnings)

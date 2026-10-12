@@ -7,7 +7,7 @@ dirs and are skipped when that corpus is not present (it is container-local).
 Run with the self-contained recipe from the fix briefs' Shared Preamble:
 
     uv run --with "inspect_ai==0.3.263" --with "inspect-scout==0.5.2" \
-        --with claude-agent-sdk --with python-dotenv --with pytest pytest tests/
+        --with claude-agent-sdk==0.2.165 --with python-dotenv --with pytest pytest tests/
 """
 
 from __future__ import annotations
@@ -183,6 +183,29 @@ def test_find_logs_dedups_repeated_inputs(tmp_path):
 
 def _run(args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True)
+
+
+def test_cli_omits_scores_by_default_on_a_synthetic_log(tmp_path):
+    """No corpus needed: the dump of a scored log carries no score unless asked.
+
+    Dumps are what every sub-agent reads instead of the `.eval`, so the
+    default must be score-free; `--with-scores` is the explicit opt-in.
+    """
+    from conftest import LEAK_TOKENS, write_fixture_log
+
+    log = write_fixture_log(str(tmp_path / "logs" / "c_3f9a" / "f.eval"), epochs=2)
+    out = tmp_path / "dumps"
+    assert dt.main([str(tmp_path / "logs"), "--out", str(out)]) == 0
+    texts = [p.read_text() for p in out.rglob("*.txt")]
+    assert len(texts) == 2 and all("LEAKY_ANSWER" in t for t in texts)  # the transcript itself is there
+    for t in texts:
+        assert "### SCORE" not in t
+        for tok in LEAK_TOKENS:
+            assert tok not in t
+
+    scored = tmp_path / "scored"
+    assert dt.main([log, "--out", str(scored), "--with-scores"]) == 0
+    assert all("### SCORE" in p.read_text() and "0.9871" in p.read_text() for p in scored.rglob("*.txt"))
 
 
 @needs_corpus

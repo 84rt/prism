@@ -27,7 +27,7 @@ A mapping from condition names to per-condition invocation parameters. **Conditi
 }
 ```
 
-- `task`: path to the task file relative to `experiment_dir` (never absolute — Inspect rejects absolute task paths). A condition may also be given as a bare string, which is read as `{"task": "<string>", "args": {}}`.
+- `task`: path to the task file relative to `experiment_dir` (never absolute — Inspect rejects absolute task paths). The batch runner runs each condition's commands **from the task file's own directory** (`inspect_reference.md` gotcha 11): the sandbox compose file / `Dockerfile`, string `Sample.files` paths and relative `-T` file arguments resolve beside that condition's task, so conditions in sibling subdirectories never share one sandbox or one set of file bytes. A condition may also be given as a bare string, which is read as `{"task": "<string>", "args": {}}`.
 - `args`: key-value pairs passed as `-T key=value` to the `inspect eval` invocation for that condition. Non-string values are rendered as JSON.
 
 Patterns A/B/C (parameter-based, separate task files, model variation only) are determined by how the orchestrator populates this mapping. The Executor does not need to classify the pattern.
@@ -104,10 +104,10 @@ The paragraphs below are marked **[caller]** or **[Executor]**. Caller-facing pa
 ```json
 {
     "experiment_name": "iter_00",
-    "experiment_dir": "investigations/<name>/iterations/00_round0",
+    "experiment_dir": "/abs/path/to/investigations/<name>/iterations/00_round0",
     "conditions": {"c_0e4d": "c_0e4d/<path/to/unmodified_task.py>"},
     "models": ["<frozen target model>"],
-    "overrides": {"sample_id": "<id of the episode under investigation>", "epochs": 30}
+    "overrides": {"sample_id": "<id of the episode under investigation>", "epochs": 100}
 }
 ```
 
@@ -154,7 +154,7 @@ Each report from the Executor to the orchestrator contains the following section
 
 ### Summary
 
-A 3–5 sentence overview of the execution. State: how many condition-model pairs were attempted and their final disposition (completed / completed-with-sample-errors / excluded at preflight / failed during full execution); the chosen `max_parallel` level; and the most decision-critical observation for the orchestrator (e.g., asymmetric exclusions between conditions, unusually high sample-level attrition, notable retry activity). No recommendation — this section conveys information, not next-step advice.
+A 3–5 sentence overview of the execution. State: how many condition-model pairs were attempted and their final disposition (completed / completed-with-sample-errors / excluded at preflight / failed during full execution); the `max_parallel` level full execution ran at (the runner's default ceiling unless a request override or a justified Executor override raised it); and the most decision-critical observation for the orchestrator (e.g., asymmetric exclusions between conditions, unusually high sample-level attrition, notable retry activity). No recommendation — this section conveys information, not next-step advice.
 
 If the orchestrator stops reading here, it should know whether the execution succeeded cleanly and whether any pair needs further investigation.
 
@@ -262,15 +262,14 @@ These are counts of transcript *shape*, not *quality*. A transcript with assista
 
 ### Concurrency Decision
 
-Structured fields documenting how the Executor chose the full-execution concurrency level:
+Structured fields documenting how the full-execution concurrency level was set. The runner fixes it: its default ceiling (`max_parallel: 1`, `max_connections: 4`, sized for a shared host with one sandbox per sample) applies unless the request's `overrides` set it, or the Executor raised it at launch with a recorded rationale (`execute_evals.py run … --max-parallel N --max-connections M --rationale "…"`). The runner then halves `max_parallel` on resource contention; `max_connections` is never changed mid-run.
 
 - **Chosen `max_parallel`**: integer
 - **Orchestrator override provided**: `yes (<value>)` | `no`
 - **Resources observed**: e.g., `nproc=8, free_mem_mb=14336`
 - **Sandbox detected**: `yes` | `no` (evidence: preflight timing, e.g., `~18s per command suggests sandbox setup`)
-- **Concurrency preflight test run**: `yes (<result>)` | `no` | `not applicable (only 1 pair)`
 - **Reductions applied during execution**: list with reasons, or `none`
-- **Rationale**: one to two sentences tying the fields above to the chosen level
+- **Rationale**: one to two sentences tying the fields above to the level used — the runner default, the request override, or the Executor's recorded reason for raising it
 
 ### Execution Summary
 
@@ -298,6 +297,7 @@ Failures are classified by **observable criteria**, not by judgement about cause
 | **Transient** | Error occurred but a subsequent retry succeeded | None — noted for completeness |
 | **Sample-level** | Eval process exited successfully; ≥1 sample errored in the log | Proceed to Analyst; retry-distribution-shift caveat applies |
 | **Structural** | All process-level retries exhausted; no usable log produced | Must investigate before proceeding; re-running will not help |
+| **Pinned provider unavailable** (`routing`) | OpenRouter reported no available provider for the pinned route; no retry can fix it | Orchestrator's choice: wait, re-pin and restart that model's conditions, or drop the model — never a silent re-pin |
 
 Every **structural** failure record includes: final exit code, exact command, and output tail (~50 lines, stderr and stdout combined). These three pieces are sufficient for the orchestrator to distinguish experiment-setup bugs (ImportError, missing task file) from infrastructure issues (missing API key, Docker unavailable). Both streams are required: Inspect writes provider-initialisation and missing-key errors to stdout, so a stderr-only tail would report the most common structural failures with no evidence at all.
 

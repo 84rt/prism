@@ -4,7 +4,7 @@ Derived from the six-run analysis in `2026-09-17-model-forensics-analysis.md` (a
 
 **How to use.** Each WP names the files it owns, the deficiencies it closes, a concrete fix per deficiency, and coordination notes where two WPs touch the same file. Priorities: **P0** blocks clean/valid operation, **P1** high-value (cost, firewall, measurement validity), **P2** hardening. Fixes are proposals — finalise the exact implementation per WP; the deficiency IDs let you trace each back to its evidence in the analysis. Where a fix has a mechanical half (a script, a runner change) and a policy half (a rule in a Diagnostician doc), the halves are assigned to different WPs and cross-referenced.
 
-**Revision history.** 2026-09-17 first draft at `/workspaces/model-forensics-fixes.md` (container-local). Same day, revised and moved here after a repo read-through: WP1 re-designed around a deterministic core with the Executor agent kept as the judgement/recovery layer; the engine-level scorer leak named; WP2's proxy requirement stated; WP6 broadened from a staging step to opaque-at-source plus a leak check; WP4 given the two deterministic tools it actually needs; D02/D03/D28/D36-guard/D12-mechanism/D14-mechanism re-homed to WP1; D16's Diagnostician half moved to WP5-B; WP5 made sequential.
+**Revision history.** 2026-09-17 first draft at `/workspaces/model-forensics-fixes.md` (container-local). Same day, revised and moved here after a repo read-through: WP1 re-designed around a deterministic core with the Executor agent kept as the judgement/recovery layer; the engine-level scorer leak named; WP2's proxy requirement stated; WP6 broadened from a staging step to opaque-at-source plus a leak check; WP4 given the two deterministic tools it actually needs; D02/D03/D28/D36-guard/D12-mechanism/D14-mechanism re-homed to WP1; D16's Diagnostician half moved to WP5-B; WP5 made sequential. 2026-10-08: WP2 and WP6 were implemented in redesigned form, so their sections below are **superseded** — WP2 added no third route (LiteLLM dropped; credential exhaustion suspends resumably instead), and WP6 covers both modes with a differing `task_args` warning rather than blocking. See `reviews/REVIEW-WP2.md` and `reviews/REVIEW-WP6.md`.
 
 **Evidence lives outside the repo.** `/workspaces/forensics-cases/` (the six runs, ~730 MB without venvs: 175 `.eval` logs, persisted grader packages with hashes, label maps, request payloads, the in-house runner scripts) is container-local and is the regression corpus for WP3, WP4, WP6 and WP7's offline tests. Preserve it before a container rebuild.
 
@@ -59,6 +59,8 @@ Derived from the six-run analysis in `2026-09-17-model-forensics-analysis.md` (a
 ---
 
 ## WP2 — Sub-agent routing & credentials (P1)
+
+> **Superseded (2026-10-08).** Implemented as redesigned by the owner: no third route and no LiteLLM proxy; two routes only, with detection, degrade-first and a resumable suspension. See `reviews/REVIEW-WP2.md`.
 
 *A correlated credential cap took down all sub-agents in five of six runs — and, in R05, the target model too.* Owns the route resolver in `runner.py` and every statement in the docs that says no direct-OpenAI route exists.
 
@@ -123,6 +125,8 @@ Derived from the six-run analysis in `2026-09-17-model-forensics-analysis.md` (a
 ---
 
 ## WP6 — Blinding firewall (P0)
+
+> **Superseded (2026-10-08).** Implemented for both modes (Orchestrator included), with a differing `task_args` value warned on and recorded rather than blocked. See `reviews/REVIEW-WP6.md`.
 
 *The single most serious firewall defect: R02's Analyst blinding was silently defeated.* Not a thin staging step: the real condition name reaches the Analyst through **three** channels today — the log directory name, the `--metadata condition=` / `--tags cond:` values embedded in every `.eval` log, and the variant's environment directory path recorded in the log's eval spec.
 

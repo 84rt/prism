@@ -9,8 +9,8 @@ The orchestrator is the only agent that talks to the user, holds the research qu
 | Agent | Receives | Returns |
 |-------|----------|---------|
 | Environment Explorer | Hypothesis, experiment description, environment path, optional constraints | Structured briefing: environment summary, pipeline model, modification sites with diffs, variant dependencies, risk assessment, open questions (see `explorer_interface_contract.md`) |
-| Experiment Executor | Experiment name, directory, condition specs, models, optional overrides | Structured execution report: summary, preflight exclusions, execution matrix, error summary, transcript termination metadata, concurrency decision, execution summary, additional notes (see `executor_interface_contract.md`) |
-| Transcript Analyst | Topic (not hypothesis), transcript source (condition→path mapping), scanning model?, constraints? | Scanner definitions, validation metrics, quantified results, scan results path, transcript exclusions, excerpts |
+| Experiment Executor | Experiment name, directory, condition specs, models, model routing?, optional overrides | Structured execution report: summary, preflight exclusions, execution matrix, error summary, transcript termination metadata, concurrency decision, execution summary, additional notes (see `executor_interface_contract.md`) |
+| Transcript Analyst | Topic (not hypothesis), transcript source (condition→path mapping), scanning model?, constraints?, artefacts dir?, construal checks? (de-identified), execution notes? (non-directional execution facts only) | Scanner definitions, validation metrics, quantified results, scan results path, transcript exclusions, excerpts |
 
 The orchestrator does everything that falls *between* these delegated stages — refining the hypothesis, designing conditions, applying environment modifications, interpreting the Analyst's findings, deciding the next step, and reporting to the user. What it must never do is take over a sub-agent's stage: it never runs evals itself (the Executor's job), never takes over the Explorer's systematic exploration of the eval to design perturbations (though it may read the eval to orient itself and form hypotheses), and never reads transcripts to surface behavioural patterns itself (the Analyst's job). Bypassing a sub-agent forfeits the scaffold's integrity guarantees — see the Anti-Patterns. The one exception is genuine sub-agent failure, handled explicitly in the Sub-Agent Failure Handling section below.
 
@@ -244,7 +244,7 @@ The request and report formats for the Executor are defined in `executor_interfa
 
 The report structure is defined in `executor_interface_contract.md §Report Format`. Read the Summary first — 3–5 sentences naming the final disposition of every condition-model pair and flagging the most decision-critical observation. The remaining sections provide drill-down.
 
-**Do not read eval results.** Between receiving the Executor's report and receiving the Analyst's report, do not read eval log file contents, extract scores, compute aggregate metrics, or run `inspect log list/dump` on experiment log directories — and never open the batch runner's `private/` directory under `artefacts/executor/runs/`, which holds raw, score-bearing output. The Executor's report contains everything needed to decide whether to proceed: Execution Matrix status, Error Summary categories and evidence, and Transcript Termination Metadata. You may verify that log *files exist* (e.g., `ls` the log directory to confirm paths before passing them to the Analyst), but you must not read their *contents*. The Analyst's blinded report must be your first view of the experimental results. Reading scores early contaminates your interpretation of the Analyst's findings — you will unconsciously seek confirmation of what you already know.
+**Do not read eval results.** Between receiving the Executor's report and receiving the Analyst's report, do not read eval log file contents, extract scores, compute aggregate metrics, or run `inspect log list/dump` on experiment log directories — and never open the batch runner's `private/` directory under `artefacts/executor/runs/`, which holds raw, score-bearing output (the shipped `.claude/settings.json` denies reading it, so this is enforced, not just asked). The Executor's report contains everything needed to decide whether to proceed: Execution Matrix status, Error Summary categories and evidence, and Transcript Termination Metadata. You may verify that log *files exist* (e.g., `ls` the log directory to confirm paths before passing them to the Analyst), but you must not read their *contents*. The Analyst's blinded report must be your first view of the experimental results. Reading scores early contaminates your interpretation of the Analyst's findings — you will unconsciously seek confirmation of what you already know.
 
 **Interpreting the Executor's report:**
 
@@ -257,7 +257,7 @@ The report structure is defined in `executor_interface_contract.md §Report Form
 
 3. **Interpret the Error Summary by category.** Each category gates a different action:
    - **Transient (recovered)**: informational. The eval completed; proceed.
-   - **Sample-level**: the eval completed but some samples errored. The Analyst will quantify per-condition attrition. Proceed, but record the attrition for the Analyst's delegation brief.
+   - **Sample-level**: the eval completed but some samples errored. The Analyst will quantify per-condition attrition. Proceed, but record the attrition for the Analyst's `execution_notes` (item 7).
      - **Except** a pair whose entry carries a `[credentials] Credentials exhausted` line (with the count of affected samples): the provider's credit or usage cap was reached mid-eval, and because the runner passes `--no-fail-on-error` the process exited 0 while the remaining samples errored. This is a suspension trigger, not a task bug and not attrition — those samples are not valid data, so do not send the pair to the Analyst as it stands; see §Sub-Agent Failure Handling → *Credential exhaustion and suspension*, and re-run the pair after resuming.
    - **Structural**: the eval did not run to completion. Do not proceed without investigation. Read the evidence (exit code, command, combined stdout+stderr tail) to diagnose. Common signatures:
      - `ImportError` referencing a file you created in Step 2c → your modification introduced a bug; re-check the diff rather than re-running.
@@ -273,23 +273,23 @@ The report structure is defined in `executor_interface_contract.md §Report Form
      Check `scripts/openrouter_endpoints.py` for the model to see whether the pinned provider is down or has disappeared from the endpoint list entirely; the latter means re-pinning is the only option.
 
 4. **Handle partial failures.** If some pairs failed but not all:
-   - *Symmetric failures* (similar rates across conditions) — data may still be usable; note for the Analyst's delegation brief.
+   - *Symmetric failures* (similar rates across conditions) — data may still be usable; note it in the Analyst's `execution_notes` (item 7).
    - *Asymmetric failures* (one condition failed more than another) — this is a confound. Consider re-running the failed pairs, investigating whether the treatment modifications broke the eval, or reporting the asymmetry to the user. Do not silently proceed.
 
 5. **Handle total failure.** If the Execution Matrix has no successful pairs (after accounting for Preflight Exclusions), do not launch the Analyst. Diagnose from the evidence, fix if possible, and re-run. If the problem is unfixable, escalate to the user.
 
 6. **Read Transcript Termination Metadata.** Per-pair counts of transcripts with no assistant messages, limit hits, and error terminations. Before delegating to the Analyst:
-   - If a condition has many empty (no-assistant-msg) transcripts, the Analyst will have little behavioural signal to scan. Note this as a limitation in the delegation brief.
+   - If a condition has many empty (no-assistant-msg) transcripts, the Analyst will have little behavioural signal to scan. Note it in the Analyst's `execution_notes` (item 7).
    - If limit hits or error terminations differ markedly between conditions, this is a form of differential attrition — flag it as a potential confound.
    - These counts describe transcript *shape*, not *quality*. A transcript with assistant messages, no limit hit, and no termination error is unremarkable here regardless of whether its content looks strange — content judgement is the Analyst's job.
 
-7. **Communicate retry flags and attrition to the Analyst.** Sample-Level Retries and sample-level errors represent populations the Analyst must reason about. When you construct the Analyst's request in Step 2g:
-   - Include per-condition sample-level retry counts and sample-error counts as a caveat.
-   - Note that retried samples may exhibit distribution shift relative to non-retried ones (the retry succeeded conditional on a prior failure, which can introduce selection effects).
+7. **Communicate retry flags and attrition to the Analyst — in `execution_notes`.** Sample-Level Retries and sample-level errors represent populations the Analyst must reason about, and the Analyst cannot recover them from transcripts alone. When you construct the Analyst's request in Step 2g, put them in its optional `execution_notes` field (a string or a list of strings; `agent.py` renders it under its own `## Execution Notes` heading with a rule that it is data-quality context, never hypothesis context):
+   - **What goes in:** per-condition sample-level retry counts, sample-error counts, preflight exclusions and transcript termination counts (no-assistant-message, limit hits, error terminations), each under that invocation's opaque `condition_X` label; and the note that retried samples may exhibit distribution shift relative to non-retried ones (the retry succeeded conditional on a prior failure, which can introduce selection effects).
+   - **What never goes in:** a real condition name or role word, the hypothesis, any expected direction or comparison ("condition_B should be lower"), or an error's *content* where that content reveals what a condition is (a task error quoting the manipulated file). Non-directional execution facts only. `check_blinding.py` scans this field with the rest of the request.
 
-8. **Audit the Concurrency Decision.** The structured fields let you verify the Executor's choice was reasonable. If `Reductions applied during execution` is non-empty, the initial concurrency estimate was wrong and some re-runs occurred. This is not a failure but is worth noting if wall-clock matters for the investigation.
+8. **Audit the Concurrency Decision.** The batch runner sets the concurrency level — its default ceiling (`max_parallel: 1`, `max_connections: 4`), your request's `overrides`, or an Executor override whose recorded rationale you should check is concrete (an API-only eval on a host whose resources were read). If `Reductions applied during execution` is non-empty, the runner hit resource contention and halved `max_parallel`, and some commands were retried. This is not a failure but is worth noting if wall-clock matters for the investigation.
 
-9. **Record in investigation log.** Update the investigation log with: condition-model pairs completed / failed / excluded, key errors, retry counts, transcript termination patterns, and chosen concurrency.
+9. **Record in investigation log.** Update the investigation log with: condition-model pairs completed / failed / excluded, key errors, retry counts, transcript termination patterns, and the concurrency level used.
 
 **Common pitfalls:**
 
@@ -350,7 +350,7 @@ This is the orchestrator's most important cognitive task. The Transcript Analyst
 
    *Logs produced before opaque ids existed* cannot be fixed by renaming. Neutrally named staging directories (symlinks, as one archived investigation used) hide the directory name but not the symlink target or the names inside each `.eval` (`task_file`, tags, metadata), so the check still blocks. Either re-run those conditions under ids, or record the exposure — every channel and condition the check listed, and which measurements it could have touched — in the log and the Phase 3 caveats, and proceed on that recorded decision. Never proceed past a block silently.
 
-3. **Launch the Transcript Analyst sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) and poll with `wait`.
+3. **Launch the Transcript Analyst sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) — `launch analyst <request.json> --investigation investigations/<investigation_name> --tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts` — and poll with `wait`.
 
 4. **After the Analyst returns**, review the scan results path provided in the report for sanity-checking summary statistics.
 
@@ -368,6 +368,7 @@ This is the orchestrator's most important cognitive task. The Transcript Analyst
 - Scanner definitions (names, types, questions/patterns)
 - Validation metrics — chance-adjusted agreement (κ), precision, recall, F1, validation set size, labelling method, validator-model identity per scanner
 - Quantified results — per-condition rates with scanner-adjusted bounds and Wilson CIs; between-condition rate-difference Newcombe-Wilson CIs and Fisher's exact p-values; multiple-comparisons count and Bonferroni-corrected p-values when applicable; "Provisional" subsection for unvalidated scanners
+- Construal-check results, when the request carried `construal_checks` — each check's rate in every condition, the pairwise difference matrix and a scorability label, never a verdict (you derive the verdicts from your private check → condition mapping)
 - Scan results path (for sanity-checking summary statistics)
 - Transcript exclusions (counts and reasons, by condition)
 - Transcript excerpts (illustrative message references)
@@ -639,7 +640,7 @@ Research scope unchanged since iteration 1.
 **Scope this iteration — two forms.** Iteration-anchored, no dates:
 
 - *Unchanged*: `Research scope unchanged since iteration K.` where K is the iteration when the current scope was set (iteration 1 by default; updated to N whenever a renegotiation happens in iteration N).
-- *Updated*: `Research scope `**`update`**` (diff vs iteration K−1): <one-line diff>. New agreed scope: [Research question: …; Models: …; Eval environment: …; Execution parameters: …].` The diff names *what* changed; the new agreed scope restates *all four fields* in full so the current state is self-contained and you don't have to scroll back through deltas to reconstruct it. Example: *"Research scope update (diff vs iteration 2): broadened to include Sonnet-4-6. New agreed scope: [Research question: how prompt framing affects refusal rates on harmful requests; Models: \[Opus-4-7, Sonnet-4-6\]; Eval environment: agentic_misalignment; Execution parameters: 50 samples × 3 epochs]."*
+- *Updated*: `Research scope `**`update`**` (diff vs iteration K−1): <one-line diff>. New agreed scope: [Research question: …; Models: …; Model routes: …; Eval environment: …; Execution parameters: …; Budget: …].` The diff names *what* changed; the new agreed scope restates *all six fields* of the Agreed Scope in full so the current state is self-contained and you don't have to scroll back through deltas to reconstruct it. Example: *"Research scope update (diff vs iteration 2): broadened to include Sonnet-4-6. New agreed scope: [Research question: how prompt framing affects refusal rates on harmful requests; Models: \[Opus-4-7, Sonnet-4-6\]; Model routes: both direct; Eval environment: agentic_misalignment; Execution parameters: 50 samples × 3 epochs; Budget: $200 spend cap, 5 iterations]."*
 
 **Hypothesis this iteration is locked once written.** Each iteration tests exactly one hypothesis, named in its *Hypothesis this iteration → Statement* field, written before launching the Explorer (Step 2a). Follow-ups, alternative angles, or more exciting avenues that the Analyst's findings or Surprises section surface during this iteration go into the *next* iteration's block — never appended to this iteration's Statement, and never quietly tested by tweaking conditions mid-flight. Cross-iteration hypothesis changes show up naturally in the next iteration's *Hypothesis this iteration* block; the log's append-only history records when each hypothesis entered the investigation.
 
@@ -658,7 +659,7 @@ Written at the investigation root beside the log when the investigation is suspe
 *Suspended (resumable) at <timestamp>, during Iteration <N>, Step <2x>. Not a findings report.*
 
 ## Resume at
-<the exact next step, e.g. "Iteration 3, Step 2g: launch the Analyst on iter3_v1/logs — the Executor finished 4/4 pairs">
+<the exact next step, e.g. "Iteration 3, Step 2g: launch the Analyst on iter_03/logs — the Executor finished 4/4 pairs">
 
 ## Credentials needed
 - <key>: <the provider's text> — needed by <roles / target model>
@@ -798,7 +799,7 @@ If Model A succeeded but Model B failed entirely, the orchestrator can still sen
 
 4. **Proceeding after total execution failure.** If no condition-model pair reached `status=success` or `status=sample-level-errors` (all excluded at preflight or failed in full execution), there is no usable data for the Analyst. Diagnose from the Executor's evidence before re-running.
 
-5. **Ignoring the Analyst's limitations section.** The Analyst is required to flag limitations. If the orchestrator doesn't read and relay them, the user gets an incomplete picture.
+5. **Ignoring the Analyst's flagged caveats.** The report has no section of its own for limitations; the Analyst flags them where they arise — the "Provisional" subsection for unvalidated scanners, same-family-agreement risks under `### Validation metrics`, floor/ceiling markers on rates, `### Transcript exclusions`, and metadata observations under `### Additional observations`. If the orchestrator doesn't read and relay them, the user gets an incomplete picture.
 
 6. **Reusing condition labels across iterations without re-randomising.** Each Analyst invocation should use freshly randomised condition-label mappings. If condition_A always maps to the control, the firewall is weakened.
 

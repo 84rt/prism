@@ -44,6 +44,15 @@ RESTRICTED_FILES: dict[str, str] = {
     "CANDIDATES.md": "Candidate-explanation ledger (Model Forensics mode).",
     "INVESTIGATION-LOG.md": "Investigation history: hypotheses, findings, rates.",
     "FINDINGS-REPORT.md": "Investigation synthesis: explanations and evidence.",
+    # The batch runner's quarantine (defence in depth: the runner already keeps
+    # the Executor's view score-free). Raw eval output and failed attempts'
+    # logs carry scores; the Executor works from the status file and the
+    # scrubbed report only. The label map is denied by the runner itself.
+    "artefacts/executor/runs/*/private/": (
+        "Quarantined raw eval output (score-bearing). Use the status file and "
+        "`execute_evals.py report` instead."
+    ),
+    "logs_quarantined/": "Quarantined logs of an aborted run (score-bearing).",
 }
 
 
@@ -169,12 +178,21 @@ def _persist_request(data: dict[str, Any]) -> str:
     -------
     str
         Absolute path of the written file, e.g.
-        ``<experiment_dir>/artefacts/executor/request_20260917T120000Z.json``.
+        ``<experiment_dir>/artefacts/executor/request_20260917T120000Z.json``
+        (``request_<stamp>_2.json`` and so on when that name is taken).
     """
     out_dir = os.path.join(os.path.abspath(data["experiment_dir"]), "artefacts", "executor")
     os.makedirs(out_dir, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = os.path.join(out_dir, f"request_{stamp}.json")
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-    return path
+    # Exclusive create: two Executors started in the same second (parallel
+    # conditions) must not overwrite each other's request file.
+    n = 1
+    while True:
+        name = f"request_{stamp}.json" if n == 1 else f"request_{stamp}_{n}.json"
+        path = os.path.join(out_dir, name)
+        try:
+            with open(path, "x") as f:
+                json.dump(data, f, indent=2)
+            return path
+        except FileExistsError:
+            n += 1

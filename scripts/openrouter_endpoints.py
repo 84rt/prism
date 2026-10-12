@@ -1,7 +1,8 @@
 """OpenRouter endpoint enumeration and provider selection for the Prism scaffold.
 
-The Orchestrator uses this to choose an upstream provider to pin before an
-investigation begins. Pinning matters because OpenRouter resolves one model id
+Both lead agents (the Orchestrator and the Diagnostician) use this to choose an
+upstream provider to pin before an investigation begins — and the Diagnostician
+also to price the cross-family Critic's model. Pinning matters because OpenRouter resolves one model id
 to one of several upstream providers, and those providers are not
 interchangeable measurement instruments: for the same model id they differ in
 quantization, in which sampling parameters they honour, and in maximum context
@@ -112,11 +113,11 @@ def _get_json(url: str, timeout: float) -> Any:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"HTTP {exc.code} fetching {url}: {exc.reason}")
+        raise RuntimeError(f"HTTP {exc.code} fetching {url}: {exc.reason}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(f"Network error fetching {url}: {exc}")
+        raise RuntimeError(f"Network error fetching {url}: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Invalid JSON from {url}: {exc}")
+        raise RuntimeError(f"Invalid JSON from {url}: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------

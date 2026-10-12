@@ -215,7 +215,7 @@ Each item names what the Diagnostician must do to resolve it. Hedged prose in th
 
 **Each invocation is self-contained.** One request, one report, no follow-up within the invocation, no memory across invocations. Everything the Designer knows about previous rounds arrives through the candidate ledger and the `constraints` field.
 
-**Read-only, stdout-only.** The Designer never modifies, creates, or deletes files. It emits diffs; the Diagnostician applies them. Its report goes to stdout and is saved by the Diagnostician.
+**Read-only, stdout-only.** The Designer never modifies, creates, or deletes files. It emits diffs; the Diagnostician applies them. Its report goes to stdout; the detached launcher (`scripts/launch_subagent.py`) captures it to the per-invocation path `<artefacts-dir>/designer/report_<tag>_designer_<n>.md`, with no separate save step.
 
 **Section headings are markdown, and their text is verbatim.** Emit each report section as a markdown heading at the level shown in the Report Format above (`### Summary`, `### Discrimination Matrix`, …), using the exact heading text, in the order given. Plain-text section titles are not sufficient: the Diagnostician locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read.
 

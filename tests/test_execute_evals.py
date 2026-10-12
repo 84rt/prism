@@ -10,16 +10,20 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-import pytest
-
+import check_report as cr
 import execute_evals as ee
-from conftest import LEAK_TOKENS, write_fixture_log
+from conftest import (
+    LEAK_TOKENS,
+    gate_prefix,
+    make_request,
+    substitute_fake_eval,
+    wait_for_file,
+    write_fixture_log,
+)
 
 SCRIPT = str(Path(ee.__file__))
 
@@ -29,40 +33,36 @@ SCRIPT = str(Path(ee.__file__))
 # ---------------------------------------------------------------------------
 
 
-def make_request(tmp_path, *, conditions=None, models=None, overrides=None, routing=None):
-    exp = tmp_path / "exp"
-    exp.mkdir(parents=True, exist_ok=True)
-    (exp / "task.py").write_text("# fixture task\n")
-    req = {
-        "experiment_name": "mf_fixture",
-        "experiment_dir": str(exp),
-        "conditions": conditions or {"baseline": {"task": "task.py", "args": {}}, "treatment": {"task": "task.py", "args": {"system": "alt.txt"}}},
-        "models": models or ["openai/gpt-5"],
-    }
-    if overrides is not None:
-        req["overrides"] = overrides
-    if routing is not None:
-        req["model_routing"] = routing
-    path = tmp_path / "request.json"
-    path.write_text(json.dumps(req))
-    return str(path), req
-
-
-def substitute_fake_eval(run_dir: str, fake_script: str) -> None:
-    """Point every rendered command at the fake eval, keeping the flags."""
-    plan_path = os.path.join(run_dir, "plan.json")
-    plan = json.load(open(plan_path))
-    for p in plan["pairs"]:
-        for key in ("command", "preflight_command", "retest_command"):
-            parts = shlex.split(p[key])
-            i = parts.index("eval")  # "... inspect eval task.py ..."
-            p[key] = " ".join(shlex.quote(x) for x in [sys.executable, fake_script] + parts[i + 1 :])
-    json.dump(plan, open(plan_path, "w"))
-
-
 def assert_no_leak(text: str, where: str) -> None:
     for tok in LEAK_TOKENS:
         assert tok not in text, f"scorer token {tok!r} leaked into {where}"
+
+
+def assert_tree_has_no_leak(root: str | Path) -> list[Path]:
+    """Walk a directory tree and assert no scorer token is in any file outside `private/`.
+
+    `.eval` logs are skipped: they are the Analyst's input and legitimately
+    carry scores (zip-compressed, so a byte scan would prove nothing anyway).
+    Everything else the runner writes — status, plan, request copy, draft
+    report, `worker.log` — is readable by the Executor or the lead.
+
+    Parameters
+    ----------
+    root : str | Path
+        The tree to walk (an experiment directory or a run directory).
+
+    Returns
+    -------
+    list[Path]
+        The files that were checked, so callers can assert coverage.
+    """
+    checked = []
+    for path in Path(root).rglob("*"):
+        if not path.is_file() or "private" in path.relative_to(root).parts or path.suffix == ".eval":
+            continue
+        assert_no_leak(path.read_bytes().decode("utf-8", "replace"), str(path))
+        checked.append(path)
+    return checked
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +380,7 @@ def test_detached_run_round_trip(tmp_path, fake_eval_script, monkeypatch):
     pid = ee.launch_detached(run_dir)
     assert pid and os.getsid(pid) != os.getsid(os.getpid()), "worker must run in its own session"
 
-    rc = subprocess.run([sys.executable, SCRIPT, "wait", run_dir, "--timeout", "60", "--interval", "1"], capture_output=True, text=True)
+    rc = subprocess.run([sys.executable, SCRIPT, "wait", run_dir, "--timeout", "60", "--interval", "0.2"], capture_output=True, text=True)
     assert rc.returncode == 0, rc.stdout + rc.stderr
     assert "state: completed" in rc.stdout
     assert_no_leak(rc.stdout, "wait stdout")
@@ -397,47 +397,160 @@ def test_wait_treats_dead_worker_as_terminal(tmp_path, fake_eval_script, monkeyp
     monkeypatch.setenv("FAKE_EVAL_MODE", "ok")
     path, _ = make_request(tmp_path, conditions={"baseline": {"task": "task.py", "args": {}}}, overrides={"skip_preflight": True})
     run_dir, _ = ee.prepare_run(path)
-    substitute_fake_eval(run_dir, fake_eval_script)
-    plan = json.load(open(os.path.join(run_dir, "plan.json")))
-    plan["pairs"][0]["command"] = "sleep 30 && " + plan["pairs"][0]["command"]
-    json.dump(plan, open(os.path.join(run_dir, "plan.json"), "w"))
+    # Hold the pair on a gate that never opens; kill once it is really running
+    # (the `started` sentinel), rather than after a guessed sleep.
+    started = tmp_path / "started"
+    substitute_fake_eval(run_dir, fake_eval_script, prefix=gate_prefix(tmp_path / "never", started))
     pid = ee.launch_detached(run_dir)
-    assert (Path(run_dir) / "worker.pid").read_text() == str(pid)
-    time.sleep(1.0)
+    # First field is the pid (the runner may append a start-time guard after it).
+    assert (Path(run_dir) / "worker.pid").read_text().split()[0] == str(pid)
+    wait_for_file(started)
     os.killpg(pid, 9)
-    data = ee.wait_for(run_dir, timeout=20, interval=0.5)
+    data = ee.wait_for(run_dir, timeout=20, interval=0.2)
     assert data["state"] == "failed"
     assert any("died before writing a terminal state" in e for e in data["errors"])
     assert "WORKER DIED" in ee.render_status(ee.Status.load(run_dir).data)
 
 
-def test_run_subcommand_prints_receipt_and_wait_returns_3_while_running(tmp_path, fake_eval_script, monkeypatch):
-    """`run` via the CLI returns a receipt immediately; `wait` with a short timeout exits 3."""
+def test_wait_returns_3_while_running_then_0(tmp_path, fake_eval_script, monkeypatch):
+    """`wait` with a short timeout exits 3 on a live run, and 0 once it completes."""
     monkeypatch.setenv("FAKE_EVAL_MODE", "ok")
-    path, req = make_request(tmp_path, conditions={"baseline": {"task": "task.py", "args": {}}}, overrides={"skip_preflight": True})
-    # Make the (fake) eval slow enough that wait times out: prepend a sleep.
+    path, _ = make_request(tmp_path, conditions={"baseline": {"task": "task.py", "args": {}}}, overrides={"skip_preflight": True})
     run_dir, problems = ee.prepare_run(path)
     assert not problems
-    substitute_fake_eval(run_dir, fake_eval_script)
-    plan = json.load(open(os.path.join(run_dir, "plan.json")))
-    plan["pairs"][0]["command"] = "sleep 3 && " + plan["pairs"][0]["command"]
-    json.dump(plan, open(os.path.join(run_dir, "plan.json"), "w"))
+    gate, started = tmp_path / "gate", tmp_path / "started"
+    substitute_fake_eval(run_dir, fake_eval_script, prefix=gate_prefix(gate, started))
     ee.launch_detached(run_dir)
-    rc = subprocess.run([sys.executable, SCRIPT, "wait", run_dir, "--timeout", "1", "--interval", "0.5"], capture_output=True, text=True)
+    wait_for_file(started)  # the pair is running and held on the gate
+    rc = subprocess.run([sys.executable, SCRIPT, "wait", run_dir, "--timeout", "0.3", "--interval", "0.1"], capture_output=True, text=True)
     assert rc.returncode == 3
-    assert "state: running" in rc.stdout or "state: launching" in rc.stdout
-    rc = subprocess.run([sys.executable, SCRIPT, "wait", run_dir, "--timeout", "60", "--interval", "0.5"], capture_output=True, text=True)
+    assert "state: running" in rc.stdout
+    gate.touch()
+    rc = subprocess.run([sys.executable, SCRIPT, "wait", run_dir, "--timeout", "60", "--interval", "0.2"], capture_output=True, text=True)
     assert rc.returncode == 0 and "state: completed" in rc.stdout
 
-    # And the CLI `run` path itself (detached) prints a JSON receipt.
-    # A mock model so the suite can never reach a paid provider.
-    path2, _ = make_request(tmp_path / "second", conditions={"baseline": {"task": "task.py", "args": {}}}, models=["mockllm/model"], overrides={"skip_preflight": True})
-    rc = subprocess.run([sys.executable, SCRIPT, "run", path2], capture_output=True, text=True)
+
+def test_run_subcommand_prints_receipt_and_runs_offline(tmp_path, fake_eval_script, monkeypatch):
+    """The CLI `run` path (prepare + detached launch) prints a JSON receipt and completes.
+
+    A fake `uv` on PATH forwards `uv run … inspect eval <args>` to the fake
+    eval, so the real launch path runs end to end with no Inspect CLI, no model
+    and no network — and the outcome can be asserted exactly rather than as
+    "some terminal state".
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "args = sys.argv[1:]\n"
+        "i = args.index('eval')\n"
+        f"os.execv({sys.executable!r}, [{sys.executable!r}, {fake_eval_script!r}] + args[i + 1:])\n"
+    )
+    fake_uv.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_EVAL_MODE", "ok")
+
+    path, _ = make_request(tmp_path, conditions={"baseline": {"task": "task.py", "args": {}}}, models=["mockllm/model"], overrides={"skip_preflight": True})
+    rc = subprocess.run([sys.executable, SCRIPT, "run", path], capture_output=True, text=True)
     assert rc.returncode == 0, rc.stderr
     receipt = json.loads(rc.stdout)
     assert receipt["status"] == "launched" and os.path.isfile(receipt["status_file"])
     assert receipt["pairs"] == ["baseline__mockllm-model"]
-    # That worker will fail (no real inspect here) — wait for it so nothing is orphaned.
-    subprocess.run([sys.executable, SCRIPT, "wait", receipt["run_dir"], "--timeout", "120", "--interval", "1"], capture_output=True, text=True)
+    rc = subprocess.run([sys.executable, SCRIPT, "wait", receipt["run_dir"], "--timeout", "60", "--interval", "0.2"], capture_output=True, text=True)
+    assert rc.returncode == 0, rc.stdout + rc.stderr
     final = ee.Status.load(receipt["run_dir"]).data
-    assert final["state"] in ee.TERMINAL_STATES
+    assert final["state"] == "completed"
+    assert final["pairs"]["baseline__mockllm-model"]["state"] == "success"
+    assert final["pairs"]["baseline__mockllm-model"]["error_class"] is None
+
+
+# ---------------------------------------------------------------------------
+# Blackout: nothing outside private/ carries a score (foreground and detached)
+# ---------------------------------------------------------------------------
+
+
+def test_foreground_run_tree_is_score_free(tmp_path, fake_eval_script, monkeypatch):
+    """Every file the foreground worker leaves outside `private/` is score-free.
+
+    The per-field assertions elsewhere check the fields they name; this walk
+    catches a *new* file or field that starts carrying a score.
+    """
+    run_dir, req, code = run_foreground(tmp_path, fake_eval_script, monkeypatch, overrides={"epochs": 2})
+    assert code == 0
+    report = ee.render_report(ee.Status.load(run_dir).data)
+    (Path(run_dir) / "draft_report.md").write_text(report)
+    checked = assert_tree_has_no_leak(req["experiment_dir"])
+    names = {p.name for p in checked}
+    assert {"status.json", "plan.json", "draft_report.md"} <= names
+    # The walk is meaningful: the raw streams under private/ do carry scores.
+    raw = "".join(p.read_text() for p in (Path(run_dir) / "private").rglob("*.stdout"))
+    assert "accuracy: 0.73" in raw
+
+
+def test_detached_run_tree_is_score_free_including_worker_log(tmp_path, fake_eval_script, monkeypatch):
+    """The detached path adds `worker.log` and the CLI's printed outputs; all score-free."""
+    monkeypatch.setenv("FAKE_EVAL_MODE", "ok")
+    path, req = make_request(tmp_path, overrides={"epochs": 2})
+    run_dir, problems = ee.prepare_run(path)
+    assert not problems
+    substitute_fake_eval(run_dir, fake_eval_script)
+    ee.launch_detached(run_dir)
+    for sub in ("wait", "status", "report"):
+        args = [sys.executable, SCRIPT, sub, run_dir] + (["--timeout", "60", "--interval", "0.2"] if sub == "wait" else [])
+        rc = subprocess.run(args, capture_output=True, text=True)
+        assert rc.returncode == 0, rc.stdout + rc.stderr
+        assert_no_leak(rc.stdout + rc.stderr, f"`{sub}` output")
+    checked = assert_tree_has_no_leak(req["experiment_dir"])
+    assert {"worker.log", "status.json", "draft_report.md"} <= {p.name for p in checked}
+
+
+# ---------------------------------------------------------------------------
+# Retries and the zero-sample flag
+# ---------------------------------------------------------------------------
+
+
+def test_transient_failure_is_retried_and_the_failed_attempt_stashed(tmp_path, fake_eval_script, monkeypatch):
+    """One transient failure, then success: one retry, one `.eval` in the pool.
+
+    The failed attempt's partial log must leave the condition's log directory
+    (a second log there would double the Analyst's pool) and land under
+    `private/…/failed_attempts/`.
+    """
+    run_dir, req, code = run_foreground(
+        tmp_path, fake_eval_script, monkeypatch, mode="transient_then_ok",
+        overrides={"skip_preflight": True}, conditions={"baseline": {"task": "task.py", "args": {}}},
+    )
+    assert code == 0
+    e = ee.Status.load(run_dir).data["pairs"]["baseline__openai-gpt-5"]
+    assert e["state"] == "success", e
+    assert e["process_retries"] == 1
+    pool = list((Path(req["experiment_dir"]) / "logs" / "baseline").rglob("*.eval"))
+    assert [p.name for p in pool] == ["f.eval"]
+    stashed = [p for p in (Path(run_dir) / "private").rglob("*.eval") if "failed_attempts" in p.parts]
+    assert [p.name for p in stashed] == ["partial.eval"]
+    assert "baseline__openai-gpt-5" in stashed[0].parts
+
+
+def test_failure_without_a_log_is_not_zero_sample(tmp_path, fake_eval_script, monkeypatch):
+    """Zero-sample means "a final log exists and completed nothing"; no log is a failure."""
+    run_dir, _, _ = run_foreground(
+        tmp_path, fake_eval_script, monkeypatch, mode="structural",
+        overrides={"skip_preflight": True}, conditions={"baseline": {"task": "task.py", "args": {}}},
+    )
+    data = ee.Status.load(run_dir).data
+    e = data["pairs"]["baseline__openai-gpt-5"]
+    assert e["error_class"] == "structural" and not e["log_path"]
+    assert e["zero_samples"] is False
+    assert data["zero_sample_pairs"] == []
+
+
+def test_rendered_report_passes_check_report(tmp_path, fake_eval_script, monkeypatch):
+    """The runner's draft report is the Executor's report: it must pass its own conformance check."""
+    for mode, conditions in (("ok", None), ("structural", {"baseline": {"task": "task.py", "args": {}}})):
+        sub = tmp_path / mode
+        sub.mkdir()
+        run_dir, _, _ = run_foreground(sub, fake_eval_script, monkeypatch, mode=mode, conditions=conditions)
+        defects, _ = cr.check_report("executor", ee.render_report(ee.Status.load(run_dir).data))
+        assert defects == [], (mode, defects)

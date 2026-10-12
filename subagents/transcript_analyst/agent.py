@@ -3,9 +3,16 @@
 import json
 from typing import Any
 
-from subagents.runner import contract_section, reask_section, run_agent
+from subagents.runner import (
+    INVESTIGATION_REQUESTS,
+    LABEL_MAP_PATTERN,
+    contract_section,
+    reask_section,
+    run_agent,
+)
 from subagents.transcript_analyst.system_prompt import (
     CONSTRUAL_CHECKS_RULE,
+    EXECUTION_NOTES_RULE,
     FORENSIC_WORK_ORDER,
     SYSTEM_PROMPT,
     SYSTEM_PROMPT_FORENSIC,
@@ -45,14 +52,46 @@ RESTRICTED_FILES: dict[str, str] = {
         "Investigation history: the hypothesis, condition mappings, rates."
     ),
     "FINDINGS-REPORT.md": "Investigation synthesis: explanations and evidence.",
+    "RESUME.md": (
+        "Suspension notes: where the investigation stands, which hypotheses "
+        "or candidates are live, what the next round tests."
+    ),
+    # Every request the launcher persists (`<investigation>/requests/`) states
+    # what its sub-agent was asked: the Explorer's hypothesis, the Designer's
+    # candidates, the Critic's ledger. The Analyst's own arrives in its prompt.
+    # Anchored to the launcher's layout so a `requests/` package or an eval's
+    # own `requests/` folder is not caught.
+    INVESTIGATION_REQUESTS: (
+        "Persisted sub-agent requests: hypotheses, candidates and condition "
+        "rationales the analyst's blinding withholds."
+    ),
+    # Other roles' outputs under any artefacts tree. The Analyst's own
+    # (`artefacts/analyst/`) and the Executor's run records stay readable.
+    "artefacts/designer/": (
+        "Variant Designer reports: candidate explanations and which variant "
+        "is meant to move which."
+    ),
+    "artefacts/critic/": "Red-teaming Critic reports: candidate explanations and critiques.",
+    "artefacts/explorer/": (
+        "Environment Explorer reports: the hypothesis and the intended "
+        "manipulation behind each condition."
+    ),
+    # The Mapper's briefing is descriptive, but its manipulable-surface
+    # inventory is a list of what the investigation might vary — priming the
+    # Analyst never needs, since it measures from transcripts alone.
+    "artefacts/mapper/": (
+        "Environment Mapper briefing: the inventory of surfaces the "
+        "investigation may vary."
+    ),
 }
 
 # The per-iteration condition label map (`CONDITION_LABEL_MAP_iter<N>.json`)
 # holds opaque id → real condition name and the Analyst-time labels: it *is* the
 # mapping the blinding withholds. One wildcard pattern, matched on the basename
-# by the runner's read hook, covers every iteration's map, numbered or not,
-# with no upper bound.
-RESTRICTED_FILES["CONDITION_LABEL_MAP*.json"] = (
+# by the runner's hooks, covers every iteration's map, numbered or not, with no
+# upper bound. The runner denies it to every sub-agent (`ALWAYS_RESTRICTED`);
+# it is listed here too because for the Analyst it is the central denial.
+RESTRICTED_FILES[LABEL_MAP_PATTERN] = (
     "Private condition label map: opaque execution ids → real condition names "
     "and Analyst labels. The analyst must never learn which condition is which."
 )
@@ -140,6 +179,43 @@ def _construal_checks_section(checks: list[dict[str, str]]) -> str:
     )
 
 
+def _execution_notes_section(notes: Any) -> str | None:
+    """Render the request's `execution_notes` as its own section, or None.
+
+    Parameters
+    ----------
+    notes : Any
+        `data.get("execution_notes")` — a string, a list of strings, or None.
+        Example: ``["condition_B: 2 of 100 samples errored (provider 502)
+        and were retried once"]``.
+
+    Returns
+    -------
+    str | None
+        A ``## Execution Notes`` section with `EXECUTION_NOTES_RULE` attached,
+        or None when nothing (or only whitespace) was sent.
+
+    Raises
+    ------
+    RuntimeError
+        On any other shape — rejected rather than dropped (the `**data`
+        hazard), so the CLI exits 2 instead of the notes silently vanishing.
+    """
+    if notes is None:
+        return None
+    if isinstance(notes, str):
+        notes = [notes]
+    if not isinstance(notes, list) or not all(isinstance(n, str) for n in notes):
+        raise RuntimeError(
+            "Transcript analyst: execution_notes must be a string or a list of strings"
+        )
+    notes = [n.strip() for n in notes if n.strip()]
+    if not notes:
+        return None
+    listing = "\n".join(f"- {n}" for n in notes)
+    return f"## Execution Notes\n\n{listing}\n\n{EXECUTION_NOTES_RULE}"
+
+
 async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
     """Run the transcript analyst agent and return its analysis report.
 
@@ -151,7 +227,8 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
         Fields from the invocation JSON. Required: ``topic``,
         ``transcript_source``. Optional: ``scanning_model``, ``constraints``,
         ``construal_checks`` (Orchestrator mode), ``behaviour_spec`` (forensic
-        mode), ``artefacts_dir``, the re-ask pair ``conformance_defects`` +
+        mode), ``artefacts_dir``, ``execution_notes`` (both modes: non-directional
+        execution facts — retries, attrition, exclusions), the re-ask pair ``conformance_defects`` +
         ``previous_report`` (see `runner.reask_section`), and the shared
         ``subagent_*`` fields.
 
@@ -216,6 +293,13 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
         # prompt: an explicit request-level ordering is what recovered the
         # runs whose Analyst spent its turns on open-ended scanners first.
         sections.append(f"## Work Order\n\n{FORENSIC_WORK_ORDER}")
+
+    # Execution facts (retries, attrition, exclusions) for the Transcript
+    # Exclusions caveats. Both modes; the rule rendered with them confines
+    # them to data-quality context.
+    notes_section = _execution_notes_section(data.get("execution_notes"))
+    if notes_section:
+        sections.append(notes_section)
 
     if data.get("artefacts_dir"):
         sections.append(f"## Artefacts Directory\n\n{data['artefacts_dir']}")

@@ -199,7 +199,15 @@ _STRUCTURAL_PATTERNS = [
     "requires at least version",
     "No such file",
     "PermissionError",
-    "dataset",
+    # Dataset loading failures, by their specific names only. A bare
+    # "dataset" also matches Inspect's own run header (`dataset: <name>`),
+    # which is in the stdout of every run that got started — so a transient
+    # failure mid-run would classify structural and never be retried.
+    "DatasetNotFoundError",
+    "DatasetGenerationError",
+    "dataset not found",
+    "No such dataset",
+    "Couldn't find a dataset",
     "No module named",
 ]
 
@@ -246,9 +254,25 @@ _CREDENTIAL_PATTERNS = [
     "credit balance is too low",  # Anthropic prepaid credit (documented)
     "requires more credits",  # OpenRouter 402 (documented)
     "insufficient credits",  # OpenRouter 402 (documented)
+    # OpenAI quota exhaustion arrives as a 429, which would otherwise read as
+    # a rate limit and be retried: error code `insufficient_quota`, message
+    # "You exceeded your current quota, please check your plan and billing
+    # details" (documented).
+    "insufficient_quota",
+    "you exceeded your current quota",
 ]
 # A bare "402" also matches sample ids and hashes; count it only as a status.
 _CREDENTIAL_STATUS_RE = re.compile(r"(?:error code|api error|http|status(?:[ _]code)?)[:=\s]*402\b", re.I)
+
+# The shape of a provider API error inside a sample's error text: an SDK
+# exception class or an HTTP status. A sample error that merely *mentions*
+# credit (a tool in a billing-themed eval failing with "insufficient credits")
+# is the task's own behaviour, not the provider refusing, and is not counted.
+_PROVIDER_ERROR_RE = re.compile(
+    r"error code:?\s*\d{3}|api ?error|apistatuserror|badrequesterror|ratelimiterror|"
+    r"permissiondeniederror|authenticationerror|status(?:[ _]code)?[:=\s]*\d{3}|http \d{3}",
+    re.I,
+)
 
 # Tag appended to the structural evidence line of a credential failure.
 CREDENTIALS_TAG = "[credentials]"
@@ -285,6 +309,35 @@ def is_credential_exhaustion(output: str) -> bool:
     low = output.lower()
     return any(p in low for p in _CREDENTIAL_PATTERNS) or bool(_CREDENTIAL_STATUS_RE.search(output))
 
+
+def is_provider_credential_error(text: str) -> bool:
+    """Whether one sample's error is a provider refusing on credit.
+
+    Stricter than `is_credential_exhaustion` (which reads process output,
+    where only providers speak): the text must also have a provider API
+    error's shape (`_PROVIDER_ERROR_RE`), so a task-level error that happens
+    to mention payment or credits is not counted.
+
+    Parameters
+    ----------
+    text : str
+        A sample's error message.
+
+    Returns
+    -------
+    bool
+        True for a provider credit/usage-cap refusal.
+
+    Examples
+    --------
+    >>> is_provider_credential_error("ToolError: payment failed: insufficient credits")
+    False
+    >>> is_provider_credential_error("openai.RateLimitError: Error code: 429 - "
+    ...     "{'error': {'code': 'insufficient_quota'}}")
+    True
+    """
+    return is_credential_exhaustion(text) and bool(_PROVIDER_ERROR_RE.search(text))
+
 _TRANSIENT_PATTERNS = [
     "ConnectionError",
     "TimeoutError",
@@ -311,10 +364,12 @@ _TRANSIENT_PATTERNS = [
 _PROGRESS_LINE = re.compile(r"Samples:\s*\d+\s*/\s*\d+")
 _PANEL_LINE = re.compile(r"^\s*[─-╿]")  # box-drawing characters
 # Metric names are arbitrary (`gpt-4o`, `accuracy[max]`, `level-1` for grouped
-# metrics), hence `\S+` rather than a word class. `_METRIC_TOKEN` will also
-# redact innocent `name: 1.5` tokens in error text (`version: 2.45`); that
-# collateral is accepted because the blackout is absolute.
-_METRIC_COLUMNS = re.compile(r"^\s*(\S+\s{2,}(n/a|-?\d+\.\d+)\s*)+$")
+# metrics), hence `\S+` rather than a word class, and a name may contain single
+# spaces (a grouped metric's group, `goal conflict  0.500`); columns are
+# separated by two or more. `_METRIC_TOKEN` will also redact innocent
+# `name: 1.5` tokens in error text (`version: 2.45`); that collateral is
+# accepted because the blackout is absolute.
+_METRIC_COLUMNS = re.compile(r"^\s*(\S+(?: \S+)*\s{2,}(n/a|-?\d+\.\d+)\s*)+$")
 _METRIC_TOKEN = re.compile(r"(?<!\S)([^\s:]+):\s*(n/a|-?\d+\.\d+)\b")
 
 
@@ -374,7 +429,7 @@ def combine_output(stdout: str, stderr: str, max_lines: int = 50) -> str:
     return "\n".join(lines[-max_lines:]).strip()
 
 
-def classify_error(returncode: int, output: str, log_status: str | None) -> str:
+def classify_error(returncode: int, output: str) -> str:
     """Classify an error as routing, structural, transient, resource_contention, or unknown.
 
     Parameters
@@ -384,8 +439,6 @@ def classify_error(returncode: int, output: str, log_status: str | None) -> str:
     output : str
         Combined stdout+stderr from `combine_output` — Inspect reports
         prerequisite failures on stdout.
-    log_status : str | None
-        The status of the newest eval log, if one was found.
 
     Returns
     -------
@@ -544,7 +597,7 @@ def sample_shape(log_path: str) -> dict[str, Any]:
     the no-assistant-message count when the summaries predate ``turn_count``.
 
     Each errored sample's error message is classified with
-    `is_credential_exhaustion`. Under ``--no-fail-on-error`` a credit or
+    `is_provider_credential_error`. Under ``--no-fail-on-error`` a credit or
     usage cap reached mid-eval does not fail the process: Inspect exits 0 and
     the remaining samples error one by one, so the process-level
     ``[credentials]`` tag in `classify_error` never sees it. Only the count is
@@ -572,7 +625,9 @@ def sample_shape(log_path: str) -> dict[str, Any]:
 
     summaries = read_eval_log_sample_summaries(log_path)
     errors = sum(1 for s in summaries if s.error is not None)
-    credential_errors = sum(1 for s in summaries if s.error is not None and is_credential_exhaustion(str(s.error)))
+    credential_errors = sum(
+        1 for s in summaries if s.error is not None and is_provider_credential_error(str(s.error))
+    )
     retries = sum(int(s.retries or 0) for s in summaries)
     limit_hit = sum(1 for s in summaries if s.limit is not None)
 
@@ -836,7 +891,9 @@ def execute(
             )
 
             if log_info.get("error"):
-                result.errors.append(log_info["error"])
+                # A log's error message is the eval's own text and can quote
+                # scorer output; it is scrubbed like any captured stream.
+                result.errors.append(scrub_scores(log_info["error"]))
 
             # Determine success
             if returncode == 0 and log_info.get("status") == "success":
@@ -845,7 +902,7 @@ def execute(
             else:
                 # Both streams: Inspect reports prerequisite failures on stdout.
                 diagnostic = combine_output(stdout, stderr)
-                error_class = classify_error(returncode, diagnostic, log_info.get("status"))
+                error_class = classify_error(returncode, diagnostic)
                 result.error_class = error_class
 
                 if error_class == "resource_contention":
@@ -1054,6 +1111,13 @@ def validate_request(request: dict[str, Any]) -> list[str]:
         problems.append("model_routing must be a mapping")
     else:
         for m, r in routing.items():
+            # A key that names no requested model (a typo, a stale entry) would
+            # otherwise be ignored, and the model it meant would run unpinned.
+            if isinstance(models, list) and m not in models:
+                problems.append(f"model_routing key {m!r} is not one of the request's models")
+            if not isinstance(r, dict):
+                problems.append(f"model_routing[{m!r}] must be a mapping")
+                continue
             if r.get("route", "direct") not in ("direct", "openrouter"):
                 problems.append(f"model_routing[{m!r}].route must be direct|openrouter")
             if not isinstance(r.get("model_args", {}) or {}, dict):
@@ -1092,6 +1156,42 @@ class PairPlan:
     preflight_command: str
     preflight_log_dir: str
     retest_command: str
+    # The working directory every command of this pair runs in: the task
+    # file's own directory (see `task_location`). None only in a plan written
+    # before this field existed, which then runs from experiment_dir.
+    cwd: str | None = None
+
+
+def task_location(exp_dir: str, task: str) -> tuple[str, str]:
+    """Where a condition's commands run, and the task path to pass from there.
+
+    Inspect imports the task module relative to the task file, but resolves
+    the sandbox compose file / Dockerfile and string ``Sample.files`` paths
+    from the *process* working directory (`inspect_reference.md` gotcha 11).
+    Run from a shared parent, every condition whose task sits in its own
+    subdirectory would get the parent's sandbox and the same file bytes — the
+    manipulation silently never lands. Running each condition from its task's
+    directory makes all three resolve beside the task, as they do in a
+    single-condition run; relative ``-T`` file arguments resolve there too.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The request's absolute ``experiment_dir``.
+    task : str
+        The condition's task path, relative to ``exp_dir`` (validated).
+
+    Returns
+    -------
+    tuple[str, str]
+        ``(cwd, task_arg)``. Example: ``("/exp/cond_a", "task.py")`` for
+        ``task="cond_a/task.py"``; a task given as a directory runs from that
+        directory with ``"."``.
+    """
+    full = os.path.normpath(os.path.join(exp_dir, task))
+    if os.path.isdir(full):
+        return full, "."
+    return os.path.dirname(full), os.path.basename(full)
 
 
 def build_pairs(
@@ -1105,7 +1205,9 @@ def build_pairs(
     namespaced ``--tags``, ``--metadata condition/model/route``,
     ``--no-fail-on-error``, ``--retry-on-error 3``, ``--max-connections``.
     Routing ``model_args`` become ``-M key=<json>``; ``openrouter/`` models get
-    the ``openai`` pin on the ``uv run`` prefix.
+    the ``openai`` pin on the ``uv run`` prefix. Every command of a pair runs
+    from its task file's directory (``PairPlan.cwd``, see `task_location`), so
+    the task argument is the file's name; log directories stay absolute.
 
     Parameters
     ----------
@@ -1136,6 +1238,9 @@ def build_pairs(
     pairs: list[PairPlan] = []
     for cond, spec in request["conditions"].items():
         task = spec["task"] if isinstance(spec, dict) else spec
+        # Each condition runs from its task's directory; the task argument is
+        # relative to that directory (Inspect rejects absolute task paths).
+        cwd, task = task_location(exp_dir, task)
         args = (spec.get("args") or {}) if isinstance(spec, dict) else {}
         for model in models:
             pid = pair_id(cond, model)
@@ -1202,6 +1307,7 @@ def build_pairs(
                     preflight_command=probe,
                     preflight_log_dir=preflight_log_dir,
                     retest_command=retest,
+                    cwd=cwd,
                 )
             )
     return pairs
@@ -1296,6 +1402,7 @@ def init_status(
         "run_id": os.path.basename(run_dir),
         "run_dir": run_dir,
         "pid": None,
+        "pid_start": None,
         "experiment_name": request["experiment_name"],
         "experiment_dir": exp_dir,
         "parent_log_dir": os.path.join(exp_dir, "logs"),
@@ -1343,6 +1450,11 @@ def init_status(
                 "sample_retries": None,
                 "termination": None,
                 "model_usage": {},
+                # Token usage of every attempt of this pair — preflight probe,
+                # retest, each full-run attempt including retried ones — so
+                # `scripts/spend.py` counts all tokens spent, not only the
+                # final attempt's (`model_usage`).
+                "usage_attempts": [],
             }
             for p in pairs
         },
@@ -1388,6 +1500,28 @@ def _final_pair_state(result: EvalResult, entry: dict[str, Any]) -> str:
     return "failed"
 
 
+def _usage_recorder(status: Status, pair: str) -> Any:
+    """An `execute` event hook that keeps each attempt's token usage.
+
+    Parameters
+    ----------
+    status : Status
+        The run's status file.
+    pair : str
+        The pair id whose ``usage_attempts`` list receives the usage.
+
+    Returns
+    -------
+    Callable[[str, Any], None]
+        The ``on_event`` callback.
+    """
+    def record(kind: str, payload: Any) -> None:
+        if kind == "result" and payload.model_usage:
+            status.pair(pair).setdefault("usage_attempts", []).append(payload.model_usage)
+
+    return record
+
+
 def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig, run_dir: str) -> list[PairPlan]:
     """Run the contract's preflight probe for every pair; return those that proceed.
 
@@ -1431,8 +1565,10 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
         status.pair(p.id)["state"] = "preflight"
         status.save()
         shutil.rmtree(p.preflight_log_dir, ignore_errors=True)
-        cmd = CommandSpec(id=f"preflight_{p.id}", command=p.preflight_command, log_dir=p.preflight_log_dir, cwd=status.data["experiment_dir"])
-        report = execute([cmd], probe_config, capture_dir=capture)
+        cmd = CommandSpec(id=f"preflight_{p.id}", command=p.preflight_command, log_dir=p.preflight_log_dir, cwd=p.cwd or status.data["experiment_dir"])
+        # Every probe/retest attempt spends tokens too; keep them for spend.py.
+        record_usage = _usage_recorder(status, p.id)
+        report = execute([cmd], probe_config, capture_dir=capture, on_event=record_usage)
         r = report.results[0]
         entry: dict[str, Any] = {
             "outcome": None,
@@ -1453,8 +1589,8 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
                 entry["evidence"] = {"note": f"probe log unreadable: {e}"}
             if shape and shape["sample_errors"] > 0:
                 shutil.rmtree(p.preflight_log_dir, ignore_errors=True)
-                retest_cmd = CommandSpec(id=f"retest_{p.id}", command=p.retest_command, log_dir=p.preflight_log_dir, cwd=status.data["experiment_dir"])
-                rr = execute([retest_cmd], probe_config, capture_dir=capture).results[0]
+                retest_cmd = CommandSpec(id=f"retest_{p.id}", command=p.retest_command, log_dir=p.preflight_log_dir, cwd=p.cwd or status.data["experiment_dir"])
+                rr = execute([retest_cmd], probe_config, capture_dir=capture, on_event=record_usage).results[0]
                 try:
                     rshape = sample_shape(rr.log_path) if rr.log_path else {"samples": 0, "sample_errors": 0}
                 except Exception:
@@ -1538,6 +1674,7 @@ def run_worker(run_dir: str) -> int:
     """
     status = Status.load(run_dir)
     status.data["pid"] = os.getpid()
+    status.data["pid_start"] = _pid_start_time(os.getpid())
     with open(os.path.join(run_dir, "plan.json")) as f:
         plan = json.load(f)
     pairs = [PairPlan(**p) for p in plan["pairs"]]
@@ -1564,8 +1701,7 @@ def run_worker(run_dir: str) -> int:
             status.data["concurrency"]["sandbox_detected"] = files
             status.data["concurrency"]["sandbox_evidence"] = f"sandbox files present: {files} (preflight skipped)"
 
-        by_id = {p.id: p for p in to_run}
-        commands = [CommandSpec(id=p.id, command=p.command, log_dir=p.log_dir, cwd=exp_dir) for p in to_run]
+        commands = [CommandSpec(id=p.id, command=p.command, log_dir=p.log_dir, cwd=p.cwd or exp_dir) for p in to_run]
         for p in to_run:
             Path(p.log_dir).mkdir(parents=True, exist_ok=True)
 
@@ -1587,6 +1723,8 @@ def run_worker(run_dir: str) -> int:
                 e["error_class"] = r.error_class
                 e["errors"] = list(r.errors)
                 e["model_usage"] = r.model_usage
+                if r.model_usage:
+                    e.setdefault("usage_attempts", []).append(r.model_usage)
                 if r.status == "retrying":
                     e["state"] = "retrying"
                 else:
@@ -1606,7 +1744,6 @@ def run_worker(run_dir: str) -> int:
         status.data["errors"].extend(report.errors)
         status.data["state"] = "interrupted" if report.status == "interrupted" else "completed"
         # Anything still pending (e.g. excluded before launch) keeps its state.
-        _ = by_id
     except Exception as e:  # never leave a run without a terminal state
         status.data["errors"].append(f"runner exception: {type(e).__name__}: {e}")
         status.data["state"] = "failed"
@@ -1774,37 +1911,106 @@ def launch_detached(run_dir: str) -> int:
         close_fds=True,
     )
     log.close()
-    # Record the pid in a file the worker never writes: touching status.json
-    # here would race the worker's own first save.
+    # Record the pid (and its start time, the guard against pid reuse) in a
+    # file the worker never writes: touching status.json here would race the
+    # worker's own first save. Format: "<pid> <start-time>".
     with open(os.path.join(run_dir, "worker.pid"), "w") as f:
-        f.write(str(proc.pid))
+        f.write(f"{proc.pid} {_pid_start_time(proc.pid) or ''}".strip())
     return proc.pid
 
 
-def _worker_pid(data: dict[str, Any]) -> int | None:
-    """The worker's pid: from the status file once it has saved, else worker.pid."""
+def _worker_pid_record(data: dict[str, Any]) -> tuple[int | None, str | None]:
+    """The worker's pid and start time: from the status file once the worker has
+    saved, else from worker.pid.
+
+    Parameters
+    ----------
+    data : dict
+        Contents of ``status.json``.
+
+    Returns
+    -------
+    tuple[int | None, str | None]
+        ``(pid, start_time)``; the start time is None when unrecorded.
+    """
     if data.get("pid"):
-        return int(data["pid"])
+        return int(data["pid"]), data.get("pid_start")
     try:
         with open(os.path.join(data.get("run_dir", ""), "worker.pid")) as f:
-            return int(f.read().strip() or 0) or None
-    except (OSError, ValueError):
-        return None
+            parts = f.read().split()
+    except OSError:
+        return None, None
+    try:
+        pid = int(parts[0]) if parts else None
+    except ValueError:
+        return None, None
+    return pid or None, (parts[1] if len(parts) > 1 else None)
+
+
+def _worker_pid(data: dict[str, Any]) -> int | None:
+    """The worker's pid (see `_worker_pid_record`)."""
+    return _worker_pid_record(data)[0]
+
+
+def _worker_alive(data: dict[str, Any]) -> bool:
+    """Whether the recorded worker process (not a pid-reusing stranger) runs."""
+    return _pid_alive(*_worker_pid_record(data))
 
 
 def _worker_dead(data: dict[str, Any]) -> bool:
     """True when the run is not terminal and its worker process is gone."""
     if data.get("state") in TERMINAL_STATES:
         return False
-    pid = _worker_pid(data)
-    return pid is not None and not _pid_alive(pid)
+    return _worker_pid(data) is not None and not _worker_alive(data)
 
 
-def _pid_alive(pid: int | None) -> bool:
-    """True if `pid` exists and is not a zombie.
+def _pid_start_time(pid: int | None) -> str | None:
+    """The process's start time in clock ticks since boot, or None.
+
+    Field 22 of ``/proc/<pid>/stat``, counted after the last ")" because the
+    command name in field 2 may contain spaces. Mirrors
+    `launch_subagent._pid_start_time`.
+
+    Parameters
+    ----------
+    pid : int | None
+        A process id.
+
+    Returns
+    -------
+    str | None
+        e.g. ``"1234567"``; None where ``/proc`` is unavailable.
+    """
+    if not pid:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            stat = f.read()
+    except OSError:
+        return None
+    fields = stat.rsplit(")", 1)[-1].split()
+    return fields[19] if len(fields) > 19 else None
+
+
+def _pid_alive(pid: int | None, start_time: str | None = None) -> bool:
+    """True if `pid` exists, is not a zombie, and is the process recorded.
 
     `os.kill(pid, 0)` succeeds on a zombie (a dead child nobody has reaped),
-    so the process state is read from /proc where available.
+    so the process state is read from /proc where available. When a start
+    time was recorded and the live process's differs, the pid was reused by
+    an unrelated process (after a host restart, say) and the worker is dead.
+
+    Parameters
+    ----------
+    pid : int | None
+        A process id.
+    start_time : str | None
+        The start time recorded with it (`_pid_start_time`), if any.
+
+    Returns
+    -------
+    bool
+        Whether the recorded process is still running.
     """
     if not pid:
         return False
@@ -1814,6 +2020,10 @@ def _pid_alive(pid: int | None) -> bool:
         return False
     except PermissionError:
         return True
+    if start_time is not None:
+        current = _pid_start_time(pid)
+        if current is not None and current != start_time:
+            return False
     try:
         with open(f"/proc/{pid}/status") as f:
             for line in f:
@@ -1850,7 +2060,7 @@ def render_status(data: dict[str, Any]) -> str:
             zero-sample pairs: none
     """
     pid = _worker_pid(data)
-    alive = _pid_alive(pid)
+    alive = _worker_alive(data)
     state = data.get("state")
     if _worker_dead(data):
         state = f"{state} — WORKER DIED (pid {pid} not alive, no terminal state written; check worker.log)"
@@ -2153,7 +2363,6 @@ def render_report(data: dict[str, Any]) -> str:
     out.append(f"- **Resources observed**: nproc={res.get('nproc')}, free_mem_mb={res.get('free_mem_mb')}")
     sd = c.get("sandbox_detected")
     out.append(f"- **Sandbox detected**: {'yes' if sd else 'no' if sd is False else 'unknown'} (evidence: {c.get('sandbox_evidence') or 'none recorded'})")
-    out.append(f"- **Concurrency preflight test run**: {'not applicable (only 1 pair)' if len(pairs) == 1 else 'no'}")
     if c.get("reductions"):
         out.append("- **Reductions applied during execution**: " + "; ".join(f"batch {r['batch']}: {r['previous_level']}→{r['new_level']} ({r['reason']})" for r in c["reductions"]))
     else:

@@ -243,7 +243,7 @@ class TestCase1:
         # All 30 share the dataset id (one resampled episode); uuids are unique.
         assert {e["id"] for e in prov["per_sample"]} == {"lcb_abc392_f"}
         assert [e["uuid"] for e in index] == [e["uuid"] for e in prov["per_sample"]]
-        for e, entry in zip(index, prov["per_sample"]):
+        for e, entry in zip(index, prov["per_sample"], strict=True):
             persisted = f"{self.grader}/validation_solutions/{e['key']}.py"
             assert sha256_file(persisted) == entry["artefact_sha256"], e["key"]
             assert os.path.getsize(persisted) == entry["artefact_chars"] == e["answer_len"]

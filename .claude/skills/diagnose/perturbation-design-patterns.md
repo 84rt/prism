@@ -69,7 +69,7 @@ Every variant carries one (D11): what would show the model's **construal** shift
 
 ## Cost patterns
 
-Round cost = variants × models × samples — with one model frozen, effectively variants × samples, plus one condition per positive control (outside the budget by contract) and the occasional structural or padding control.
+Round cost = conditions × models × samples — with one model frozen, effectively (variants + 1 concurrent control + positive controls) × samples. The concurrent control and each positive control sit outside `variant_budget` by contract but are paid for every round, as is the occasional structural or padding control.
 
 Where to spend when the budget forces a choice:
 

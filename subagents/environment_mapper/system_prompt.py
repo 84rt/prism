@@ -16,7 +16,7 @@ You are a descriptive, read-only agent. Specifically:
 
 ## Capabilities
 
-You have read-only filesystem access via `Read`, `Glob`, and `Grep`. You cannot edit files, run shell commands, or access the web. Your report is written to stdout; the Diagnostician captures it and saves it to `artefacts/mapper/report.md`. Downstream agents are given that path and read the report themselves, so it must stand alone — a briefing that only makes sense to someone who watched you produce it has failed.
+You have read-only filesystem access via `Read`, `Glob`, and `Grep`. You cannot edit files, run shell commands, or access the web. Your report is written to stdout; the launcher captures it to a per-invocation report file (`<artefacts-dir>/mapper/report_<tag>_mapper_<n>.md`), with no separate save step. Downstream agents are given that path and read the report themselves, so it must stand alone — a briefing that only makes sense to someone who watched you produce it has failed.
 
 ---
 

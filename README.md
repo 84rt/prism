@@ -20,10 +20,10 @@ The scaffold has two investigation modes, each launched by its own skill and sha
 The Orchestrator agent (launched with the `/orchestrate` skill) begins by discussing the research question with the User to define its scope. It then runs the following loop, recording each iteration in an append-only investigation log:
 
 1. **Generate falsifiable hypotheses** that are relevant and targeted to the research scope defined in the discussion phase;
-2. Ask the *Environment Explorer* sub-agent to **identify informative, minimal perturbations** in the target eval setting;
-3. Use the *Experiment Executor* sub-agent to **run the eval variations**, handling parallelism, error recovery, and logging;
-4. Give the *Transcript Analyst* sub-agent a neutral topic description from which it can **surface relevant behavioural patterns** in the eval outputs, importantly without it ever directly seeing the original hypothesis; and
-5. **Collate and interpret results** from the Analyst, then determine whether to iterate, conclude, or check in with the User.
+2. Ask the *Environment Explorer* sub-agent to **identify informative, minimal perturbations** in the target eval setting, then **pre-register** the predicted direction for every condition — with a construal check per manipulated condition and, where a null result would be read as evidence, a positive control — before anything runs;
+3. Use the *Experiment Executor* sub-agent to **run the eval variations** (under opaque condition ids), handling parallelism, error recovery, and logging, while the Orchestrator stays blind to scores;
+4. Give the *Transcript Analyst* sub-agent a neutral topic description from which it can **surface relevant behavioural patterns** in the eval outputs, importantly without it ever directly seeing the original hypothesis, and have it rate the construal checks without knowing which condition each bears on; and
+5. **Score the pre-registered predictions as written** — voiding any condition whose construal check failed, and treating differences inside the noise floor of repeated control draws as unattributable — then check spend against the agreed budget and determine whether to iterate, conclude, or check in with the User.
 
 When finished, the Orchestrator produces a structured report for the User that summarises the key findings, caveats, and potential next steps.
 
@@ -138,7 +138,8 @@ prism/
 │   ├── docs/
 │   │   ├── investigator/          # Lead-agent only (principles, responsibilities,
 │   │   │                          #   delegation guides, invocation reference)
-│   │   ├── contracts/             # Interface contracts, one per sub-agent
+│   │   ├── contracts/             # Interface contracts, one per sub-agent, plus the
+│   │   │                          #   Analyst's forensic addendum (Diagnostician only)
 │   │   └── references/            # Tool references (Inspect, Scout)
 │   ├── skills/orchestrate/       # Orchestrator skill definition
 │   ├── skills/diagnose/          # Diagnostician (Model Forensics) skill definition
@@ -155,7 +156,10 @@ prism/
 │   └── lint_log.py                # Investigation-log lint (duplicate/stranded blocks)
 ├── docs/
 │   ├── scaffold-diagram.png       # Orchestrator architecture diagram
-│   └── model-forensics-diagram.png # Diagnostician pipeline diagram
+│   ├── model-forensics-diagram.png # Diagnostician pipeline diagram
+│   └── superpowers/               # Development plans and work-package reviews
+│                                  #   (scaffold history; not installed into targets)
+├── tests/                         # Offline pytest suite (no API spend)
 ├── templates/
 │   └── devcontainer.json          # Devcontainer scaffolded into bare targets
 ├── .githooks/                     # Git hooks for scaffold repo

@@ -29,7 +29,7 @@ Any use beyond those two is out of scope: the report carries no analysis of moti
 
 ### Reference transcript path (optional)
 
-An absolute path to the original `.eval` log, or to a text transcript of the episode under investigation.
+An absolute path to a **plain-text transcript** of the episode under investigation, dumped from its `.eval` log with `scripts/dump_transcripts.py` (conventionally under `artefacts/reference/`). Never the `.eval` itself: it is a zip archive, and a Mapper handed one reads bytes, not a transcript.
 
 When provided, the Mapper may read it for **one purpose only**: to check its account of what the model was shown against what the model was actually shown. Discrepancies between the environment as written and the episode as run — a prompt assembled differently at runtime, a tool that failed in this episode but not by design, a file present in the log but absent from the directory — are high-value findings and belong in `### Environment Defects` or `### Uncertainty & Open Questions` as appropriate.
 

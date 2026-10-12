@@ -4,17 +4,23 @@ The tests are self-contained: they run with the pinned versions the six
 forensics runs used and never touch the case directories' venvs. Run with::
 
     uv run --with "inspect_ai==0.3.263" --with "inspect-scout==0.5.2" \
-        --with claude-agent-sdk --with python-dotenv --with pytest pytest tests/
+        --with claude-agent-sdk==0.2.165 --with python-dotenv --with pytest pytest tests/
 
 The scaffold has no package install, so the repo root (for `subagents.*`) and
 `scripts/` are put on `sys.path` here. Regression tests over the persisted
 forensics corpus are skipped (not failed) when the corpus is absent — it is
 container-local and never committed.
+
+Every test runs under an autouse spend guard (see `_spend_guard`): the Agent
+SDK's `query` raises and the provider keys are unset, so no test can reach a
+paid provider by accident.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +35,74 @@ sys.path.insert(0, str(ROOT / "scripts"))
 # Never write bytecode into the read-only corpus when a test imports a persisted
 # grader module from a case directory.
 sys.dont_write_bytecode = True
+
+
+# --- Spend guard (every test) ---
+#
+# The suite must never reach a paid provider. Every sub-agent path ends in the
+# Agent SDK's `query`, and every eval path needs a provider key, so the guard
+# makes `query` raise and removes the keys for every test (subprocesses inherit
+# the cleaned environment). A test that stubs `query` itself simply patches
+# over the guard; a test that genuinely needs otherwise opts out with
+# ``@pytest.mark.allow_sdk``.
+
+PROVIDER_KEYS = ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY")
+
+
+def pytest_configure(config):
+    """Register the spend-guard opt-out marker.
+
+    Parameters
+    ----------
+    config : pytest.Config
+        The session config.
+    """
+    config.addinivalue_line(
+        "markers",
+        "allow_sdk: opt out of the autouse spend guard (real SDK `query` and provider keys)",
+    )
+
+
+def _refuse_query(*args, **kwargs):
+    """Stand-in for `claude_agent_sdk.query` that fails loudly instead of spending.
+
+    Raises
+    ------
+    RuntimeError
+        Always.
+    """
+    raise RuntimeError(
+        "spend guard: a test reached claude_agent_sdk.query; stub `subagents.runner.query` "
+        "or mark the test allow_sdk"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _spend_guard(request, monkeypatch):
+    """Make the Agent SDK's `query` raise and clear provider keys, per test.
+
+    Parameters
+    ----------
+    request : pytest.FixtureRequest
+        Used to honour the ``allow_sdk`` opt-out marker.
+    monkeypatch : pytest.MonkeyPatch
+        Undoes both changes after the test.
+    """
+    if request.node.get_closest_marker("allow_sdk"):
+        return
+    for key in PROVIDER_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    try:
+        import claude_agent_sdk
+
+        monkeypatch.setattr(claude_agent_sdk, "query", _refuse_query)
+        # The runner bound the name at import time, so patch its copy too.
+        from subagents import runner
+
+        monkeypatch.setattr(runner, "query", _refuse_query)
+    except ImportError:  # SDK not installed: nothing can spend through it
+        pass
+
 
 # --- Forensics corpus (container-local; see the module docstring) ---
 
@@ -105,6 +179,7 @@ def write_fixture_log(
     tags: list[str] | None = None,
     metadata: dict | None = None,
     task_args: dict | None = None,
+    dataset_name: str | None = None,
 ) -> str:
     """Write a small **scored** .eval log so the blackout tests have something to leak.
 
@@ -135,6 +210,8 @@ def write_fixture_log(
         Header tags and metadata; default to a ``baseline`` condition.
     task_args : dict | None
         The header's ``task_args`` (the ``-T`` values).
+    dataset_name : str | None
+        The header's dataset name (the blinding tests' dataset channel).
 
     Returns
     -------
@@ -167,7 +244,7 @@ def write_fixture_log(
         task_version=0,
         task_file=task_file,
         task_args=task_args or {},
-        dataset=EvalDataset(samples=1, sample_ids=["s1"]),
+        dataset=EvalDataset(name=dataset_name, samples=1, sample_ids=["s1"]),
         model="mockllm/model",
         config=EvalConfig(epochs=epochs, sample_id=["s1"]),
         metadata={"condition": "baseline"} if metadata is None else metadata,
@@ -236,13 +313,17 @@ def fake_eval_script(tmp_path):
     Tests substitute it for the rendered commands in a run's ``plan.json``, so
     the worker exercises its real code path with no model and no Inspect CLI.
     ``FAKE_EVAL_MODE`` selects the outcome: ``ok`` (default), ``sample_error``,
-    ``structural`` (prints a structural error, exits 1) or ``zero`` (a log with
-    zero completed samples). Stdout mimics Inspect's plain display, including
-    the score-bearing progress line and results panel.
+    ``structural`` (prints a structural error, exits 1), ``zero`` (a log with
+    zero completed samples) or ``transient_then_ok`` (the first attempt per log
+    directory leaves a partial ``status=error`` log, prints a transient error
+    and exits 1; later attempts succeed — the per-directory attempt count is
+    kept under ``<tmp_path>/fake_eval_state``). Stdout mimics Inspect's plain
+    display, including the score-bearing progress line and results panel.
     """
+    state = tmp_path / "fake_eval_state"
     script = tmp_path / "fake_eval.py"
     script.write_text(
-        "import sys, os\n"
+        "import sys, os, hashlib\n"
         f"sys.path.insert(0, {str(ROOT / 'tests')!r})\n"
         "from conftest import write_fixture_log\n"
         "args = sys.argv[1:]\n"
@@ -256,6 +337,17 @@ def fake_eval_script(tmp_path):
         "if mode == 'zero':\n"
         "    write_fixture_log(os.path.join(log_dir, 'z.eval'), epochs=epochs, completed=0)\n"
         "    sys.exit(0)\n"
+        "if mode == 'transient_then_ok':\n"
+        f"    state = {str(state)!r}\n"
+        "    os.makedirs(state, exist_ok=True)\n"
+        "    counter = os.path.join(state, hashlib.sha1(log_dir.encode()).hexdigest())\n"
+        "    n = int(open(counter).read()) if os.path.exists(counter) else 0\n"
+        "    with open(counter, 'w') as f:\n"
+        "        f.write(str(n + 1))\n"
+        "    if n == 0:\n"
+        "        write_fixture_log(os.path.join(log_dir, 'partial.eval'), epochs=epochs, status='error', completed=0)\n"
+        "        print('ConnectionError: Connection reset by peer')\n"
+        "        sys.exit(1)\n"
         "write_fixture_log(os.path.join(log_dir, 'f.eval'), epochs=epochs, with_error=(mode == 'sample_error'))\n"
         "print('Steps:  10/10 100% Samples:   2/2 accuracy: 0.73')\n"
         "print('\\u256d\\u2500 fixture_task \\u2500\\u256e')\n"
@@ -263,3 +355,111 @@ def fake_eval_script(tmp_path):
         "print('\\u2570\\u2500\\u2500\\u2500\\u2500\\u2500\\u2500\\u256f')\n"
     )
     return str(script)
+
+
+# --- Batch-runner request helpers (shared by the execute_evals and route tests) ---
+
+
+def make_request(tmp_path, *, conditions=None, models=None, overrides=None, routing=None):
+    """Write a minimal valid `execute_evals.py` request under ``tmp_path``.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Directory to hold ``exp/`` (the experiment, with a ``task.py``) and
+        ``request.json``.
+    conditions, models, overrides, routing : optional
+        Override the request's ``conditions``, ``models``, ``overrides`` and
+        ``model_routing``; the defaults are a two-condition, one-model request.
+
+    Returns
+    -------
+    tuple[str, dict]
+        The request path and the request as a dict.
+    """
+    exp = tmp_path / "exp"
+    exp.mkdir(parents=True, exist_ok=True)
+    (exp / "task.py").write_text("# fixture task\n")
+    req = {
+        "experiment_name": "mf_fixture",
+        "experiment_dir": str(exp),
+        "conditions": conditions or {"baseline": {"task": "task.py", "args": {}}, "treatment": {"task": "task.py", "args": {"system": "alt.txt"}}},
+        "models": models or ["openai/gpt-5"],
+    }
+    if overrides is not None:
+        req["overrides"] = overrides
+    if routing is not None:
+        req["model_routing"] = routing
+    path = tmp_path / "request.json"
+    path.write_text(json.dumps(req))
+    return str(path), req
+
+
+def substitute_fake_eval(run_dir: str, fake_script: str, *, prefix: str = "") -> None:
+    """Point every rendered command at the fake eval, keeping the flags.
+
+    Also zeroes the retry backoff schedule: retries are exercised by the
+    ``transient_then_ok`` mode, and the runner's default 10 s first backoff
+    would otherwise be a fixed sleep in the suite.
+
+    Parameters
+    ----------
+    run_dir : str
+        A run directory prepared by `execute_evals.prepare_run`.
+    fake_script : str
+        The `fake_eval_script` fixture's path.
+    prefix : str
+        Shell text placed before the main command only (not the preflight or
+        retest probes), e.g. a sentinel-file gate that holds the pair running.
+    """
+    plan_path = Path(run_dir) / "plan.json"
+    plan = json.loads(plan_path.read_text())
+    for p in plan["pairs"]:
+        for key in ("command", "preflight_command", "retest_command"):
+            parts = shlex.split(p[key])
+            i = parts.index("eval")  # "... inspect eval task.py ..."
+            p[key] = " ".join(shlex.quote(x) for x in [sys.executable, fake_script] + parts[i + 1 :])
+        p["command"] = prefix + p["command"]
+    plan["execution"]["retry_backoff_seconds"] = [0, 0, 0]
+    plan_path.write_text(json.dumps(plan))
+
+
+def gate_prefix(gate: Path, started: Path | None = None) -> str:
+    """Shell prefix that holds a command until ``gate`` exists.
+
+    Replaces fixed ``sleep N &&`` prefixes: the test decides when the command
+    proceeds, so it is neither racy on a loaded host nor slower than needed.
+
+    Parameters
+    ----------
+    gate : Path
+        File whose creation releases the command.
+    started : Path | None
+        Touched first, so the test can wait until the command is really running.
+
+    Returns
+    -------
+    str
+        e.g. ``"touch /t/started && while [ ! -e /t/gate ]; do sleep 0.05; done && "``.
+    """
+    touch = f"touch {shlex.quote(str(started))} && " if started else ""
+    return f"{touch}while [ ! -e {shlex.quote(str(gate))} ]; do sleep 0.05; done && "
+
+
+def wait_for_file(path: Path, timeout: float = 30.0) -> None:
+    """Poll until ``path`` exists (a sentinel the code under test creates).
+
+    Parameters
+    ----------
+    path : Path
+        The sentinel file.
+    timeout : float
+        Seconds before failing the test.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() > deadline:
+            pytest.fail(f"sentinel {path} never appeared")
+        time.sleep(0.02)

@@ -48,12 +48,16 @@ RESTRICTED_FILES: dict[str, str] = {
     ),
     "INVESTIGATION-LOG.md": "Iteration history with rates and prediction outcomes.",
     "FINDINGS-REPORT.md": "Investigation synthesis: explanations and evidence.",
-    "executor/report.md": (
-        "Past execution reports. The Designer receives no run history."
+    # Whole role directories rather than report filenames: the launcher names
+    # every output per invocation (`report_<tag>_<role>_<n>.md`), and the
+    # Executor's run records and the Analyst's scan artefacts carry the same
+    # outcomes as their reports.
+    "artefacts/executor/": (
+        "Past execution reports and run records. The Designer receives no run history."
     ),
-    "analyst/report.md": (
-        "Past measurement reports with rates. A Designer that has seen which "
-        "edits moved rates designs toward repeating them."
+    "artefacts/analyst/": (
+        "Past measurement reports and scan artefacts with rates. A Designer that "
+        "has seen which edits moved rates designs toward repeating them."
     ),
 }
 

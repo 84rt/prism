@@ -8,13 +8,13 @@ This document explains how the orchestrator should delegate to and interpret res
 
 Invoke the Transcript Analyst when you need to understand what happened inside evaluation transcripts beyond what aggregate scores reveal. Specifically:
 
-**After the Experiment Executor completes a run.** The executor returns log paths and execution metadata. Before interpreting pass/fail rates as evidence about the evaluation, delegate to the analyst to check whether the scores reflect what you think they reflect. Identical pass rates can arise from qualitatively different model behaviours (refusals, tool-use faults, evaluation awareness), and only transcript analysis can distinguish these.
+**After the Experiment Executor completes a run.** The executor returns log paths and execution metadata, never scores — and the score blackout (`orchestrator_responsibilities.md` §2d/§2e) means you do not read pass/fail rates until the analyst has reported. Delegate first; once its report is in, read the scores against it to check whether they reflect what you think they reflect. Identical pass rates can arise from qualitatively different model behaviours (refusals, tool-use faults, evaluation awareness), and only transcript analysis can distinguish these.
 
 **When testing whether an evaluation property affects model behaviour.** If your investigation cycle manipulated an evaluation property (a prompt cue, an environmental feature, a scoring function), the analyst can quantify whether transcripts differ between conditions in ways that go beyond the score. This is typically the core use case.
 
 **When screening for confounds before interpreting results.** Even if your investigation does not directly concern evaluation awareness, refusals, or environment faults, these phenomena may be present in the transcripts and may confound your findings. A screening scan for known confounds is good practice before drawing conclusions.
 
-**Do not invoke the analyst** for tasks that do not require transcript content: comparing aggregate scores across conditions, computing statistical tests on pass/fail rates, or checking execution metadata for anomalies. These are better handled by other agents or by the orchestrator directly.
+**Do not invoke the analyst** for tasks that do not require transcript content: comparing aggregate scores across conditions, computing statistical tests on pass/fail rates, or checking execution metadata for anomalies. These are better handled by other agents or by the orchestrator directly — and only **after** the analyst has reported on that run's transcripts, since the score blackout covers every score until then.
 
 ---
 
@@ -67,7 +67,7 @@ If completion rates differ between conditions (e.g., 40% of condition_A runs cra
 
 ### Transcript validity screening
 
-The Experiment Executor should report basic transcript quality metrics: how many transcripts contain no assistant messages, how many hit token or time limits, how many terminated with errors. If a large fraction of transcripts are uninformative (e.g., the model crashed before producing any relevant behaviour), this limits what the analyst can usefully detect. The orchestrator should note this in the research brief and adjust its expectations for the analyst's report accordingly. The analyst will report exclusions in its report (as required by the interface contract), but the orchestrator should already know the approximate scale of the problem before delegating.
+The Experiment Executor should report basic transcript quality metrics: how many transcripts contain no assistant messages, how many hit token or time limits, how many terminated with errors. If a large fraction of transcripts are uninformative (e.g., the model crashed before producing any relevant behaviour), this limits what the analyst can usefully detect. The orchestrator should pass the counts to the analyst in the request's `execution_notes` field — non-directional facts under the opaque labels, never a direction or a condition's identity (`orchestrator_responsibilities.md` Step 2e item 7) — and adjust its expectations for the analyst's report accordingly. The analyst will report exclusions in its report (as required by the interface contract), but the orchestrator should already know the approximate scale of the problem before delegating.
 
 ---
 

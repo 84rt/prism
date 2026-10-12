@@ -12,9 +12,11 @@ Three patterns for structuring experimental conditions. Choose based on how the 
 
 **Example:** Testing system prompt variants.
 ```
-control:   task.py -T system="system_prompt_control.txt"
-treatment: task.py -T system="system_prompt_treatment.txt"
+c_8b21:  task.py -T system="system_prompt_c_8b21.txt"
+c_3f9a:  task.py -T system="system_prompt_c_3f9a.txt"
 ```
+
+Name the files by the conditions' opaque execution ids, never by a role word (`system_prompt_control.txt`): every `-T` value is recorded in the log header's `task_args`, which the Analyst can read and nothing can scrub.
 
 **Advantages:** Minimal file duplication. Clean separation of what varies (parameter value) from what's constant (task logic, scoring).
 
@@ -26,13 +28,15 @@ treatment: task.py -T system="system_prompt_treatment.txt"
 
 **Example:** Testing different elicitation strategies.
 ```
-control:   task_direct.py
-treatment: task_cot.py
+c_8b21:  c_8b21/task.py     (direct elicitation)
+c_3f9a:  c_3f9a/task.py     (chain-of-thought elicitation)
 ```
+
+Each task file lives in a directory named by its condition's opaque id, so the descriptive name (shown in parentheses here) never reaches a path or a log header's `task_file`.
 
 **Advantages:** Full flexibility. Each condition can differ in arbitrary ways.
 
-**Watch for:** The more the task files diverge, the more potential confounds. If `task_cot.py` has a different prompt template AND different scoring, you won't know which change caused the effect. Keep non-IV aspects identical. Diff the two files and verify that only the intended differences exist.
+**Watch for:** The more the task files diverge, the more potential confounds. If the chain-of-thought task file has a different prompt template AND different scoring, you won't know which change caused the effect. Keep non-IV aspects identical. Diff the two files and verify that only the intended differences exist.
 
 ### Pattern C: Model Variation Only
 

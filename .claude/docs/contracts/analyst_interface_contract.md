@@ -63,6 +63,19 @@ A list of observable properties of the model's **construal** of its situation �
 
 The set is **de-identified**: it never says which check bears on which condition, ids are opaque, and every check is rated across every condition. The analyst builds and validates one scanner per check, reports per-condition rates and the full pairwise difference matrix, labels each check's scorability, and states **no** `succeeded` / `failed` / `ambiguous` verdict — the orchestrator derives verdicts from its private check→condition mapping. A property is phrased as a neutral construal question exactly as the topic is: it may name the construct a manipulation targets, but never the hypothesis or a predicted direction.
 
+### Execution notes (optional)
+
+Facts about how the transcripts were produced, sent as `execution_notes` — a string or a list of strings — under the same opaque labels as the transcript source:
+
+```json
+"execution_notes": [
+    "condition_A: 3 of 100 samples errored (provider 502) and are absent from the log",
+    "condition_B: 7 samples hit the message limit; 2 samples were retried by Inspect"
+]
+```
+
+These are **non-directional execution facts only** — retries, attrition, preflight exclusions, termination counts. They are context about data quality, never about the hypothesis or about what any condition is, and they never carry a real condition name, a role word or an expected direction. Reconcile them with your own counts under §Transcript exclusions and use them to qualify any comparison that differential attrition could confound; do not let them shape which scanners you build. The field is rendered as its own `## Execution Notes` request section with that rule attached; a value that is neither a string nor a list of strings is rejected as an agent error.
+
 ### Artefacts directory (optional)
 
 A path to a shared artefacts directory for the investigation. When provided, the analyst creates an `analyst/` subdirectory within it and writes all file outputs there (scripts, scan results, validation sets, reports). This keeps all investigation artefacts co-located. If not provided, the analyst writes to the current working directory.
@@ -182,5 +195,7 @@ Patterns not directly related to the topic description or outside the scope of t
 **Each invocation is self-contained.** Every delegation from the orchestrator to the analyst is a single-shot interaction: one request, one report, no follow-up within the same invocation. The analyst has no memory of prior invocations and builds all scanners from scratch based on the current topic description. This preserves the informational firewall: the orchestrator cannot inadvertently leak directional information through iterative refinement, and the analyst is never handed tools that encode what a previous analysis found interesting. If the orchestrator needs a different analysis, it constructs a new request from scratch.
 
 **Section headings are markdown, and their text is verbatim.** Emit each report section as a markdown heading at the level shown in the Report Format above (`### Summary`, `### Validation metrics`, …), using the exact heading text, in the order given. Plain-text section titles are not sufficient: the orchestrator locates sections structurally, so a report whose content is perfect but whose headings are unmarked is a report it cannot reliably read. This is stated explicitly rather than left to be inferred from the formatting of this document.
+
+**The report is the whole of stdout.** The detached launcher (`scripts/launch_subagent.py`) captures stdout verbatim to the per-invocation path `<artefacts-dir>/analyst/report_<tag>_analyst_<n>.md`, so begin directly with the first section heading — no preamble, no narration of readiness, no sign-off, and no horizontal rules outside sections. A leading "here is the report" line becomes a permanent part of a document that downstream agents read by structure.
 
 **Condition label opacity.** The analyst should not attempt to infer what the condition labels represent. If the analyst notices that condition labels correlate with observable transcript properties (e.g., condition_A transcripts are systematically longer), it should report this observation as a metadata finding, not as an inference about the experimental design.

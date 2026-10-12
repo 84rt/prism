@@ -45,6 +45,8 @@ One session per work-package (WP5 is one session running A then B). Each session
 
 ## WP2 — Sub-agent routing & credentials (P1, Wave 2, after WP1)
 
+> **Superseded (2026-10-08).** D05 was redesigned by the owner: no third route was added and the LiteLLM proxy was dropped. The runner keeps exactly two routes (`direct`, `openrouter`), and credential exhaustion is handled by detection, degrading first, then a resumable **suspension** (`RESUME.md`). See `reviews/REVIEW-WP2.md`; the brief below is kept as the historical record.
+
 **Goal.** Survive a single credential cap instead of losing the whole specialist layer.
 **Owns.** The route resolver in `subagents/runner.py`; `subagent_invocation.md §subagent_route`; every "no direct-OpenAI route" sentence (`diagnostician_responsibilities.md §Cross-family Critic gate`, `critic_interface_contract.md §Cross-family routing`, `.claude/skills/diagnose/SKILL.md`, README §Prerequisites, `subagent_invocation.md`).
 **Deficiencies & done-when:**
@@ -106,6 +108,8 @@ One session per work-package (WP5 is one session running A then B). Each session
 ---
 
 ## WP6 — Blinding firewall (P0, Wave 2, after WP1, WP3, WP5)
+
+> **Superseded (2026-10-08).** WP6 was widened to **both modes** (the Orchestrator assigns opaque ids too, and `check_blinding.py` is mode-neutral), and a differing `task_args` value **warns rather than blocks** — an accepted, recorded leak. See `reviews/REVIEW-WP6.md`; the brief below is kept as the historical record.
 
 **Goal.** Close the most serious firewall defect: the Analyst learning conditions from paths and metadata. Three channels leak today — log directory names, `--metadata condition=` / `--tags cond:` inside every `.eval`, and the variant environment path in the log spec.
 **Owns.** New `scripts/check_blinding.py`; a rule in `.claude/docs/contracts/designer_interface_contract.md`; the 3a apply-diffs/label-map and 3c opaque-labels bullets of `diagnostician_responsibilities.md`; one `RESTRICTED_FILES` entry in `subagents/transcript_analyst/agent.py`.

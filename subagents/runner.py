@@ -2,10 +2,13 @@
 
 import fnmatch
 import functools
+import glob
 import importlib.util
+import itertools
 import json
 import os
 import re
+import shlex
 import sys
 from datetime import datetime, timezone
 from types import ModuleType
@@ -13,6 +16,7 @@ from typing import Any
 
 from claude_agent_sdk import (
     ClaudeAgentOptions,
+    ClaudeSDKError,
     CLIConnectionError,
     CLINotFoundError,
     HookMatcher,
@@ -217,6 +221,25 @@ OPENROUTER_ANTHROPIC_BASE_URL = "https://openrouter.ai/api"
 WINDOW_ENFORCEMENT_ENV = "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT"
 MAX_CONTEXT_ENV = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
 
+# --- Isolation from the host's Claude Code configuration ---------------------
+#
+# `run_agent` passes `setting_sources=[]`, so no user/project/local settings
+# file is read: no CLAUDE.md, no hooks, plugins or permission rules from the
+# repo a sub-agent happens to run in. These variables close the two context
+# channels that do not go through a settings source: managed CLAUDE.md files
+# and the auto-memory directory (both checked against the bundled CLI of the
+# pinned `claude-agent-sdk`, see `scripts/launch_subagent.py`).
+ISOLATION_ENV: dict[str, str] = {
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+}
+
+# The one project setting sub-agents relied on, passed explicitly now that
+# project settings are not loaded: secrets in `.env` files are never read.
+SUBAGENT_SETTINGS: dict[str, Any] = {
+    "permissions": {"deny": ["Read(**/.env)", "Read(**/.env.local)"]},
+}
+
 # One public, key-free catalogue request per model per process; short, because
 # it sits in front of every non-Claude invocation and must never stall one.
 CONTEXT_FETCH_TIMEOUT = 10.0
@@ -390,6 +413,12 @@ CREDENTIAL_PATTERNS: tuple[str, ...] = (
     "credit balance is too low",
     "requires more credits",
     "insufficient credits",
+    # OpenAI quota exhaustion, sent as a 429 that would otherwise read as a
+    # rate limit: error code `insufficient_quota`, message "You exceeded your
+    # current quota, please check your plan and billing details" (documented,
+    # not observed in the archive).
+    "insufficient_quota",
+    "you exceeded your current quota",
 )
 
 # A bare "402" also matches sample ids and hashes, so the status code counts
@@ -482,37 +511,478 @@ exist, before the next step begins.
 """
 
 
+# --- File firewall ------------------------------------------------------------
+#
+# The restricted-file hooks below keep the scaffold from *priming* a sub-agent:
+# they stop a lead-agent document, a ledger, a log or the condition label map
+# from reaching a sub-agent through an ordinary tool call. They catch accidents,
+# not intent. Read, Grep and Glob are checked on their path arguments; Bash is
+# checked best-effort on the words of the command, which a determined agent
+# could evade (`cat $(echo ...)`). An OS-level sandbox around the sub-agent
+# process is the airtight version and is future work.
+
+# Every sub-agent other than the lead is denied the condition label map,
+# whatever its role-specific list says, so a new role (or a builder that forgot
+# the entry) can never read which opaque condition id is which. One basename
+# wildcard covers every iteration's map, and any backup copy beside it.
+LABEL_MAP_PATTERN = "CONDITION_LABEL_MAP*"
+ALWAYS_RESTRICTED: dict[str, str] = {
+    LABEL_MAP_PATTERN: (
+        "Private condition label map: opaque execution ids → real condition names. "
+        "Only the lead agent reads it; no sub-agent may learn which condition is which."
+    ),
+}
+
+# The launcher's persisted requests (`investigations/<name>/requests/`, see
+# `scripts/launch_subagent.py`). Anchored to that layout rather than any
+# directory called `requests/`, which would also catch the `requests` package
+# or an eval environment's own folder.
+INVESTIGATION_REQUESTS = "investigations/*/requests/"
+
+# Upper bound on the directory walk behind a Grep over a directory, so a search
+# rooted at a huge tree costs a bounded few milliseconds. Past the cap the walk
+# stops and the search is denied with a request to narrow it: an unchecked
+# tree may hold the label map, and a narrower search costs the agent one turn.
+GREP_WALK_LIMIT = 20000
+
+# Dependency and build directories the walk does not descend into. They are
+# what push an ordinary eval repo past the cap (a `node_modules` alone can hold
+# tens of thousands of files), and by convention they never hold investigation
+# state, so skipping them removes false refusals without opening a channel.
+# Deliberately a fixed list of names rather than the repo's .gitignore: that
+# would only be safe if the search tool also skipped every gitignored path, and
+# an investigation directory a user chose to gitignore would then go unchecked.
+GREP_WALK_SKIP_DIRS = frozenset(
+    {"node_modules", "__pycache__", "venv", "site-packages", "bower_components"}
+)
+
+# Bound on how many paths one wildcard word in a Bash command is expanded to.
+BASH_GLOB_LIMIT = 500
+
+# Commands that read file contents across a directory tree when given one
+# (`find` via -exec; grep and ls only with a recursive flag, see
+# `_is_recursive_search`). Tools that only list names are left out: a name
+# alone tells nothing.
+_RECURSIVE_TOOLS = frozenset({"rg", "find"})
+
+_WILDCARD_CHARS = "*?["
+
+
+def _normalised_paths(path: str, cwd: str) -> list[str]:
+    """Both spellings of a tool's path argument that the firewall checks.
+
+    Parameters
+    ----------
+    path : str
+        The path as the tool received it — absolute, relative to the agent's
+        working directory, or containing ``..`` / ``~``.
+    cwd : str
+        The sub-agent's working directory, against which a relative path
+        resolves.
+
+    Returns
+    -------
+    list[str]
+        The lexical form (``normpath`` of the absolute path, so
+        ``a/../investigator/x.md`` cannot slip past a pattern) and the
+        resolved form (``realpath``, so a symlink cannot rename a restricted
+        file), de-duplicated. A path is denied when either form matches.
+
+    Examples
+    --------
+    >>> _normalised_paths("docs/../.claude/docs/investigator/x.md", "/t")[0]
+    '/t/.claude/docs/investigator/x.md'
+    """
+    expanded = os.path.expanduser(path)
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(cwd, expanded)
+    lexical = os.path.normpath(expanded)
+    return list(dict.fromkeys([lexical, os.path.realpath(lexical)]))
+
+
+def _pattern_matches(pattern: str, abs_path: str) -> bool:
+    """Whether one restricted-file pattern denies one normalised absolute path.
+
+    Parameters
+    ----------
+    pattern : str
+        A restricted-file pattern (semantics in `_build_hooks`).
+    abs_path : str
+        A normalised absolute path, from `_normalised_paths`.
+
+    Returns
+    -------
+    bool
+        True when the pattern covers the path.
+    """
+    if pattern.endswith("/"):
+        # A directory pattern matches at a path-component boundary anywhere in
+        # the path (so `requests/` never matches `my_requests/`), and also the
+        # directory itself — hence the trailing "/" added to the path. Shell
+        # wildcards inside it span components (`runs/*/private/`).
+        return fnmatch.fnmatchcase(abs_path + "/", "*/" + pattern + "*")
+    if any(ch in pattern for ch in _WILDCARD_CHARS):
+        # A family of files sharing a name shape (one per iteration, say) is
+        # denied by one pattern rather than an enumeration that silently stops
+        # at its last entry.
+        return fnmatch.fnmatchcase(os.path.basename(abs_path), pattern)
+    return abs_path.endswith(pattern)
+
+
+def _first_denial(
+    restricted_files: dict[str, str], path: str, cwd: str
+) -> tuple[str, str] | None:
+    """The first restricted pattern denying `path`, with its reason.
+
+    Parameters
+    ----------
+    restricted_files : dict[str, str]
+        Pattern → denial reason.
+    path : str
+        A tool's path argument, in any spelling.
+    cwd : str
+        The sub-agent's working directory.
+
+    Returns
+    -------
+    tuple[str, str] | None
+        ``(pattern, reason)``, or None when the path is allowed.
+    """
+    for candidate in _normalised_paths(path, cwd):
+        for pattern, reason in restricted_files.items():
+            if _pattern_matches(pattern, candidate):
+                return pattern, reason
+    return None
+
+
+def _restricted_beneath(
+    restricted_files: dict[str, str], root: str, name_filter: str | None
+) -> tuple[str, str] | None:
+    """A restricted file or directory that a recursive search of `root` would read.
+
+    A Grep over a directory returns matching *lines* from every file below
+    it, so searching an investigation directory would quote the label map
+    without ever naming it. The walk mirrors what the search tool reads by
+    default: hidden directories are skipped (ripgrep skips them), symlinked
+    directories are not followed, and a ``glob`` filter limits the files.
+
+    Parameters
+    ----------
+    restricted_files : dict[str, str]
+        Pattern → denial reason.
+    root : str
+        Normalised absolute directory the search is rooted at.
+    name_filter : str | None
+        The search's ``glob`` filter, e.g. ``"*.py"`` (its basename is used),
+        or None for every file.
+
+    Returns
+    -------
+    tuple[str | None, str] | None
+        ``(pattern, path_found)`` for the first restricted entry;
+        ``(None, root)`` when the tree is larger than `GREP_WALK_LIMIT`
+        entries and could not be checked (the caller denies: fail closed);
+        None when the search is clear.
+    """
+    name_glob = os.path.basename(name_filter) if name_filter else None
+    seen = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d for d in dirnames if not d.startswith(".") and d not in GREP_WALK_SKIP_DIRS
+        ]
+        # A restricted directory is reported only when no filter could exclude
+        # its files; a restricted file only when the filter would include it.
+        entries = [os.path.join(dirpath, d) for d in dirnames] if name_glob is None else []
+        entries += [
+            os.path.join(dirpath, f)
+            for f in filenames
+            if name_glob is None or fnmatch.fnmatch(f, name_glob)
+        ]
+        for entry in entries:
+            for pattern in restricted_files:
+                if _pattern_matches(pattern, entry):
+                    return pattern, entry
+        seen += len(dirnames) + len(filenames)
+        if seen > GREP_WALK_LIMIT:
+            return None, root
+    return None
+
+
+def _beneath_reason(
+    restricted_files: dict[str, str], found: tuple[str | None, str]
+) -> tuple[str, str]:
+    """Denial ``(pattern, reason)`` for a `_restricted_beneath` hit.
+
+    Parameters
+    ----------
+    restricted_files : dict[str, str]
+        Pattern → denial reason.
+    found : tuple[str | None, str]
+        The walk's result: a pattern and the entry found, or ``(None, root)``
+        when the tree was too large to check.
+
+    Returns
+    -------
+    tuple[str, str]
+        Arguments for the hook's denial message.
+    """
+    pattern, where = found
+    if pattern is None:
+        return "search root", (
+            f"`{where}` holds more than {GREP_WALK_LIMIT} entries, too many to check for "
+            "restricted files; search a narrower directory"
+        )
+    return pattern, (
+        f"{restricted_files[pattern]} (the search covers `{where}`; narrow the "
+        "path or the file filter so the search excludes it)"
+    )
+
+
+def _strip_heredocs(command: str) -> str:
+    """Remove heredoc bodies, which are a program's text rather than shell syntax.
+
+    A Python script fed through ``python - <<'EOF'`` legitimately contains
+    ``&`` (a pandas mask, a bitwise and); tokenised as shell it would read as
+    backgrounding.
+
+    Parameters
+    ----------
+    command : str
+        The Bash tool's ``command`` string.
+
+    Returns
+    -------
+    str
+        The command with every ``<<WORD … WORD`` body removed.
+
+    Examples
+    --------
+    >>> _strip_heredocs("python - <<'EOF'\nprint(a & b)\nEOF\necho done")
+    "python - <<'EOF'\necho done"
+    """
+    return re.sub(
+        r"(<<-?\s*(['\"]?)(\w+)\2[^\n]*)\n.*?\n\s*\3[ \t]*(?=\n|$)",
+        r"\1",
+        command,
+        flags=re.S,
+    )
+
+
+def _is_recursive_search(words: list[str]) -> bool:
+    """Whether a command reads directory trees it is given (grep -r, rg, find …).
+
+    Parameters
+    ----------
+    words : list[str]
+        Output of `_command_words`.
+
+    Returns
+    -------
+    bool
+        True for `_RECURSIVE_TOOLS`, or grep/ls with a recursive flag
+        (``-r``, ``-R``, ``-rn``, ``--recursive``).
+    """
+    names = {os.path.basename(w) for w in words}
+    if names & _RECURSIVE_TOOLS:
+        return True
+    if names & {"grep", "egrep", "ls"}:
+        return any(
+            w == "--recursive" or (re.fullmatch(r"-[A-Za-z]+", w) and ("r" in w or "R" in w))
+            for w in words
+        )
+    return False
+
+
+def _command_words(command: str) -> list[str]:
+    """Split a shell command into words and operators for the Bash checks.
+
+    Parameters
+    ----------
+    command : str
+        The Bash tool's ``command`` string.
+
+    Returns
+    -------
+    list[str]
+        Words with quotes removed, and operators (``&``, ``&&``, ``|``, ``;``,
+        ``>&`` …) as their own entries. An unparseable command (an unbalanced
+        quote) falls back to a whitespace split, which still exposes paths.
+
+    Examples
+    --------
+    >>> _command_words("cat 'a b.md' 2>&1 &")
+    ['cat', 'a b.md', '2', '>&', '1', '&']
+    """
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:
+        return command.split()
+
+
+def _bash_denial(
+    restricted_files: dict[str, str], command: str, cwd: str
+) -> tuple[str, str] | None:
+    """Best-effort check of a Bash command against the restricted patterns.
+
+    Every word that looks like a path (it contains "/" or names an existing
+    entry) is normalised and checked as a path; `--opt=value` words are split
+    at "=". A word with a shell wildcard is expanded against the filesystem
+    (up to `BASH_GLOB_LIMIT` paths) and each expansion checked, so
+    ``cat inv/COND*`` is caught although it never spells the name. When the
+    command searches recursively (``grep -r``, ``rg``, ``find``), every
+    directory it names — or the cwd, if none — is walked like a Grep root.
+    Independently, the command text is searched for each pattern's fixed stem
+    (``CONDITION_LABEL_MAP``, ``CANDIDATES.md``), which catches a restricted
+    file named inside a longer string or a script. This catches the
+    accidental read; it is not a sandbox (see the section comment): a path
+    built at run time (`cat $(ls | head -1)`) is invisible to it.
+
+    Parameters
+    ----------
+    restricted_files : dict[str, str]
+        Pattern → denial reason.
+    command : str
+        The command text.
+    cwd : str
+        The sub-agent's working directory.
+
+    Returns
+    -------
+    tuple[str, str] | None
+        ``(pattern, reason)``, or None when nothing restricted is referenced.
+    """
+    words = _command_words(command)
+    directories: list[str] = []
+
+    # --- Path-shaped words, resolved like a Read's file_path ---
+    for word in words:
+        for part in word.split("="):
+            if not part:
+                continue
+            # A wildcard word is checked as each path it expands to.
+            expansions = [part]
+            if any(ch in part for ch in _WILDCARD_CHARS):
+                pattern_path = part if os.path.isabs(part) else os.path.join(cwd, part)
+                expansions += list(itertools.islice(glob.iglob(pattern_path), BASH_GLOB_LIMIT))
+            for candidate in expansions:
+                looks_like_path = "/" in candidate or os.path.lexists(os.path.join(cwd, candidate))
+                if not looks_like_path:
+                    continue
+                hit = _first_denial(restricted_files, candidate, cwd)
+                if hit:
+                    return hit
+                resolved = _normalised_paths(candidate, cwd)[0]
+                if os.path.isdir(resolved):
+                    directories.append(resolved)
+
+    # --- Recursive searches read whole trees, like a Grep over a directory ---
+    if _is_recursive_search(words):
+        for root in directories or [cwd]:
+            found = _restricted_beneath(restricted_files, root, None)
+            if found:
+                return _beneath_reason(restricted_files, found)
+
+    # --- Fixed stems anywhere in the text ---
+    for pattern, reason in restricted_files.items():
+        if pattern.endswith("/"):
+            continue  # a directory is only meaningful as a path (checked above)
+        stem = re.split(r"[*?\[]", pattern, maxsplit=1)[0]
+        stem = stem.rsplit("/", 1)[-1]
+        if len(stem) >= 6 and stem in command:
+            return pattern, reason
+    return None
+
+
+# Command words that detach a process from the agent's turn. Checked as whole
+# words, so `nohup` inside a quoted string or a filename is not a match.
+_BACKGROUND_WORDS = frozenset({"&", "nohup", "setsid", "disown"})
+
+
+def _fail_closed(agent_name: str, hook: Any) -> Any:
+    """Wrap a PreToolUse hook so an exception blocks the call instead of passing it.
+
+    Parameters
+    ----------
+    agent_name : str
+        For the denial message.
+    hook : Callable
+        An async ``(input_data, tool_use_id, context) -> dict`` hook.
+
+    Returns
+    -------
+    Callable
+        The same hook, returning a block decision when it raises.
+    """
+
+    @functools.wraps(hook)
+    async def guarded(input_data: dict, tool_use_id: str, context: dict) -> dict:
+        try:
+            return await hook(input_data, tool_use_id, context)
+        except Exception as exc:  # deliberately broad: a firewall must not fail open
+            return {
+                "decision": "block",
+                "reason": f"[{agent_name}] Access check failed ({type(exc).__name__}: {exc}); "
+                "the call was blocked. Retry with a plain path.",
+            }
+
+    return guarded
+
+
 def _build_hooks(
     agent_name: str,
     restricted_files: dict[str, str],
     memory_abs_path: str | None,
     restrict_writes_to_memory: bool,
+    cwd: str | None = None,
 ) -> dict[str, Any] | None:
     """Build PreToolUse hooks for file access control and memory.
 
     Args:
         agent_name: Human-readable agent name for error messages.
         restricted_files: Mapping of path patterns to denial reasons. A
-            pattern ending in "/" denies an entire directory (matched
-            anywhere in the path); a pattern containing a shell wildcard
-            (`*`, `?`, `[`) is matched against the file's basename
-            (e.g. "CONDITION_LABEL_MAP*.json" covers every iteration's map);
-            any other pattern denies paths ending with it, which is
-            normally a bare filename. Directory patterns
+            pattern ending in "/" denies an entire directory, matched at a
+            path-component boundary anywhere in the path (shell wildcards
+            inside it span components, e.g. "runs/*/private/"); a pattern
+            containing a shell wildcard (`*`, `?`, `[`) is matched against
+            the file's basename (e.g. "CONDITION_LABEL_MAP*" covers every
+            iteration's map); any other pattern denies paths ending with it,
+            which is normally a bare filename. Directory patterns
             exist so that a whole class of documents can be blinded once
             rather than enumerated — a file added to a denied directory
             later is blocked automatically, whereas a new filename is
             invisible to a list of filenames until someone remembers it.
+            Enforced on Read (`file_path`), Grep and Glob (`path`, plus the
+            `glob`/`pattern` joined to it, plus — for Grep over a directory —
+            any restricted entry the search would read), and best-effort on
+            Bash (see `_bash_denial`). Every path is normalised first.
         memory_abs_path: Absolute path to the agent's memory.md, or None.
         restrict_writes_to_memory: If True, block all writes except to
             memory.md. If False, only enforce append-only on memory.md.
+        cwd: The sub-agent's working directory, against which relative tool
+            paths resolve. Defaults to the process's working directory.
 
     Returns:
         A hooks dict suitable for ClaudeAgentOptions, or None if no
         hooks are needed.
     """
+    base_cwd = cwd or os.getcwd()
     read_hooks: list[Any] = []
+    search_hooks: list[Any] = []
     write_hooks: list[Any] = []
+    memory_real = os.path.realpath(memory_abs_path) if memory_abs_path else None
+
+    def deny(pattern: str, reason: str) -> dict:
+        return {
+            "decision": "block",
+            "reason": f"[{agent_name}] Access denied: {pattern} — {reason}",
+        }
+
+    def agent_cwd(input_data: dict) -> str:
+        # The CLI reports the session's cwd in every hook input; fall back to
+        # the configured one (tests and older CLIs omit it).
+        return input_data.get("cwd") or base_cwd
 
     # --- Read hook: allow memory.md, then check restricted files ---
     if restricted_files or memory_abs_path:
@@ -521,32 +991,44 @@ def _build_hooks(
             input_data: dict, tool_use_id: str, context: dict
         ) -> dict:
             file_path = input_data.get("tool_input", {}).get("file_path", "")
-            # Always allow reading the agent's own memory file.
-            if memory_abs_path and os.path.abspath(file_path) == memory_abs_path:
+            if not file_path:
                 return {}
-            for pattern, reason in restricted_files.items():
-                # A trailing slash marks a directory pattern: match it
-                # anywhere in the path, since a file path ends in the
-                # filename and would never end with the directory itself.
-                if pattern.endswith("/"):
-                    matched = pattern in file_path
-                elif any(ch in pattern for ch in "*?["):
-                    # A family of files sharing a name shape (one per
-                    # iteration, say) is denied by one pattern rather than
-                    # an enumeration that silently stops at its last entry.
-                    matched = fnmatch.fnmatchcase(os.path.basename(file_path), pattern)
-                else:
-                    matched = file_path.endswith(pattern)
-                if matched:
-                    return {
-                        "decision": "block",
-                        "reason": (
-                            f"[{agent_name}] Access denied: {pattern} — {reason}"
-                        ),
-                    }
-            return {}
+            here = agent_cwd(input_data)
+            # Always allow reading the agent's own memory file.
+            if memory_real and memory_real in _normalised_paths(file_path, here):
+                return {}
+            hit = _first_denial(restricted_files, file_path, here)
+            return deny(*hit) if hit else {}
 
         read_hooks.append(check_read_access)
+
+    # --- Grep/Glob hook: the same firewall on the search arguments ---
+    if restricted_files:
+
+        async def check_search_access(
+            input_data: dict, tool_use_id: str, context: dict
+        ) -> dict:
+            tool_input = input_data.get("tool_input", {})
+            here = agent_cwd(input_data)
+            root = tool_input.get("path") or here
+            # Glob's `pattern` and Grep's `glob` are path shapes relative to
+            # the search root; Grep's `pattern` is a regex, not a path.
+            shape = tool_input.get("glob") if input_data.get("tool_name") == "Grep" else tool_input.get("pattern")
+            candidates = [root] + ([os.path.join(root, shape)] if shape else [])
+            for candidate in candidates:
+                hit = _first_denial(restricted_files, candidate, here)
+                if hit:
+                    return deny(*hit)
+            # A content search over a directory reads every file beneath it.
+            if input_data.get("tool_name") == "Grep":
+                root_abs = _normalised_paths(root, here)[0]
+                if os.path.isdir(root_abs):
+                    found = _restricted_beneath(restricted_files, root_abs, shape)
+                    if found:
+                        return deny(*_beneath_reason(restricted_files, found))
+            return {}
+
+        search_hooks.append(check_search_access)
 
     # --- Write hook: append-only memory, optional general write restriction ---
     if memory_abs_path or restrict_writes_to_memory:
@@ -556,8 +1038,10 @@ def _build_hooks(
         ) -> dict:
             tool_input = input_data.get("tool_input", {})
             file_path = tool_input.get("file_path", "")
-            is_memory = memory_abs_path and (
-                os.path.abspath(file_path) == memory_abs_path
+            is_memory = bool(
+                memory_real
+                and file_path
+                and memory_real in _normalised_paths(file_path, agent_cwd(input_data))
             )
 
             if is_memory:
@@ -592,26 +1076,53 @@ def _build_hooks(
 
     # --- Bash hook: forbid backgrounding so each step runs to completion ---
     # Applies to every sub-agent, and is scoped to this Agent SDK query only, so
-    # it never affects the orchestrator or any other Claude Code session.
+    # it never affects the orchestrator or any other Claude Code session. Both
+    # the tool flag and the shell's own detaching forms (a trailing `&`,
+    # `nohup`, `setsid`, `disown`) are refused.
     async def check_no_background(
         input_data: dict, tool_use_id: str, context: dict
     ) -> dict:
-        if input_data.get("tool_input", {}).get("run_in_background"):
+        tool_input = input_data.get("tool_input", {})
+        words = set(_command_words(_strip_heredocs(tool_input.get("command", "") or "")))
+        if tool_input.get("run_in_background") or words & _BACKGROUND_WORDS:
             return {
                 "decision": "block",
                 "reason": (
-                    f"[{agent_name}] Backgrounding is disabled for sub-agents. "
+                    f"[{agent_name}] Backgrounding is disabled for sub-agents "
+                    "(no run_in_background, trailing `&`, nohup, setsid or disown). "
                     "Run the command in the foreground and wait for it to "
                     "finish; long-running commands are expected."
                 ),
             }
         return {}
 
-    bash_hooks = [check_no_background]
+    bash_hooks: list[Any] = [check_no_background]
+
+    # --- Bash hook: best-effort firewall on the command's words ---
+    if restricted_files:
+
+        async def check_bash_access(
+            input_data: dict, tool_use_id: str, context: dict
+        ) -> dict:
+            command = input_data.get("tool_input", {}).get("command", "") or ""
+            hit = _bash_denial(restricted_files, command, agent_cwd(input_data))
+            return deny(*hit) if hit else {}
+
+        bash_hooks.append(check_bash_access)
+
+    # A hook that raises (a NUL byte in a path, say) would be treated by the
+    # CLI as non-blocking, i.e. fail open; every hook is wrapped to block.
+    read_hooks = [_fail_closed(agent_name, h) for h in read_hooks]
+    search_hooks = [_fail_closed(agent_name, h) for h in search_hooks]
+    write_hooks = [_fail_closed(agent_name, h) for h in write_hooks]
+    bash_hooks = [_fail_closed(agent_name, h) for h in bash_hooks]
 
     matchers = []
     if read_hooks:
         matchers.append(HookMatcher(matcher="Read", hooks=read_hooks))
+    if search_hooks:
+        matchers.append(HookMatcher(matcher="Grep", hooks=search_hooks))
+        matchers.append(HookMatcher(matcher="Glob", hooks=search_hooks))
     if write_hooks:
         matchers.append(HookMatcher(matcher="Write", hooks=write_hooks))
     if bash_hooks:
@@ -709,11 +1220,13 @@ async def run_agent(
         )
 
     # --- Hooks ---
+    # The label map is denied to every sub-agent on top of its role's list.
     hooks = _build_hooks(
         agent_name=agent_name,
-        restricted_files=restricted_files or {},
+        restricted_files={**ALWAYS_RESTRICTED, **(restricted_files or {})},
         memory_abs_path=memory_abs_path,
         restrict_writes_to_memory=restrict_writes_to_memory,
+        cwd=working_dir,
     )
 
     # Ensure Write is in allowed_tools if memory is enabled.
@@ -728,12 +1241,26 @@ async def run_agent(
         model=resolved_model,
         thinking=_resolve_thinking(thinking, resolved_model, route),
         system_prompt=system_prompt,
+        # --- Isolation: the sub-agent sees only what the scaffold gives it ---
+        # `tools` is the set the model is offered at all; under
+        # bypassPermissions an unlisted default tool (Skill, Agent/Task,
+        # NotebookEdit, Edit…) would otherwise still be usable, and Skill would
+        # load lead-agent methodology around the `.claude/skills/` read block.
+        tools=list(allowed_tools),
         allowed_tools=allowed_tools,
         disallowed_tools=disallowed_tools,
+        skills=[],
+        # No filesystem settings: no CLAUDE.md, no user/project hooks, plugins
+        # or permission rules from whichever repo the sub-agent runs in. The
+        # one project rule a sub-agent relied on — never read `.env` secrets —
+        # is passed explicitly below instead.
+        setting_sources=[],
+        settings=json.dumps(SUBAGENT_SETTINGS),
+        strict_mcp_config=True,
         permission_mode="bypassPermissions",
         max_turns=max_turns or DEFAULT_MAX_TURNS,
         cwd=working_dir,
-        **({"env": route_env} if route_env else {}),
+        env={**ISOLATION_ENV, **route_env},
         **({"hooks": hooks} if hooks else {}),
     )
 
@@ -744,36 +1271,57 @@ async def run_agent(
             if isinstance(message, ResultMessage):
                 result = message.result
                 result_message = message
-    except CLINotFoundError:
+    except CLINotFoundError as exc:
         raise RuntimeError(
             f"{agent_name}: Claude Code CLI not found. "
             "Install with: pip install claude-agent-sdk"
-        )
-    except (CLIConnectionError, ProcessError) as exc:
-        kind = "connection error" if isinstance(exc, CLIConnectionError) else "process error"
+        ) from exc
+    except ClaudeSDKError as exc:
+        # Connection and process errors are the common cases; any other SDK
+        # error (a malformed CLI message, say) is still an agent error (exit
+        # 2), never a bare traceback (exit 1) misread as a scaffold crash.
+        if isinstance(exc, CLIConnectionError):
+            kind = "connection error"
+        elif isinstance(exc, ProcessError):
+            kind = "process error"
+        else:
+            kind = f"SDK error ({type(exc).__name__})"
         # The CLI emits its error result before exiting non-zero, so the
         # usage of a failed run is usually still in hand: record it, tagged.
         # Older SDKs raise a generic "Command failed with exit code 1"
         # ProcessError and leave the provider's text only in the error
-        # result, so classify both.
-        error_result = result_message.result if result_message is not None else None
+        # result, so classify both — but only an *error* result: a successful
+        # result's text is the agent's report, which may well discuss credit.
+        error_result = (
+            result_message.result
+            if result_message is not None and result_message.is_error
+            else None
+        )
         _raise_if_credentials_exhausted(
             agent_name, resolved_model, route,
             "\n".join(t for t in (f"{exc}", error_result) if t), result_message,
         )
         if result_message is not None:
             _write_cost_sidecar(agent_name, resolved_model, route, result_message)
-        raise RuntimeError(f"{agent_name}: {kind}: {exc}")
+        raise RuntimeError(f"{agent_name}: {kind}: {exc}") from exc
+
+    if result_message is not None:
+        _write_cost_sidecar(agent_name, resolved_model, route, result_message)
 
     # An API failure can also arrive as an error result with the provider's
-    # text in `result` and no exception; that text is not a report.
+    # text in `result` and no exception; that text is not a report, so it is
+    # raised (exit 2) rather than returned and saved as one. The sidecar above
+    # has already recorded its usage.
     if result_message is not None and result_message.is_error:
         _raise_if_credentials_exhausted(
             agent_name, resolved_model, route, result_message.result, result_message
         )
-
-    if result_message is not None:
-        _write_cost_sidecar(agent_name, resolved_model, route, result_message)
+        raise RuntimeError(
+            f"{agent_name}: the run ended in an error result "
+            f"(subtype={result_message.subtype}, stop_reason={result_message.stop_reason}, "
+            f"num_turns={result_message.num_turns}, max_turns={options.max_turns}): "
+            f"{result_message.result}"
+        )
 
     if not result:
         # Say *why* there is no output: a turn-cap exit (`error_max_turns`) and
@@ -896,7 +1444,11 @@ def _write_cost_sidecar(
         return
     try:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        with open(path, "w") as f:
+        # Temp file + rename, so `spend.py` or the launcher reading the
+        # sidecar concurrently never sees a half-written record.
+        tmp = f"{path}.tmp{os.getpid()}"
+        with open(tmp, "w") as f:
             json.dump(record, f, indent=2, default=str)
+        os.replace(tmp, path)
     except OSError as exc:  # never fail a completed invocation over telemetry
         print(f"[cost] could not write {path}: {exc}", file=sys.stderr)

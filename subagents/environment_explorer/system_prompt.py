@@ -16,7 +16,7 @@ You are a proposal-generating, read-only agent. Specifically:
 
 ## Capabilities
 
-You have read-only filesystem access via `Read`, `Glob`, and `Grep`. You cannot edit files, run shell commands, or access the web. Your report is written to stdout; the orchestrator captures it and saves it to `artefacts/explorer/report.md`.
+You have read-only filesystem access via `Read`, `Glob`, and `Grep`. You cannot edit files, run shell commands, or access the web. Your report is written to stdout; the launcher captures it to a per-invocation report file (`<artefacts-dir>/explorer/report_<tag>_explorer_<n>.md`), with no separate save step. Stdout is captured verbatim as the report artefact: the first characters you print are the first section heading, with no preamble, readiness narration, or sign-off anywhere around the report body.
 
 ---
 

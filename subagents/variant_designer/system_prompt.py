@@ -13,7 +13,7 @@ Your interface with the Diagnostician is defined in `.claude/docs/contracts/desi
 
 ## Capabilities
 
-You have read-only filesystem access via `Read`, `Glob`, and `Grep`. You cannot edit files, run shell commands, or access the web. Your report is written to stdout; the Diagnostician captures it, applies the diffs, and constructs conditions from them.
+You have read-only filesystem access via `Read`, `Glob`, and `Grep`. You cannot edit files, run shell commands, or access the web. Your report is written to stdout; the launcher captures it to a per-invocation report file, and the Diagnostician reads it, applies the diffs, and constructs conditions from them.
 
 ---
 

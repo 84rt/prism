@@ -125,15 +125,16 @@
       "Bash(uv run mypy *)",
       "Bash(uv run ruff)",
       "Bash(uv run ruff *)",
-      "Bash(uv run inspect *)",
+      "Bash(uv run inspect --version)",
+      "Bash(uv run inspect --help)",
+      "Bash(uv run inspect list *)",
       "Bash(uv run --no-project python scripts/openrouter_endpoints.py *)",
       "Bash(uv run python scripts/execute_evals.py *)",
-      "Bash(uv run --no-project python scripts/execute_evals.py *)",
       "Bash(uv run python scripts/launch_subagent.py *)",
       "Bash(uv run --no-project python scripts/launch_subagent.py *)",
       "Bash(uv run python scripts/spend.py *)",
       "Bash(uv run --no-project python scripts/spend.py *)",
-      "Bash(uv run --with claude-agent-sdk --with python-dotenv python subagents/*)",
+      "Bash(uv run --with claude-agent-sdk==0.2.165 --with python-dotenv python subagents/*)",
       "Bash(uv run --no-project python scripts/ledger_to_json.py *)",
       "Bash(uv run --no-project python scripts/check_report.py *)",
       "Bash(uv run python scripts/check_blinding.py *)",
@@ -171,10 +172,17 @@
       "Bash(python3 *)",
       "Bash(pip *)",
       "Bash(pip3 *)",
+      "Bash(uv run inspect eval *)",
+      "Bash(uv run inspect eval-set *)",
+      "Bash(uv run inspect eval-retry *)",
+      "Bash(uv run inspect log *)",
+      "Bash(uv run inspect view)",
+      "Bash(uv run inspect view *)",
       "Bash(poetry *)",
       "Bash(pipenv *)",
       "Read(**/.env)",
-      "Read(**/.env.local)"
+      "Read(**/.env.local)",
+      "Read(**/artefacts/executor/runs/*/private/**)"
     ]
   }
 }

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 
 import pytest
 
@@ -242,6 +243,7 @@ def test_first_attempt_has_no_reask_section(role, tmp_path, monkeypatch):
         "defects_not_a_list",
         "defects_empty",
         "defect_not_a_string",
+        "defect_whitespace_only",
         "relative_report",
         "missing_report",
     ],
@@ -256,6 +258,7 @@ def test_malformed_reask_is_an_agent_error(role, malformed, tmp_path, monkeypatc
         "defects_not_a_list": {"conformance_defects": "missing section", "previous_report": previous},
         "defects_empty": {"conformance_defects": [], "previous_report": previous},
         "defect_not_a_string": {"conformance_defects": [{"line": "x"}], "previous_report": previous},
+        "defect_whitespace_only": {"conformance_defects": ["missing section `### Summary`", "   "], "previous_report": previous},
         "relative_report": {"conformance_defects": DEFECTS, "previous_report": "artefacts/report.md"},
         "missing_report": {"conformance_defects": DEFECTS, "previous_report": str(tmp_path / "nope.md")},
     }[malformed]
@@ -297,9 +300,9 @@ def test_every_data_key_read_by_each_builder_is_documented_in_its_section(agent_
     import re
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    src = open(os.path.join(root, "subagents", agent_dir, "agent.py")).read()
+    src = Path(os.path.join(root, "subagents", agent_dir, "agent.py")).read_text()
     keys = set(re.findall(r"data(?:\.get\(|\[)['\"](\w+)['\"]", src))
-    doc = open(os.path.join(root, ".claude", "docs", "investigator", "subagent_invocation.md")).read()
+    doc = Path(os.path.join(root, ".claude", "docs", "investigator", "subagent_invocation.md")).read_text()
     start, end = _INVOCATION_SECTIONS[agent_dir]
     section = doc.split(start, 1)[1]
     section = section.split(end, 1)[0] if end else section
@@ -312,3 +315,174 @@ def test_every_data_key_read_by_each_builder_is_documented_in_its_section(agent_
 
     missing = sorted(k for k in keys if not documented(k))
     assert not missing, f"{agent_dir}/agent.py reads undocumented request keys: {missing}"
+
+
+# --- Standing invariant, runtime direction: every documented key reaches the agent ---
+#
+# The grep above catches a key the builder reads but the docs omit. The more
+# dangerous direction is the reverse — a field documented (and so sent) that
+# the builder never reads, which `**data` discards without a trace. Here each
+# key the invocation reference documents for a role is sent with a sentinel
+# value, and the sentinel must reach the built prompt or a `run_agent` kwarg.
+# The key list is parsed from the reference itself, so a newly documented
+# field is covered the day it is documented.
+
+_DOC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".claude", "docs", "investigator", "subagent_invocation.md")
+_ROLE_DIRS = {
+    "explorer": "environment_explorer",
+    "executor": "experiment_executor",
+    "analyst": "transcript_analyst",
+    "mapper": "environment_mapper",
+    "designer": "variant_designer",
+    "critic": "redteam_critic",
+}
+_CRITIC_MODES = ("candidate_critique", "diff_review", "prediction")
+
+# Backticked names that lead a bullet in a role's section but are not
+# top-level request keys for this check: the Critic's mode names (values of
+# `mode`, which selects the branch rather than carrying content); `description`
+# (a sub-field of the Analyst's `behaviour_spec`); and the re-ask pair, which
+# must travel together with a real file and is pinned by
+# `test_reask_section_is_rendered_for_every_reasked_role` (and refused by the
+# Executor, `test_executor_rejects_reask_fields`).
+_NOT_CHECKED_HERE = {"mode", *_CRITIC_MODES, "description", "conformance_defects", "previous_report"}
+
+_NUM = 7919  # a distinctive number for integer-valued keys
+
+
+def _role_section(role: str) -> str:
+    """The role's section of the invocation reference."""
+    import re
+
+    doc = Path(_DOC).read_text()
+    start, end = _INVOCATION_SECTIONS[_ROLE_DIRS[role]]
+    section = doc.split(start, 1)[1]
+    section = section.split(end, 1)[0] if end else section
+    general = doc.split("## General Pattern", 1)[1].split("## Environment Explorer", 1)[0]
+    return section, re.findall(r"^### Optional: `(subagent_\w+)`", general, re.M)
+
+
+def _documented_keys(role: str) -> set[str]:
+    """Top-level request keys the reference documents for a role.
+
+    Parameters
+    ----------
+    role : str
+        One of `_ROLE_DIRS`.
+
+    Returns
+    -------
+    set[str]
+        Keys of every ```json example in the section, names leading a bullet,
+        and the General Pattern's shared ``subagent_*`` fields.
+    """
+    import json
+    import re
+
+    section, general = _role_section(role)
+    keys = set(general)
+    for block in re.findall(r"```json\n(.*?)\n```", section, re.S):
+        keys |= set(json.loads(block))
+    for line in section.splitlines():
+        m = re.match(r"^- ((?:`\w+`(?:,? (?:and |/ )?|/)?)+)", line)
+        if m:
+            keys |= set(re.findall(r"`(\w+)`", m.group(1)))
+    # The Critic's per-mode fields are named in its "- `<mode>` requires …" bullets.
+    if role == "critic":
+        keys |= {k for ks in _critic_mode_keys().values() for k in ks}
+    return keys - _NOT_CHECKED_HERE
+
+
+def _critic_mode_keys() -> dict[str, list[str]]:
+    """Per Critic mode, the fields its "- `<mode>` requires …" bullet names (before any " — ")."""
+    import re
+
+    section, _ = _role_section("critic")
+    out = {}
+    for mode in _CRITIC_MODES:
+        line = next(ln for ln in section.splitlines() if ln.startswith(f"- `{mode}` requires"))
+        out[mode] = re.findall(r"`(\w+)`", line.split(" — ")[0].split("requires", 1)[1])
+    return out
+
+
+def _sentinel(key: str, tmp_path) -> tuple[object, str]:
+    """A value for `key` shaped as the builder expects, carrying a findable token.
+
+    Parameters
+    ----------
+    key : str
+        The request key.
+    tmp_path : Path
+        For keys that must name an existing directory.
+
+    Returns
+    -------
+    tuple[object, str]
+        ``(value, token)`` — the token must appear in what the agent receives.
+        Unlisted keys default to a plain string, which suits every free-text
+        field (a newly documented one included).
+    """
+    s = f"SENTINEL_{key.upper()}"
+    shaped = {
+        "transcript_source": {"condition_A": s},
+        "conditions": {"c_0001": {"task": s, "args": {}}},
+        "models": [s],
+        "model_routing": {"m": {"route": "direct", "provider_slug": s, "model_args": {}}},
+        "overrides": {"sample_id": s},
+        "candidates": [{"id": "C1", "slug": s, "statement": "st", "discriminating_signature": "sig", "status": "live"}],
+        "environment_delta": [{"name": s, "description": "d"}],
+        "variations_tried": [{"name": s, "description": "d"}],
+        "elimination_targets": [s],
+        "transcript_paths": [s],
+        "diffs": [{"name": s, "diff": "d"}],
+        "untested_surfaces": [s],
+        "leading_explanation": {"id": "C1", "statement": s},
+        "behaviour_spec": {"description": s, "grader_dir": "/g"},
+        "construal_checks": [s],
+    }
+    if key in shaped:
+        return shaped[key], s
+    if key == "environment_rate":
+        return {"rate": 0.5, "n": _NUM}, str(_NUM)
+    if key == "subagent_thinking":
+        return {"type": "enabled", "budget_tokens": _NUM}, str(_NUM)
+    if key in ("variant_budget", "iteration", "subagent_max_turns"):
+        return _NUM, str(_NUM)
+    if key == "experiment_dir":
+        (tmp_path / s).mkdir()
+        return str(tmp_path / s), s
+    return s, s
+
+
+def _critic_base(mode: str, tmp_path) -> dict:
+    """A minimal valid Critic request for each mode."""
+    if mode == "diff_review":
+        return {"mode": mode, "diffs": [{"name": "v1", "diff": "d"}], "environment_path": "/env", "mapper_report_path": "/m.md"}
+    if mode == "prediction":
+        return {"mode": mode, "investigation_log_path": "/log.md", "leading_explanation": {"id": "C1"}, "untested_surfaces": ["s"]}
+    return dict(_requests(tmp_path)["critic"][2])
+
+
+def _cases():
+    """(role, key) pairs for every documented key of every role."""
+    return [(role, key) for role in sorted(_ROLE_DIRS) for key in sorted(_documented_keys(role))]
+
+
+def test_documented_key_lists_are_parsed():
+    """Guard the parser itself: known keys are found, so an empty parse cannot pass vacuously."""
+    assert {"topic", "transcript_source", "scanning_model", "construal_checks", "subagent_route"} <= _documented_keys("analyst")
+    assert {"diffs", "investigation_log_path", "evidence_summary"} <= _documented_keys("critic")
+    assert {"environment_delta", "elimination_targets", "subagent_max_turns"} <= _documented_keys("designer")
+
+
+@pytest.mark.parametrize("role, key", _cases())
+def test_every_documented_key_reaches_the_agent(role, key, tmp_path, monkeypatch):
+    module, run_fn, data, _ = _requests(tmp_path)[role]
+    if role == "critic":
+        mode = next((m for m, ks in _critic_mode_keys().items() if key in ks), "candidate_critique")
+        data = _critic_base(mode, tmp_path)
+    value, token = _sentinel(key, tmp_path)
+    got = _capture(monkeypatch, module)
+    asyncio.run(run_fn(cwd=None, **{**data, key: value}))
+    kwargs = repr({k: v for k, v in got.items() if k != "prompt"})
+    assert token in got["prompt"] or token in kwargs, f"{role}: documented key `{key}` never reaches the agent"

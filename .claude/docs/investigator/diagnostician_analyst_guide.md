@@ -15,7 +15,7 @@ Forensic requests and reports are specified across two documents, split delibera
 
 **The base contract contains no pointer to the addendum, by design.** The Orchestrator-mode Analyst reads the base contract, and a pointer would tell it a forensic mode exists — reintroducing the mode ambiguity the split removes. The Analyst finds the addendum through its forensic system prompt, which is selected automatically when the request carries a `behaviour_spec`. The Diagnostician finds it through this document, `diagnostician_responsibilities.md`, and `subagent_invocation.md` — there is no other route, so do not rely on discovering it from the base contract.
 
-**Presence of `behaviour_spec` *is* the mode switch.** `transcript_analyst/agent.py` selects the forensic system prompt when the field is present and the unchanged Orchestrator prompt when it is absent. There is no other flag. Consequently: never send an empty or placeholder `behaviour_spec` on a request that is not forensic, and never omit it on one that is. Note also that `behaviour_spec` is validated nowhere — `main.py`'s required fields are unchanged — so a malformed spec reaches the Analyst as raw JSON. Check it by hand against the addendum before sending.
+**Presence of `behaviour_spec` *is* the mode switch.** `transcript_analyst/agent.py` selects the forensic system prompt when the field is present and the unchanged Orchestrator prompt when it is absent. There is no other flag. Consequently: never send an empty or placeholder `behaviour_spec` on a request that is not forensic, and never omit it on one that is. Note also that `behaviour_spec` is validated only for the shape of its check set — `main.py`'s required fields are unchanged, and `agent.py` raises (exit 2) only on a malformed `construal_checks` or the retired `manipulation_check` — so a spec with a missing `description` or a wrong `grader_dir` reaches the Analyst as raw JSON. Check it by hand against the addendum before sending.
 
 ## When to delegate
 
@@ -32,7 +32,7 @@ Never invoke the Analyst to "just get the numbers" without the neutral topic: fo
 "behaviour_spec": {
     "description": "...",
     "reference_transcript": "...",
-    "grader_dir": ".../artefacts/analyst/grader",
+    "grader_dir": "/abs/path/to/investigations/<name>/artefacts/analyst/grader",
     "construal_checks": [{"id": "M1", "property": "..."}, {"id": "M2", "property": "..."}]
 }
 ```
@@ -56,7 +56,7 @@ The grader is **designed from the original episode and validated against the res
 
 What "populated" requires — scanner definition, validation set with label provenance, build-time metrics, `README.md` — is specified in the addendum, and a directory missing any of these is treated as unpopulated. That is an interface between invocations, not an implementation detail; do not re-specify it in requests, and do not hand-edit the directory's contents.
 
-Pass the **same absolute path every round**. The provenance line and hash in each report are how you verify the mechanism worked (see Interpreting, below).
+Pass the **same absolute path every round** — the investigation-level directory fixed at 1c (`diagnostician_responsibilities.md §1c`), never one under an iteration's `artefacts/`. The provenance line and hash in each report are how you verify the mechanism worked (see Interpreting, below).
 
 ### `construal_checks` — one de-identified set per round
 
@@ -71,7 +71,7 @@ Design guidance, including the surrogate-intervention pattern for construals wit
 
 ### Workload, work order and the split protocol
 
-The addendum fixes the Analyst's work order (grader → checks → awareness → open-ended scan) and `agent.py` restates it in every request, so a turn-starved invocation returns with a thin open-ended half rather than an unvalidated auxiliary. Two levers are yours: raise `subagent_max_turns` (once threaded through `runner.py`) for a large round rather than splitting; and when a round still exceeds roughly 24 scanner×condition passes or eight conditions, split **by check group, never by condition** — every invocation carries the grader and every condition, exactly one carries the open-ended scan and the others are told so in `constraints`. An invocation that died after computing everything has left checkpoints under `artefacts/analyst/`; re-invoke it with a `constraints` note pointing there and asking it to verify and report. The score blackout holds throughout — nothing in those artefacts is read before the report.
+The addendum fixes the Analyst's work order (grader → checks → awareness → open-ended scan) and `agent.py` restates it in every request, so a turn-starved invocation returns with a thin open-ended half rather than an unvalidated auxiliary. Two levers are yours: raise `subagent_max_turns` for a large round rather than splitting; and when a round still exceeds roughly 24 scanner×condition passes or eight conditions, split **by check group, never by condition** — every invocation carries the grader and every condition, exactly one carries the open-ended scan and the others are told so in `constraints`. An invocation that died after computing everything has left checkpoints under `artefacts/analyst/`; re-invoke it with a `constraints` note pointing there and asking it to verify and report. The score blackout holds throughout — nothing in those artefacts is read before the report.
 
 ### Scanning model and target family
 
@@ -93,9 +93,9 @@ The self-check, adapted: *if I read only this topic, could I reconstruct any can
 - **Opaque labels, re-randomised every invocation** — the mapping recorded in the iteration's `CONDITION_LABEL_MAP_iter<N>.json`, never sent. Reusing a stable mapping across iterations weakens the firewall exactly as it does for the Orchestrator (`orchestrator_responsibilities.md` Anti-Pattern #6).
 - **Opaque all the way down.** The labels sit on top of opaque execution ids (`c_3f9a`) assigned at 3a — and at 1b for the resample — which name every environment copy, condition-specific file and log directory, so no designer name or role word enters a path or a log header (`diagnostician_responsibilities.md §3a`, *Assign opaque execution ids*). Run `scripts/check_blinding.py` on the map and the request before every invocation; a non-zero exit blocks it, and its warnings (a `task_args` difference above all) go into the log and the report's Limitations (`orchestrator_analyst_guide.md §Providing condition labels`).
 - **Include the control arm.** Rates are only interpretable against the matched control from the same round; a single-condition scan also implicitly reveals design information (`orchestrator_analyst_guide.md §Providing condition labels`).
-- **Forward attrition and retry caveats** from the Executor's report, per condition, exactly as the Orchestrator does (`orchestrator_analyst_guide.md §Before delegating`).
+- **Forward attrition and retry caveats** from the Executor's report, per condition, in the request's `execution_notes` field, exactly as the Orchestrator does (`orchestrator_responsibilities.md` Step 2e item 7): non-directional execution facts under the opaque labels — retries, sample errors, preflight exclusions, termination counts — never a variant's name, a candidate, or an expected direction.
 - **Scanning model discipline is unchanged**: pinned route, held constant across conditions and across iterations — the scanner is part of the instrument.
-- Pass `artefacts_dir` every time, so grader, scans, and validation sets stay co-located under the iteration's `artefacts/analyst/`.
+- Pass `artefacts_dir` every time, so scans and validation sets stay co-located under the iteration's `artefacts/analyst/`. The grader is the exception: it lives in `grader_dir`, which is investigation-level and never moves.
 
 ## Interpreting the forensic report
 

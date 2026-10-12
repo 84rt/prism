@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -18,27 +19,55 @@ import spend
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def stub_entry(tmp_path, *, exit_code=0, sleep=0.0, cost=True):
-    """A stand-in for a sub-agent CLI: prints a report, writes a cost sidecar."""
+def stub_entry(tmp_path, *, exit_code=0, gate=None, cost=True):
+    """A stand-in for a sub-agent CLI: prints a report, writes a cost sidecar.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Where the stub script is written.
+    exit_code : int
+        The stub's exit status.
+    gate : Path | None
+        When given, the stub blocks until this file exists — a sentinel the
+        test creates when it wants the "sub-agent" to finish (no fixed sleep).
+    cost : bool
+        Whether to write the cost sidecar.
+
+    Returns
+    -------
+    list[str]
+        argv for `launch(..., entry=...)`.
+    """
     script = tmp_path / "stub_agent.py"
     script.write_text(
         "import os, sys, json, time\n"
-        f"time.sleep({sleep})\n"
+        f"gate = {str(gate) if gate else ''!r}\n"
+        "while gate and not os.path.exists(gate):\n"
+        "    time.sleep(0.05)\n"
         "print('### Summary')\n"
         "print('stub report')\n"
         "p = os.environ.get('PRISM_COST_FILE')\n"
         f"if p and {cost}:\n"
-        "    json.dump({'prism_cost': 1, 'agent': 'Stub', 'total_cost_usd': 0.25, 'num_turns': 3, 'subtype': 'success'}, open(p, 'w'))\n"
+        "    with open(p, 'w') as f:\n"
+        "        json.dump({'prism_cost': 1, 'agent': 'Stub', 'total_cost_usd': 0.25, 'num_turns': 3, 'subtype': 'success'}, f)\n"
         "print('stderr line', file=sys.stderr)\n"
         f"sys.exit({exit_code})\n"
     )
     return [sys.executable, str(script)]
 
 
-def make_request(tmp_path):
+def launch_request(tmp_path):
+    """A minimal request file for the launcher (its content is never interpreted here)."""
     p = tmp_path / "req.json"
     p.write_text(json.dumps({"experiment_name": "x"}))
     return str(p)
+
+
+def write_json(path: Path, data) -> None:
+    """Write JSON through a closed handle, creating parent directories."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +77,7 @@ def make_request(tmp_path):
 
 def test_launch_persists_request_names_per_invocation_and_records_exit(tmp_path):
     inv = tmp_path / "investigations" / "demo"
-    req = make_request(tmp_path)
+    req = launch_request(tmp_path)
     r1 = ls.launch("critic", req, str(inv), "iter0", entry=stub_entry(tmp_path))
     r2 = ls.launch("critic", req, str(inv), "iter0", entry=stub_entry(tmp_path))
 
@@ -69,7 +98,7 @@ def test_launch_persists_request_names_per_invocation_and_records_exit(tmp_path)
         assert final["state"] == "finished" and final["exit_code"] == 0, final
         assert Path(r["report"]).read_text().startswith("### Summary")
         assert "stderr line" in Path(r["stderr"]).read_text()
-        assert json.load(open(r["cost"]))["total_cost_usd"] == 0.25
+        assert json.loads(Path(r["cost"]).read_text())["total_cost_usd"] == 0.25
 
     listing = ls.list_receipts(str(inv))
     assert [(x["role"], x["n"]) for x in listing] == [("critic", 1), ("critic", 2)]
@@ -79,46 +108,144 @@ def test_launch_persists_request_names_per_invocation_and_records_exit(tmp_path)
 
 def test_launch_cli_round_trip_and_wait_exit_codes(tmp_path):
     inv = tmp_path / "investigations" / "demo"
-    req = make_request(tmp_path)
-    # The stub must still be running when the first `wait --timeout 0.5`
-    # subprocess checks it. 2s was too tight once earlier tests leave detached
-    # workers loading the host (intermittent failures after the Wave 1 merges);
-    # 10s keeps the window wide without weakening the assertion. The second
-    # wait (timeout 60) still covers the stub's full run.
-    entry = stub_entry(tmp_path, sleep=10.0)
-    r = ls.launch("executor", req, str(inv), "00_resample", artefacts_dir=str(inv / "iterations" / "00_resample" / "artefacts"), entry=entry)
-    assert r["report"].endswith("iterations/00_resample/artefacts/executor/report_00_resample_executor_1.md")
+    req = launch_request(tmp_path)
+    # The stub holds on a gate file until the "still running" wait has been
+    # observed, so the exit-3 assertion cannot race a loaded host (it used to
+    # rely on a 10 s sleep outlasting the first wait).
+    gate = tmp_path / "gate"
+    entry = stub_entry(tmp_path, gate=gate)
+    r = ls.launch("executor", req, str(inv), "00_round0", artefacts_dir=str(inv / "iterations" / "00_round0" / "artefacts"), entry=entry)
+    assert r["report"].endswith("iterations/00_round0/artefacts/executor/report_00_round0_executor_1.md")
     script = str(ROOT / "scripts" / "launch_subagent.py")
     rc = subprocess.run([sys.executable, script, "wait", r["receipt"], "--timeout", "0.5", "--interval", "0.2"], capture_output=True, text=True)
     assert rc.returncode == 3 and ("running" in rc.stdout or "launching" in rc.stdout)
+    gate.touch()
     rc = subprocess.run([sys.executable, script, "wait", r["receipt"], "--timeout", "60", "--interval", "0.2"], capture_output=True, text=True)
     assert rc.returncode == 0 and "finished exit=0" in rc.stdout
     rc = subprocess.run([sys.executable, script, "status", r["receipt"], "--json"], capture_output=True, text=True)
     assert json.loads(rc.stdout)["exit_code"] == 0
     rc = subprocess.run([sys.executable, script, "list", str(inv)], capture_output=True, text=True)
-    assert "executor 00_resample #1" in rc.stdout
+    assert "executor 00_round0 #1" in rc.stdout
 
 
 def test_launch_rejects_bad_role_and_missing_request(tmp_path):
     with pytest.raises(ValueError):
-        ls.launch("nope", make_request(tmp_path), str(tmp_path / "inv"), "t")
+        ls.launch("nope", launch_request(tmp_path), str(tmp_path / "inv"), "t")
     with pytest.raises(ValueError):
         ls.launch("critic", str(tmp_path / "missing.json"), str(tmp_path / "inv"), "t")
 
 
 def test_build_command_uses_unresolved_target_root():
     cmd = ls.build_command("analyst", "/abs/req.json", "/target")
-    assert cmd[:6] == ["uv", "run", "--with", "claude-agent-sdk", "--with", "python-dotenv"]
-    assert cmd[6] == "python" and cmd[7].endswith("subagents/transcript_analyst/main.py")
-    assert cmd[8:] == ["/abs/req.json", "--cwd", "/target"]
+    assert cmd[:2] == ["uv", "run"]
+    assert "python-dotenv" in cmd and any(a.startswith("claude-agent-sdk") for a in cmd)
+    i = cmd.index("python")
+    assert cmd[i + 1].endswith("subagents/transcript_analyst/main.py")
+    assert cmd[i + 2 :] == ["/abs/req.json", "--cwd", "/target"]
 
 
 def test_nonzero_exit_is_recorded(tmp_path):
     inv = tmp_path / "inv"
-    r = ls.launch("mapper", make_request(tmp_path), str(inv), "phase1", entry=stub_entry(tmp_path, exit_code=2, cost=False))
+    r = ls.launch("mapper", launch_request(tmp_path), str(inv), "phase1", entry=stub_entry(tmp_path, exit_code=2, cost=False))
     final = ls.wait_for(r["receipt"], timeout=60, interval=0.2)
     assert final["exit_code"] == 2
     assert "exit=2" in ls.describe(final)
+
+
+# ---------------------------------------------------------------------------
+# `list --unfinished`: the mechanical half of RESUME.md
+# ---------------------------------------------------------------------------
+#
+# Receipts are written directly (no processes), so each case is exact and
+# fast: which invocations are listed, in what order, alive or relaunchable.
+
+
+def _receipt(inv: Path, tag: str, n: int, *, request: dict, state: str, exit_code=None, started: str, pid=None) -> dict:
+    """Write one launcher-shaped receipt plus its persisted request.
+
+    Parameters
+    ----------
+    inv : Path
+        Investigation directory.
+    tag : str
+        Iteration/phase tag.
+    n : int
+        Invocation index.
+    request : dict
+        The persisted request's content (compared for "same work").
+    state : str
+        ``finished`` / ``failed`` / ``running`` / ``launching``.
+    exit_code : int | None
+        Recorded exit code.
+    started : str
+        ISO timestamp; `unfinished` orders and supersedes by it.
+    pid : int | None
+        Recorded sub-agent pid.
+
+    Returns
+    -------
+    dict
+        The receipt as written.
+    """
+    stem = f"{tag}_analyst_{n}"
+    art = inv / "artefacts" / "analyst"
+    req_path = inv / "requests" / f"{stem}.json"
+    write_json(req_path, request)
+    r = {
+        "role": "analyst", "tag": tag, "n": n, "state": state, "exit_code": exit_code,
+        "started_at": started, "finished_at": None, "pid": pid, "supervisor_pid": None,
+        "request": str(req_path), "report": str(art / f"report_{stem}.md"),
+        "stderr": str(art / f"stderr_{stem}.log"), "cost": str(art / f"cost_{stem}.json"),
+        "receipt": str(art / f"receipt_{stem}.json"), "cwd": None,
+    }
+    write_json(art / f"receipt_{stem}.json", r)
+    return r
+
+
+def test_unfinished_respects_superseding_order(tmp_path):
+    """Only a *later* clean run of the same work supersedes a failure.
+
+    A success that started before the failure is an earlier attempt, not its
+    recovery; dropping the order check would hide a failure that still needs a
+    relaunch.
+    """
+    inv = tmp_path / "inv"
+    work = {"topic": "t"}
+    _receipt(inv, "iter2", 1, request=work, state="finished", exit_code=0, started="2026-10-01T10:00:00+00:00")
+    failed = _receipt(inv, "iter2", 2, request=work, state="finished", exit_code=2, started="2026-10-01T11:00:00+00:00")
+    assert [e["receipt"]["n"] for e in ls.unfinished(str(inv))] == [failed["n"]]
+
+    # A later clean run of the same work (differing only in infrastructure keys) recovers it.
+    _receipt(inv, "iter2", 3, request={**work, "subagent_route": "openrouter"}, state="finished", exit_code=0, started="2026-10-01T12:00:00+00:00")
+    assert ls.unfinished(str(inv)) == []
+
+
+def test_unfinished_alive_invocation_is_not_relaunched(tmp_path, monkeypatch, capsys):
+    """A still-running invocation is listed as alive with no relaunch command."""
+    inv = tmp_path / "inv"
+    running = _receipt(inv, "iter2", 1, request={"topic": "t"}, state="running", started="2026-10-01T10:00:00+00:00", pid=os.getpid())
+    dead = _receipt(inv, "iter2", 2, request={"topic": "u"}, state="finished", exit_code=2, started="2026-10-01T11:00:00+00:00")
+    # Liveness is the launcher's own check; force it so the test does not
+    # depend on how pid-reuse is guarded.
+    monkeypatch.setattr(ls, "_pid_alive", lambda pid, *a, **k: pid == running["pid"])
+
+    entries = ls.unfinished(str(inv))
+    assert [(e["receipt"]["n"], e["alive"], e["relaunch"] is None) for e in entries] == [(1, True, True), (2, False, False)]
+
+    # --- The CLI prints the same, one block per invocation, in order ---
+    assert ls.main(["list", str(inv), "--unfinished"]) == 0
+    out = capsys.readouterr().out
+    assert "-> still running: let it finish; do not relaunch over it" in out
+    relaunch = "  -> relaunch (from the target root): " + shlex.join(ls.relaunch_command(dead))
+    assert relaunch in out
+    assert out.index("analyst iter2 #1") < out.index("still running") < out.index("analyst iter2 #2") < out.index(relaunch)
+
+
+def test_unfinished_empty_prints_a_line(tmp_path, capsys):
+    inv = tmp_path / "inv"
+    _receipt(inv, "iter2", 1, request={"topic": "t"}, state="finished", exit_code=0, started="2026-10-01T10:00:00+00:00")
+    assert ls.main(["list", str(inv), "--unfinished"]) == 0
+    assert capsys.readouterr().out.strip() == "no unfinished invocations"
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +276,7 @@ def test_cost_sidecar_written_from_result_message(tmp_path, monkeypatch, capsys)
     path = tmp_path / "artefacts" / "executor" / "cost_iter1_executor_1.json"
     monkeypatch.setenv(runner.COST_FILE_ENV, str(path))
     runner._write_cost_sidecar("Experiment executor", "claude-opus-4-8", None, _fake_result_message())
-    data = json.load(open(path))
+    data = json.loads(path.read_text())
     assert data["prism_cost"] == 1
     assert data["agent"] == "Experiment executor"
     assert data["total_cost_usd"] == 0.4321 and data["num_turns"] == 7
@@ -219,8 +346,20 @@ def test_executor_agent_reads_max_turns_and_persists_request(tmp_path, monkeypat
     assert seen["max_turns"] == 42
     persisted = list((exp / "artefacts" / "executor").glob("request_*.json"))
     assert len(persisted) == 1
-    assert json.load(open(persisted[0]))["subagent_max_turns"] == 42
+    assert json.loads(persisted[0].read_text())["subagent_max_turns"] == 42
     assert f"`{persisted[0]}`" in seen["prompt"]
+
+
+def test_spend_guard_is_active():
+    """The conftest guard: provider keys are unset and an unstubbed `query` raises."""
+    import claude_agent_sdk
+
+    from subagents import runner
+
+    assert not any(os.environ.get(k) for k in ("ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"))
+    for query in (claude_agent_sdk.query, runner.query):
+        with pytest.raises(RuntimeError, match="spend guard"):
+            query(prompt="p", options=None)
 
 
 # ---------------------------------------------------------------------------
@@ -230,14 +369,15 @@ def test_executor_agent_reads_max_turns_and_persists_request(tmp_path, monkeypat
 
 def test_spend_sums_sidecars_and_eval_usage(tmp_path):
     inv = tmp_path / "investigations" / "demo"
-    (inv / "artefacts" / "critic").mkdir(parents=True)
-    (inv / "iterations" / "01" / "artefacts" / "analyst").mkdir(parents=True)
-    json.dump({"prism_cost": 1, "agent": "Critic", "total_cost_usd": 1.5, "num_turns": 4}, open(inv / "artefacts" / "critic" / "cost_iter0_critic_1.json", "w"))
-    json.dump({"prism_cost": 1, "agent": "Analyst", "total_cost_usd": 2.25, "num_turns": 60}, open(inv / "iterations" / "01" / "artefacts" / "analyst" / "cost_iter1_analyst_1.json", "w"))
-    json.dump({"prism_cost": 1, "agent": "Analyst", "total_cost_usd": None, "num_turns": 1}, open(inv / "iterations" / "01" / "artefacts" / "analyst" / "cost_iter1_analyst_2.json", "w"))
+    analyst = inv / "iterations" / "01" / "artefacts" / "analyst"
+    write_json(inv / "artefacts" / "critic" / "cost_iter0_critic_1.json", {"prism_cost": 1, "agent": "Critic", "total_cost_usd": 1.5, "num_turns": 4})
+    write_json(analyst / "cost_iter1_analyst_1.json", {"prism_cost": 1, "agent": "Analyst", "total_cost_usd": 2.25, "num_turns": 60})
+    write_json(analyst / "cost_iter1_analyst_2.json", {"prism_cost": 1, "agent": "Analyst", "total_cost_usd": None, "num_turns": 1})
+    # A JSON file that is not a sidecar (no `prism_cost` marker) is not summed.
+    write_json(analyst / "cost_notes.json", {"agent": "Analyst", "total_cost_usd": 99.0})
     run = inv / "iterations" / "01" / "artefacts" / "executor" / "runs" / "r1"
-    run.mkdir(parents=True)
-    json.dump(
+    write_json(
+        run / "status.json",
         {
             "schema": 1,
             "run_id": "r1",
@@ -247,14 +387,16 @@ def test_spend_sums_sidecars_and_eval_usage(tmp_path):
                 "b": {"model_usage": {"openai/gpt-5": {"input_tokens": 50, "output_tokens": 5, "total_tokens": 55}, "anthropic/x": {"total_tokens": 7}}},
             },
         },
-        open(run / "status.json", "w"),
     )
+    # A `status.json` that is not a runner status file (no `schema`) is not an eval run.
+    write_json(inv / "elsewhere" / "status.json", {"pairs": {"z": {"model_usage": {"openai/gpt-5": {"total_tokens": 10_000}}}}})
     s = spend.collect(str(inv))
     assert s["subagents"]["total_cost_usd"] == 3.75
     assert s["subagents"]["invocations"] == 3
     assert s["subagents"]["by_agent"]["Analyst"] == {"cost_usd": 2.25, "invocations": 2, "turns": 61}
     assert s["evals"]["tokens_by_model"]["openai/gpt-5"] == {"input_tokens": 150, "output_tokens": 15, "total_tokens": 165}
     assert s["evals"]["pairs"] == 2
+    assert [r["total_tokens"] for r in s["evals"]["run_summaries"]] == [172]  # 110 + 55 + 7
     text = spend.render(s)
     assert "sub-agent spend: $3.75 over 3 invocation(s)" in text
     assert "openai/gpt-5" in text

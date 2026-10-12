@@ -177,6 +177,53 @@ def test_label_channel_blocks(tmp_path, capsys):
     assert "[label] control: token 'control'" in out
 
 
+def test_task_name_channel_blocks(tmp_path, capsys):
+    # The header's task name differs per arm and carries the real name.
+    src = {
+        "condition_K": _arm(tmp_path, VAR, VAR, task="leverage_prohibition_task"),
+        "condition_B": _arm(tmp_path, CTL, CTL),
+    }
+    code, out = _run(capsys, _map(tmp_path), _source(tmp_path, src))
+    assert code == 1
+    assert "[task] condition_K: token 'leverage_prohibition'" in out
+
+
+def test_dataset_channel_blocks(tmp_path, capsys):
+    src = {
+        "condition_K": _arm(tmp_path, VAR, VAR, dataset_name="leverage_prohibition_samples"),
+        "condition_B": _arm(tmp_path, CTL, CTL, dataset_name="shared_samples"),
+    }
+    code, out = _run(capsys, _map(tmp_path), _source(tmp_path, src))
+    assert code == 1
+    assert "[dataset] condition_K: token 'leverage_prohibition'" in out
+
+
+def test_log_filename_task_segment_blocks(tmp_path, capsys):
+    # Inspect names the log `<timestamp>_<task>_<id>.eval`; a per-arm task name
+    # leaks through the filename even when the header's own task is neutral.
+    arms = _opaque_layout(tmp_path)
+    log = next(Path(arms["condition_K"]).glob("*.eval"))
+    log.rename(log.with_name("2026-10-08T00-00-00-00-00_leverage-prohibition_AbC123.eval"))
+    code, out = _run(capsys, _map(tmp_path), _source(tmp_path, arms))
+    assert code == 1
+    assert "[task] condition_K: token 'leverage_prohibition'" in out
+    assert "leverage-prohibition_AbC123.eval" in out  # the finding names the file
+
+
+def test_real_name_common_to_every_arm_still_blocks(tmp_path, capsys):
+    # The common-value exemption is for role words only (an eval named
+    # `control_arena`); a real condition name shared by every arm still tells
+    # the Analyst what one condition is.
+    src = {
+        "condition_K": _arm(tmp_path, VAR, VAR, task="leverage_prohibition_eval"),
+        "condition_B": _arm(tmp_path, CTL, CTL, task="leverage_prohibition_eval"),
+    }
+    code, out = _run(capsys, _map(tmp_path), _source(tmp_path, src))
+    assert code == 1
+    assert "[task] condition_K: token 'leverage_prohibition'" in out
+    assert "[task] condition_B: token 'leverage_prohibition'" in out
+
+
 def test_symlink_staging_exposes_target(tmp_path, capsys):
     # Neutral staging names do not hide a descriptive symlink target.
     real = _arm(tmp_path, "baseline", CTL)
@@ -391,7 +438,11 @@ def test_r02_iteration2_staging_still_blocks(tmp_path, capsys):
     assert "[tags]" in out and "[metadata]" in out
 
 
-# --- The Analyst can never read the map ---
+# --- The Analyst's Read hook matches every label-map filename ---
+#
+# Scope: only the Read hook's *pattern matching* of the map's filenames. That
+# `run_agent` attaches the hooks, and that Grep/Glob/Bash are covered too, is
+# pinned in `test_runner_isolation.py`.
 
 
 @pytest.mark.parametrize("name,blocked", [
@@ -404,16 +455,16 @@ def test_r02_iteration2_staging_still_blocks(tmp_path, capsys):
     ("NOT_A_CONDITION_LABEL_MAP_iter1.json", False),  # basename match, not substring
     ("iterations/01_round1/logs/c_3f9a/x.eval", False),
 ])
-def test_analyst_read_hook_denies_label_map(name, blocked):
-    # Exercise the runner's real read hook with the Analyst's RESTRICTED_FILES,
-    # so a matcher change that stops covering the map fails here.
+def test_analyst_read_hook_matches_label_map_filenames(name, blocked):
+    # The runner's real read hook with the Analyst's RESTRICTED_FILES, so a
+    # pattern or matcher change that stops covering a map filename fails here.
     import asyncio
 
     from subagents.runner import _build_hooks
     from subagents.transcript_analyst.agent import RESTRICTED_FILES
 
     hooks = _build_hooks("analyst", RESTRICTED_FILES, None, False)
-    read = next(m for m in hooks["PreToolUse"] if m.matcher == "Read").hooks[0]
+    read = next(m for m in hooks["PreToolUse"] if "Read" in (m.matcher or "").split("|")).hooks[0]
     path = f"/ws/investigations/inv/{name}"
-    result = asyncio.run(read({"tool_input": {"file_path": path}}, "t", {}))
+    result = asyncio.run(read({"tool_name": "Read", "tool_input": {"file_path": path}}, "t", {}))
     assert (result.get("decision") == "block") is blocked

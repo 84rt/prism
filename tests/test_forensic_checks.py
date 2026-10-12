@@ -151,3 +151,56 @@ def test_deterministic_proxy_is_provisional_void_only():
     v = check_scorability(kappa=None, precision=None, rates={"condition_A": (50, 50)}, deterministic_proxy=True)
     assert not v["scorable"]
     assert v["label"].startswith("[provisional] deterministic proxy")
+
+
+# --- Gate boundaries: each threshold on its own --------------------------------
+#
+# The archive-anchored tests above trip several gates at once; these isolate
+# each one, so loosening any single threshold (or dropping a NaN guard, or
+# reading a point estimate where the CI is meant) fails a test by itself.
+
+MOVING = {"condition_A": (30, 50), "condition_B": (10, 50)}  # no floor/ceiling marker
+
+
+@pytest.mark.parametrize(
+    "kappa, precision, scorable",
+    [
+        (0.4, 0.6, True),  # both exactly at threshold pass
+        (0.39, 0.95, False),  # κ alone fails
+        (0.95, 0.59, False),  # precision alone fails
+        (float("nan"), 0.95, False),  # undefined κ (no positives in validation) is unvalidated
+        (0.95, float("nan"), False),
+    ],
+)
+def test_validation_gate_thresholds_individually(kappa, precision, scorable):
+    v = check_scorability(kappa=kappa, precision=precision, rates=MOVING)
+    assert v["scorable"] is scorable
+    assert v["reasons"] == ([] if scorable else ["unvalidated"])
+
+
+def test_positive_collinearity_is_not_scorable():
+    # |φ| is the gate: a check that *agrees* with the behaviour is as much the
+    # behaviour restated as one that mirrors it (R05 was the negative case).
+    behaviour = [True] * 50 + [False] * 50
+    check = [True] * 48 + [False] * 2 + [False] * 48 + [True] * 2
+    v = check_scorability(kappa=0.9, precision=0.9, rates=MOVING, behaviour=behaviour, check=check)
+    assert v["phi"] > 0.8
+    assert not v["scorable"] and v["reasons"][0].startswith("collinear with grader, phi=+0.9")
+
+
+def test_ceiling_marker_needs_the_lower_bound_above_080():
+    # 45/50 = 90%, but its Wilson lower bound is 0.786: not [ceiling]. 46/50's is 0.812.
+    assert floor_ceiling_marker(45, 50) == ""
+    assert floor_ceiling_marker(46, 50) == "[ceiling]"
+    v = check_scorability(kappa=0.9, precision=0.9, rates={"condition_A": (45, 50), "condition_B": (46, 50)})
+    assert v["scorable"]  # one arm unmarked → not constant
+
+
+def test_precision_drift_uses_the_interval_not_the_point():
+    # 9/10 = 0.90 is below a 0.95 build precision, but its Wilson upper bound
+    # (0.98) is not: small-sample noise, not drift.
+    audit = precision_audit(0.95, {"condition_A": (10, 9)})
+    assert audit["condition_A"]["precision"] < 0.95
+    assert audit["condition_A"]["drift"] is False
+    # 30/40 = 0.75 has an upper bound of 0.86: drift.
+    assert precision_audit(0.95, {"condition_A": (40, 30)})["condition_A"]["drift"] is True
