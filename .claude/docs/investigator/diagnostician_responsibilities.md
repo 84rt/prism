@@ -42,7 +42,7 @@ The last row is the key contract change. Telling the Analyst "grade for behaviou
 
 ## Pipeline Overview
 
-Matches `docs/model-forensics-diagram.png`.
+Matches `docs/MF_pipeline.png`.
 
 ```
 0. Input — runnable eval and a transcript of the behaviour

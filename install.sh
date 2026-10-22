@@ -410,5 +410,5 @@ step=$((step + 1))
 echo "  $step. Launch the orchestrator in Claude Code: /orchestrate [research question]"
 echo "      or the model-forensics diagnostician: /diagnose [transcript + behaviour]"
 echo ""
-echo "Tip: run the Orchestrator on the most recent Claude model available —"
+echo "Tip: run the lead agent (Orchestrator or Diagnostician) on the most recent Claude model available —"
 echo "we observed weaker scaffold compliance on older models (e.g. Opus 4.5)."

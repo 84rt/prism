@@ -69,7 +69,7 @@ Telling the Analyst *what to measure* leaks nothing about *why* you think it hap
 
 ## Pipeline
 
-Phase numbering matches `diagnostician_responsibilities.md`; the diagram is `docs/model-forensics-diagram.png`.
+Phase numbering matches `diagnostician_responsibilities.md`; the diagram is `docs/MF_pipeline.png`.
 
 ```
 0. Input — runnable eval and a transcript of the behaviour

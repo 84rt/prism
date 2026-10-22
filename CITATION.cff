@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If Prism contributes to your work, please cite it as below."
+type: software
+title: "Prism: Automated Controlled Experiments for Science-of-Evals and Model Forensics Research"
+authors:
+  - family-names: Cooper-Thomson
+    given-names: Louis
+    email: louis@cbthomson.com
+repository-code: "https://github.com/LAThomson/prism"
+license: Apache-2.0
