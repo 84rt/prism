@@ -137,6 +137,8 @@ def _insert_after(base: tuple[str, ...], anchor: str, added: tuple[str, ...]) ->
 # a default mode keys it under `None` alongside its named modes (the Analyst).
 ROLE_HEADINGS: dict[str, dict[str | None, tuple[str, ...]]] = {
     "critic": CRITIC_HEADINGS,
+    # Control mode. The fifth section is appended by the launcher, not the agent.
+    "attack_designer": {None: ("Summary", "Variants", "Rejected Ideas", "Uncertainties", "Strategy File Hashes")},
     "mapper": {
         None: (
             "Summary",

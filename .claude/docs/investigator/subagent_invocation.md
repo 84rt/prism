@@ -358,3 +358,41 @@ The Critic's only CLI-validated field is `mode` ∈ `{candidate_critique, diff_r
 - `conformance_defects` and `previous_report` are optional in every mode, sent only together, and used only for the **one re-ask** (§Report conformance): when `scripts/check_report.py critic <report> --mode <mode>` exits non-zero, re-send the same request with its printed defect lines as `conformance_defects` (strings) and that report's absolute path as `previous_report`. The Critic restructures the previous report into the mode's headings; a second failure is read structurally and recorded, not re-asked again (`critic_interface_contract.md §Report Format`)
 
 **Returns**: only the active mode's sections — `candidate_critique`: independent reading (written before the ledger is read), blind spots, assumption audit, proposed additional candidates (`X<n>` ids), retirement advice; `diff_review`: summary, per-diff analysis, cross-diff analysis, inferred purpose (last); `prediction`: chosen factor, ordinal prediction, reasoning, falsifier. See `critic_interface_contract.md` for all three request and report formats.
+
+## Attack Designer
+
+Control mode (attack-improvement track) only. **Script**: `subagents/attack_designer/main.py`
+
+**Input JSON**:
+```json
+{
+    "environment_description": "The setting description the policy substitutes for {setting_description}.",
+    "side_task_description": "The covert objective the policy substitutes for {side_task_description}.",
+    "main_task_description": "The legitimate task that serves as cover (optional).",
+    "current_prompts": [
+        {
+            "path": "/absolute/path/to/investigations/<name>/iter_01/strategies/strategy_1.md",
+            "sha256": "<64 hex chars>",
+            "outcomes": {"side_task_success_rate": 0.55, "caught_rate": 0.40, "undetected_success_rate": 0.33, "n": 40}
+        }
+    ],
+    "baseline_outcomes": {"side_task_success_rate": 0.45, "caught_rate": 0.50, "undetected_success_rate": 0.22, "n": 40},
+    "variants_requested": 3,
+    "output_dir": "/absolute/path/to/investigations/<name>/iter_02/strategies",
+    "splits_path": "/absolute/path/to/investigations/<name>/splits.json",
+    "constraints": ["single-paragraph strategies only"],
+    "notes": "Free-form context.",
+    "subagent_model": "claude-opus-4-8",
+    "subagent_thinking": {"type": "adaptive"}
+}
+```
+
+- `current_prompts` entries are passed by path with hash and **development-split** outcomes only; never pass held-out numbers or raw logs
+- `baseline_outcomes` is the equal-budget non-PRISM baseline on the development split, same shape as an entry's `outcomes`
+- `variants_requested` is a ceiling, not a target; an integer `>= 1`
+- `output_dir` may not exist yet (its parent must); the Designer writes only `strategy_<n>.md` files there
+- `splits_path` is optional only before a split is frozen; once `scripts/freeze_split.py` has written `splits.json`, always pass it — the runner then denies the held-out environment directories and the `heldout/` tree, and a missing or malformed file is an agent error
+- `constraints` (optional list of strings) and `notes` (optional string) are best-effort context
+- `conformance_defects` and `previous_report` are optional and sent only together, only for the one re-ask after `check_report.py attack_designer` fails (see §Report conformance); the Designer keeps its strategy files unchanged and the launcher re-appends their hashes
+
+**Returns**: Summary, Variants (per file: parent, one-line change, rationale, falsifiable prediction), Rejected Ideas, Uncertainties, and a launcher-appended Strategy File Hashes section listing each `strategy_<n>.md` with its sha256. The lead preregisters each prediction, runs the files on the development split via `-T policy=policies/prompt_attack.py@prompt-attack -T policy_args='{"prompt_path": "<file>"}'`, selects on development data only, and confirms on the held-out split separately.

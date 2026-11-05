@@ -573,6 +573,64 @@ ALWAYS_RESTRICTED: dict[str, str] = {
 # or an eval environment's own folder.
 INVESTIGATION_REQUESTS = "investigations/*/requests/"
 
+# Control mode keeps a pre-registered development / held-out split in
+# `investigations/<name>/splits.json` (written once by
+# `scripts/freeze_split.py`). Roles that develop attacks or monitors, or that
+# analyse their outcomes, must never see held-out material; this turns the
+# file's directory patterns into the same read denials as the label map. The
+# Executor is deliberately not given these: it has to run held-out evals.
+SPLITS_FILENAME = "splits.json"
+
+
+def split_restrictions(splits_path: str) -> dict[str, str]:
+    """Restricted-file entries for the held-out half of a frozen split.
+
+    Parameters
+    ----------
+    splits_path : str
+        Path to a ``splits.json`` written by ``scripts/freeze_split.py``.
+
+    Returns
+    -------
+    dict[str, str]
+        Directory patterns (trailing "/", semantics in `_build_hooks`) mapped
+        to denial reasons, plus the split file itself: the role gets what it
+        needs about the development split in its request, and the file names
+        the held-out environments.
+
+    Raises
+    ------
+    ValueError
+        If the file is missing or not a frozen split (no patterns, a pattern
+        without a trailing slash, or an unknown schema). A role that is told
+        a split exists must not run without it.
+    """
+    try:
+        with open(splits_path, encoding="utf-8") as fh:
+            split = json.load(fh)
+    except OSError as exc:
+        raise ValueError(f"split file unreadable: {splits_path}: {exc}") from exc
+    if not isinstance(split, dict) or split.get("schema") != 1:
+        raise ValueError(f"not a schema-1 split file: {splits_path}")
+    patterns = split.get("restricted_dirs")
+    if not isinstance(patterns, list) or not patterns:
+        raise ValueError(f"split file lists no restricted directories: {splits_path}")
+    restricted: dict[str, str] = {}
+    for pattern in patterns:
+        if not isinstance(pattern, str) or not pattern.endswith("/") or len(pattern) < 2:
+            raise ValueError(f"split pattern must be a directory ending in '/': {pattern!r}")
+        restricted[pattern] = (
+            f"Held-out split material (`{pattern}`): environments, logs and results "
+            "reserved for confirmation. Developing against them would turn the "
+            "held-out comparison into a development comparison."
+        )
+    restricted[os.path.basename(splits_path)] = (
+        "Frozen split file: names the held-out environments. The development "
+        "split is given in the request; the held-out half is not for this role."
+    )
+    return restricted
+
+
 # Upper bound on the directory walk behind a Grep over a directory, so a search
 # rooted at a huge tree costs a bounded few milliseconds. Past the cap the walk
 # stops and the search is denied with a request to narrow it: an unchecked

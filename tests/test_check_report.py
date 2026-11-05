@@ -67,6 +67,7 @@ CONTRACTS = {
     "critic": ".claude/docs/contracts/critic_interface_contract.md",
     "mapper": ".claude/docs/contracts/mapper_interface_contract.md",
     "designer": ".claude/docs/contracts/designer_interface_contract.md",
+    "attack_designer": ".claude/docs/contracts/attack_designer_interface_contract.md",
     "explorer": ".claude/docs/contracts/explorer_interface_contract.md",
     "executor": ".claude/docs/contracts/executor_interface_contract.md",
     "analyst": ".claude/docs/contracts/analyst_interface_contract.md",

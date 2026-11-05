@@ -118,6 +118,7 @@ unlink_file "scripts/check_report.py"
 unlink_file "scripts/check_blinding.py"
 unlink_file "scripts/check_keys.py"
 unlink_file "scripts/new_ids.py"
+unlink_file "scripts/freeze_split.py"
 
 # subagents
 unlink_file "subagents/__init__.py"
@@ -149,6 +150,10 @@ unlink_file "subagents/variant_designer/__init__.py"
 unlink_file "subagents/variant_designer/agent.py"
 unlink_file "subagents/variant_designer/main.py"
 unlink_file "subagents/variant_designer/system_prompt.py"
+unlink_file "subagents/attack_designer/__init__.py"
+unlink_file "subagents/attack_designer/agent.py"
+unlink_file "subagents/attack_designer/main.py"
+unlink_file "subagents/attack_designer/system_prompt.py"
 
 unlink_file "subagents/redteam_critic/__init__.py"
 unlink_file "subagents/redteam_critic/agent.py"
@@ -161,6 +166,7 @@ unlink_file ".claude/docs/contracts/analyst_forensic_addendum.md"
 unlink_file ".claude/docs/contracts/analyst_interface_contract.md"
 unlink_file ".claude/docs/contracts/critic_interface_contract.md"
 unlink_file ".claude/docs/contracts/designer_interface_contract.md"
+unlink_file ".claude/docs/contracts/attack_designer_interface_contract.md"
 unlink_file ".claude/docs/investigator/diagnostician_analyst_guide.md"
 unlink_file ".claude/docs/investigator/diagnostician_responsibilities.md"
 unlink_file ".claude/docs/investigator/eval_science_principles.md"
@@ -213,6 +219,7 @@ for dir in \
     "$TARGET_DIR/subagents/transcript_analyst" \
     "$TARGET_DIR/subagents/environment_mapper" \
     "$TARGET_DIR/subagents/variant_designer" \
+    "$TARGET_DIR/subagents/attack_designer" \
     "$TARGET_DIR/subagents/redteam_critic" \
     "$TARGET_DIR/subagents" \
     "$TARGET_DIR/.claude/docs/investigator" \

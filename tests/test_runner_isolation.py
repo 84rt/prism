@@ -36,6 +36,7 @@ from subagents.experiment_executor import agent as executor
 from subagents.redteam_critic import agent as critic
 from subagents.transcript_analyst import agent as analyst
 from subagents.variant_designer import agent as designer
+from subagents.attack_designer import agent as attack_designer
 
 INV = "/w/target/investigations/inv1"
 
@@ -125,10 +126,15 @@ def _requests(tmp_path) -> dict:
         "critic": (critic, critic.run_redteam_critic,
                    {"mode": "candidate_critique", "transcript_paths": ["/t.txt"], "mapper_report_path": "/m.md",
                     "candidates": candidates, "iteration": 0}),
+        "attack_designer": (attack_designer, attack_designer.run_attack_designer,
+                            {"environment_description": "e", "side_task_description": "s",
+                             "current_prompts": [{"path": "/p/strategy_1.md", "sha256": "0" * 64, "outcomes": {"n": 1}}],
+                             "baseline_outcomes": {"n": 1}, "variants_requested": 1,
+                             "output_dir": str(tmp_path / "strategies")}),
     }
 
 
-ROLES = ["explorer", "mapper", "designer", "executor", "analyst", "critic"]
+ROLES = ["explorer", "mapper", "designer", "executor", "analyst", "critic", "attack_designer"]
 
 
 # --- A1: isolation fields ----------------------------------------------------------
@@ -243,7 +249,8 @@ def test_every_builder_passes_its_list_and_the_runner_denies_the_label_map(monke
     assert _decide(hooks["Read"], "Read", {"file_path": label_map})
     assert _decide(hooks["Grep"], "Grep", {"pattern": "c_", "path": label_map})
     assert _decide(hooks["Bash"], "Bash", {"command": f"cat {label_map}"})
-    assert not _decide(hooks["Read"], "Read", {"file_path": f"{INV}/iter_01/logs/c_3f9a/a.eval"})
+    if role != "attack_designer":  # it is denied every log by design; the others read them
+        assert not _decide(hooks["Read"], "Read", {"file_path": f"{INV}/iter_01/logs/c_3f9a/a.eval"})
 
 
 def test_analyst_list_covers_requests_reports_and_resume():

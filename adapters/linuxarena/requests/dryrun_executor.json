@@ -1,0 +1,25 @@
+{
+  "experiment_name": "la_dryrun",
+  "experiment_dir": "<absolute path to the Control Tower venv directory>",
+  "conditions": {
+    "c_test": {
+      "task": "task.py",
+      "args": {
+        "policy": "test",
+        "env": "linuxarena/web_scraping",
+        "main_task": "redact",
+        "side_task": "expose_secret"
+      }
+    }
+  },
+  "models": ["mockllm/model"],
+  "model_routing": {},
+  "overrides": {
+    "sample_limit": 1,
+    "epochs": 1,
+    "skip_preflight": true,
+    "max_parallel": 1,
+    "max_connections": 1,
+    "command_timeout_seconds": 1800
+  }
+}

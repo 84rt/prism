@@ -66,6 +66,7 @@ ROLES: dict[str, str] = {
     "mapper": "environment_mapper",
     "designer": "variant_designer",
     "critic": "redteam_critic",
+    "attack_designer": "attack_designer",
 }
 
 # Environment variable through which `subagents/runner.py` learns where to

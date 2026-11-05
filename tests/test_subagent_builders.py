@@ -18,6 +18,7 @@ Run with the self-contained recipe in ``conftest.py``.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from subagents.experiment_executor import agent as executor
 from subagents.redteam_critic import agent as critic
 from subagents.transcript_analyst import agent as analyst
 from subagents.variant_designer import agent as designer
+from subagents.attack_designer import agent as attack_designer
 
 CONTRACTS = ".claude/docs/contracts"
 REFERENCES = ".claude/docs/references"
@@ -134,10 +136,26 @@ def _requests(tmp_path) -> dict:
             },
             [f"{CONTRACTS}/critic_interface_contract.md"],
         ),
+        "attack_designer": (
+            attack_designer,
+            attack_designer.run_attack_designer,
+            {
+                "environment_description": "e",
+                "side_task_description": "s",
+                "current_prompts": [{"path": "/p/strategy_1.md", "sha256": "0" * 64,
+                                     "outcomes": {"side_task_success_rate": 0.5, "caught_rate": 0.4,
+                                                  "undetected_success_rate": 0.3, "n": 10}}],
+                "baseline_outcomes": {"side_task_success_rate": 0.4, "caught_rate": 0.5,
+                                      "undetected_success_rate": 0.2, "n": 10},
+                "variants_requested": 2,
+                "output_dir": str(tmp_path / "strategies"),
+            },
+            [f"{CONTRACTS}/attack_designer_interface_contract.md"],
+        ),
     }
 
 
-ROLES = ["explorer", "mapper", "designer", "executor", "analyst", "critic"]
+ROLES = ["explorer", "mapper", "designer", "executor", "analyst", "critic", "attack_designer"]
 
 
 # --- Invariants ----------------------------------------------------------------
@@ -187,7 +205,7 @@ def test_missing_document_is_an_agent_error(monkeypatch):
 
 # Every role a lead agent re-asks after a failed `check_report.py`; the
 # Executor is absent because its report is regenerated, never re-asked.
-REASK_ROLES = ["explorer", "mapper", "designer", "analyst", "critic"]
+REASK_ROLES = ["explorer", "mapper", "designer", "analyst", "critic", "attack_designer"]
 
 # The role-specific rule for re-deriving a genuinely missing section, which
 # must reach the prompt (it is what stops a re-ask from redoing the work).
@@ -197,6 +215,7 @@ REASK_NOTES = {
     "designer": "do not re-design",
     "analyst": "never re-run a scan",
     "critic": "discriminating signature",
+    "attack_designer": "do not re-design",
 }
 
 DEFECTS = ["missing section `### Summary`", "heading `### Findings` is not in the contract"]
@@ -287,7 +306,8 @@ _INVOCATION_SECTIONS = {
     "transcript_analyst": ("## Transcript Analyst", "## Environment Mapper"),
     "environment_mapper": ("## Environment Mapper", "## Variant Designer"),
     "variant_designer": ("## Variant Designer", "## Red-Teaming Critic"),
-    "redteam_critic": ("## Red-Teaming Critic", None),
+    "redteam_critic": ("## Red-Teaming Critic", "## Attack Designer"),
+    "attack_designer": ("## Attack Designer", None),
 }
 
 
@@ -335,6 +355,7 @@ _ROLE_DIRS = {
     "mapper": "environment_mapper",
     "designer": "variant_designer",
     "critic": "redteam_critic",
+    "attack_designer": "attack_designer",
 }
 _CRITIC_MODES = ("candidate_critique", "diff_review", "prediction")
 
@@ -439,6 +460,8 @@ def _sentinel(key: str, tmp_path) -> tuple[object, str]:
         "leading_explanation": {"id": "C1", "statement": s},
         "behaviour_spec": {"description": s, "grader_dir": "/g"},
         "construal_checks": [s],
+        "current_prompts": [{"path": s, "sha256": "0" * 64, "outcomes": {"n": 1}}],
+        "constraints": [s],
     }
     if key in shaped:
         return shaped[key], s
@@ -446,7 +469,13 @@ def _sentinel(key: str, tmp_path) -> tuple[object, str]:
         return {"rate": 0.5, "n": _NUM}, str(_NUM)
     if key == "subagent_thinking":
         return {"type": "enabled", "budget_tokens": _NUM}, str(_NUM)
-    if key in ("variant_budget", "iteration", "subagent_max_turns"):
+    if key == "splits_path":
+        # A frozen split whose held-out pattern carries the token: it must
+        # surface in the runner's restricted_files, not in the prompt.
+        path = tmp_path / "splits.json"
+        path.write_text(json.dumps({"schema": 1, "restricted_dirs": [f"{s}/"]}))
+        return str(path), s
+    if key in ("variant_budget", "iteration", "subagent_max_turns", "variants_requested"):
         return _NUM, str(_NUM)
     if key == "experiment_dir":
         (tmp_path / s).mkdir()
@@ -473,6 +502,7 @@ def test_documented_key_lists_are_parsed():
     assert {"topic", "transcript_source", "scanning_model", "construal_checks", "subagent_route"} <= _documented_keys("analyst")
     assert {"diffs", "investigation_log_path", "evidence_summary"} <= _documented_keys("critic")
     assert {"environment_delta", "elimination_targets", "subagent_max_turns"} <= _documented_keys("designer")
+    assert {"current_prompts", "splits_path", "output_dir"} <= _documented_keys("attack_designer")
 
 
 @pytest.mark.parametrize("role, key", _cases())

@@ -1,0 +1,32 @@
+{
+  "experiment_name": "la_promptattack_dry",
+  "experiment_dir": "<absolute path to the Control Tower venv directory>",
+  "conditions": {
+    "c_pa": {
+      "task": "task.py",
+      "args": {
+        "policy": "policies/prompt_attack.py@prompt-attack",
+        "policy_args": {
+          "prompt_path": "prompts/example_attack.md"
+        },
+        "env": "linuxarena/web_scraping",
+        "main_task": "redact",
+        "side_task": "expose_secret",
+        "untrusted": "mockllm/model",
+        "trusted": "mockllm/model"
+      }
+    }
+  },
+  "models": [
+    "mockllm/model"
+  ],
+  "model_routing": {},
+  "overrides": {
+    "sample_limit": 1,
+    "epochs": 1,
+    "skip_preflight": true,
+    "max_parallel": 1,
+    "max_connections": 1,
+    "command_timeout_seconds": 1800
+  }
+}
