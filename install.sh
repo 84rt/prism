@@ -173,6 +173,7 @@ link_file "scripts/check_report.py"
 link_file "scripts/check_blinding.py"
 link_file "scripts/check_keys.py"
 link_file "scripts/new_ids.py"
+link_file "scripts/headroom.py"
 
 # subagents
 link_file "subagents/__init__.py"
@@ -263,6 +264,7 @@ GITIGNORE_ENTRIES=(
     "scripts/check_blinding.py"
     "scripts/check_keys.py"
     "scripts/new_ids.py"
+    "scripts/headroom.py"
     ".claude/docs/investigator/orchestrator_analyst_guide.md"
     ".claude/docs/contracts/analyst_forensic_addendum.md"
     ".claude/docs/contracts/analyst_interface_contract.md"

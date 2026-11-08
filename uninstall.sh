@@ -118,6 +118,7 @@ unlink_file "scripts/check_report.py"
 unlink_file "scripts/check_blinding.py"
 unlink_file "scripts/check_keys.py"
 unlink_file "scripts/new_ids.py"
+unlink_file "scripts/headroom.py"
 
 # subagents
 unlink_file "subagents/__init__.py"

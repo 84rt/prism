@@ -68,6 +68,7 @@ The full pipeline has three phases:
 ```
 Phase 1: Scoping Discussion (with user)
     → Refine hypothesis, identify eval environment, agree on models and parameters
+    → Headroom survey: can the target behaviour move on each eval × model cell at all?
 Phase 2: Investigation Loop (autonomous, may repeat up to ~3 iterations)
     → Explorer → review → apply modifications → Executor → review → translate topic → Analyst → interpret → decide
 Phase 3: Report to User
@@ -104,6 +105,7 @@ Ask the user: "What behaviour would you like to investigate?" Then proceed with 
 4. Execution parameters — sample limit, epochs, any overrides
 5. Autonomy agreement — see below
 6. Investigation log initialized — Agreed Scope filled out (Research question, Models, Eval environment, Execution parameters) and iteration 1's *Hypothesis this iteration → Statement* written before the Explorer is launched
+7. Headroom survey — each candidate eval, unmodified, run on each candidate model at about 20 samples per cell, read with `scripts/headroom.py`, and its table and gate written to the log's `## Headroom Survey` block. No iteration is designed on a cell tagged `[floor]` or `[ceiling]` (`orchestrator_responsibilities.md §Phase 1, step 9`)
 
 ## Autonomy Agreement
 

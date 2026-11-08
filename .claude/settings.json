@@ -141,6 +141,7 @@
       "Bash(uv run --no-project python scripts/check_report.py *)",
       "Bash(uv run python scripts/check_blinding.py *)",
       "Bash(uv run python scripts/dump_transcripts.py *)",
+      "Bash(uv run python scripts/headroom.py *)",
       "Bash(uv run --no-project python scripts/lint_log.py *)",
       "Bash(uv run --no-project python scripts/check_keys.py)",
       "Bash(uv run --no-project python scripts/check_keys.py *)",

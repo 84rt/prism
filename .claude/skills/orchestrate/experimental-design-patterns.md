@@ -72,9 +72,22 @@ LLM eval experiments are not classical statistical studies, but sample size stil
 
 | Goal | Sample Limit | Epochs | When |
 |------|-------------|--------|------|
-| Sanity check (does it run?) | 5-10 | 1 | Before committing to a full run. Catches task errors, API issues, scoring bugs. |
+| Headroom survey (can it move?) | ≈20 per cell | — | Before designing on any eval × model cell. Unmodified eval; the lead reads its scores with `scripts/headroom.py`. A cell at the floor or ceiling gets no factorial (`orchestrator_responsibilities.md §Phase 1, step 9`). |
+| Sanity check (does it run?) | 5-10 | 1 | Before committing to a full run. Catches task errors, API issues, scoring bugs. A run that works can still have nothing to measure: that is the headroom survey's question. |
 | Rapid iteration (directional signal) | 20-50 | 1 | Early iterations. Enough to spot strong effects; too few for subtle patterns. |
 | Conclusive run (reportable findings) | 100+ or full dataset | 1-2 | Final iteration. Sufficient for the Analyst to identify reliable patterns. |
+
+### What a Given n Can Detect
+
+Before launching, work out the smallest difference each planned comparison can detect (`orchestrator_responsibilities.md §Step 2d`, step 3): about 2.8 × √(p₁(1−p₁)/n₁ + p₂(1−p₂)/n₂) at 80% power, with p the forecast rates. Interactions need far more samples than simple contrasts. Rough figures at p ≈ 0.5:
+
+| n per arm | Simple contrast | 2×2 interaction |
+|---|---|---|
+| 30 | ≈ 36pp | ≈ 51pp |
+| 50 | ≈ 28pp | ≈ 40pp |
+| 100 | ≈ 20pp | ≈ 28pp |
+
+Rates near 0 or 1 have less variance, so these figures shrink there, but only if the rates have headroom to move at all.
 
 ### When Epochs Matter
 
