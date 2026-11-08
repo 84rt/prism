@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     ClaudeSDKError,
     CLIConnectionError,
     CLINotFoundError,
+    EffortLevel,
     HookMatcher,
     ProcessError,
     ResultMessage,
@@ -174,12 +175,21 @@ def reask_section(
 # `subagent_model` input field. Kept as a single default so the override is the
 # only thing that ever varies (e.g. a less refusal-prone model on a
 # dangerous-capability eval, or a cheaper/weaker model on the user's request).
-# Defaults to the most capable Opus tier: per-token cost is equal across Opus
-# models, so there is no reason to run the sub-agents on a weaker one — the extra
-# capability sharpens the Explorer's site reasoning and the Analyst's scanner /
-# stats work, which is where investigation quality is won. (A Sonnet-class model
-# is the natural cost/speed downgrade via `subagent_model` if ever wanted.)
-DEFAULT_MODEL = "claude-opus-4-8"
+# Defaults to the newest Opus: the capability sharpens the Explorer's site
+# reasoning and the Analyst's scanner / stats work, which is where investigation
+# quality is won. Newer Opus models are no dearer than older ones — Opus 5.5 is
+# cheaper than Opus 4.8 per token, and much cheaper on cache reads, which
+# dominate a long sub-agent session — so move this forward with each Opus
+# release rather than leaving it pinned. (A Sonnet-class model is the natural
+# cost/speed downgrade via `subagent_model` if ever wanted.)
+DEFAULT_MODEL = "claude-opus-5-5"
+
+# Reasoning effort every Claude sub-agent runs with. Pinned rather than left to
+# the CLI because the default differs by model (Opus 5.5's API default is
+# `medium`, a step below what Opus 4.8 ran at), and moving the default model
+# must not quietly make the sub-agents think less. Not sent to non-Claude
+# models, for the same reason as adaptive thinking (see `_resolve_thinking`).
+DEFAULT_EFFORT: EffortLevel = "high"
 
 # Extended-thinking config every sub-agent runs with unless the invocation
 # overrides it via the `subagent_thinking` input field. Adaptive thinking lets
@@ -516,6 +526,27 @@ def _resolve_thinking(
     if route == "openrouter" and "claude" not in model.lower():
         return {"type": "disabled"}
     return DEFAULT_THINKING
+
+
+def _resolve_effort(model: str, route: str | None) -> EffortLevel | None:
+    """Choose the reasoning effort, sending none to non-Claude models.
+
+    Parameters
+    ----------
+    model : str
+        The resolved model string for this sub-agent.
+    route : str | None
+        The resolved route.
+
+    Returns
+    -------
+    EffortLevel | None
+        `DEFAULT_EFFORT` for a Claude model on any route; None (the provider's
+        own default) for a non-Claude model routed through OpenRouter.
+    """
+    if route == "openrouter" and "claude" not in model.lower():
+        return None
+    return DEFAULT_EFFORT
 
 _MEMORY_INSTRUCTIONS = """\
 ## Agent Memory
@@ -1274,6 +1305,7 @@ async def run_agent(
     options = ClaudeAgentOptions(
         model=resolved_model,
         thinking=_resolve_thinking(thinking, resolved_model, route),
+        effort=_resolve_effort(resolved_model, route),
         system_prompt=system_prompt,
         # --- Isolation: the sub-agent sees only what the scaffold gives it ---
         # `tools` is the set the model is offered at all; under

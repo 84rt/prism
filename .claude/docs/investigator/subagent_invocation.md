@@ -57,6 +57,8 @@ Every agent's input JSON also accepts an optional `subagent_thinking` field — 
 - **disable thinking** — `{"type": "disabled"}`; or
 - set a **fixed budget** — `{"type": "enabled", "budget_tokens": 16000}`, e.g. when running a sub-agent on a `subagent_model` that does not support adaptive thinking (adaptive requires Opus 4.6+).
 
+The default model, Opus 5.5, accepts only adaptive thinking: both overrides above are rejected by the API for it, so use them only alongside a `subagent_model` that takes them. Claude sub-agents also run at a pinned reasoning effort of `high` (`runner.DEFAULT_EFFORT`), so a change of default model does not change how hard they think.
+
 Like `subagent_model`, this is an infrastructure choice independent of the experiment. The two pair naturally: if you override `subagent_model` to a model without adaptive support, override `subagent_thinking` alongside it.
 
 ### Optional: `subagent_route` (all agents)
@@ -129,7 +131,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
     "experiment_description": "Testing whether X affects Y...",
     "environment_path": "/absolute/path/to/eval/environment",
     "constraints": "Focus on system prompt and scoring; skip the scaffold directory.",
-    "subagent_model": "claude-opus-4-8",
+    "subagent_model": "claude-opus-5-5",
     "subagent_thinking": {"type": "adaptive"}
 }
 ```
@@ -174,7 +176,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
         "epochs": 1,
         "skip_preflight": false
     },
-    "subagent_model": "claude-opus-4-8",
+    "subagent_model": "claude-opus-5-5",
     "subagent_thinking": {"type": "adaptive"}
 }
 ```
@@ -183,7 +185,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 - Condition names are **opaque execution ids** (`c_<4 hex>`) and `experiment_name` is neutral: the runner writes both into the log directory, tags and metadata the Analyst later reads. The id → real-name map is the caller's private `CONDITION_LABEL_MAP_iter<N>.json` (see the Analyst's `check_blinding.py` rule below)
 - `model_routing` is optional; per-model routing directives resolved by the Orchestrator in Phase 1 and rendered by the Executor as `-M` arguments. Omit it and every model is invoked directly (the pre-existing behaviour). For OpenRouter models, get the provider slug and model args from `scripts/openrouter_endpoints.py` — never guess a slug. See `executor_interface_contract.md §Model routing`
 - `overrides` is optional; supported keys: `sample_limit`, `sample_id`, `epochs`, `skip_preflight`, `max_parallel`, `max_connections`, `command_timeout_seconds`. `sample_id` pins the eval to named dataset entries (`--sample-id`) and pairs with `epochs` for resampling one episode — without it, `epochs` repeats the *whole dataset*. The removed `runs_per_condition` key is refused by the runner; use `epochs` for repeated sampling
-- `subagent_model` is optional; the model the Executor agent runs on. **Distinct from `models`**, which are the eval's target models — `subagent_model` has no provider prefix (e.g. `claude-opus-4-8`), whereas `models` entries do (e.g. `anthropic/claude-sonnet-4-5-20250929`)
+- `subagent_model` is optional; the model the Executor agent runs on. **Distinct from `models`**, which are the eval's target models — `subagent_model` has no provider prefix (e.g. `claude-opus-5-5`), whereas `models` entries do (e.g. `anthropic/claude-sonnet-4-5-20250929`)
 - `subagent_thinking` is optional; the Executor's extended-thinking config (see General Pattern above)
 - `conformance_defects` / `previous_report` are **not accepted**: the Executor is never re-asked (a re-invocation would re-run the evals), so sending either is an agent error (exit 2). Regenerate a non-conformant report with `execute_evals.py report <run_dir>` (see §Report conformance)
 
@@ -205,7 +207,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
     "constraints": {"limit": 100},
     "execution_notes": ["condition_B: 7 of 100 samples hit the message limit"],
     "artefacts_dir": "/absolute/path/to/investigation/artefacts",
-    "subagent_model": "claude-opus-4-8",
+    "subagent_model": "claude-opus-5-5",
     "subagent_thinking": {"type": "adaptive"}
 }
 ```
@@ -265,7 +267,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
     "behaviour_description": "The model wrote a special-case branch returning the expected value for the test inputs rather than implementing the function",
     "reference_transcript": "/absolute/path/to/investigation/artefacts/reference/<log>/<sample_id>_epoch_1.txt",
     "constraints": "The eval is large — prioritise the prompt and scoring path.",
-    "subagent_model": "claude-opus-4-8",
+    "subagent_model": "claude-opus-5-5",
     "subagent_thinking": {"type": "adaptive"}
 }
 ```
@@ -307,7 +309,7 @@ In a Model Forensics investigation the Analyst additionally accepts an optional 
     ],
     "elimination_targets": ["C3"],
     "constraints": "Single-file diffs only this round.",
-    "subagent_model": "claude-opus-4-8",
+    "subagent_model": "claude-opus-5-5",
     "subagent_thinking": {"type": "adaptive"}
 }
 ```

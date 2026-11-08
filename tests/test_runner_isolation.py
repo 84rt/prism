@@ -185,6 +185,23 @@ def test_bash_timeouts_reach_the_options_on_every_route(monkeypatch, route):
     assert int(env["BASH_MAX_TIMEOUT_MS"]) > 3300_000
 
 
+def test_claude_sub_agents_default_to_newest_opus_at_pinned_effort(monkeypatch):
+    """The default model's own effort default must not decide how hard sub-agents think."""
+    built = _stub_sdk(monkeypatch, _result())
+    asyncio.run(runner.run_agent("p", "s", ["Read"], [], "X"))
+    kwargs = built[0].kwargs
+    assert kwargs["model"] == runner.DEFAULT_MODEL == "claude-opus-5-5"
+    assert kwargs["effort"] == runner.DEFAULT_EFFORT == "high"
+
+
+def test_non_claude_sub_agents_get_no_effort(monkeypatch):
+    """Like adaptive thinking, effort is not sent to a non-Claude model on OpenRouter."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    built = _stub_sdk(monkeypatch, _result())
+    asyncio.run(runner.run_agent("p", "s", ["Read"], [], "X", model="openai/gpt-6.1-terra", route="openrouter"))
+    assert built[0].kwargs["effort"] is None
+
+
 def test_executor_waits_long_enough_to_spare_its_cache():
     """The Executor's wait must be one long call, not a short poll.
 
