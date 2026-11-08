@@ -229,7 +229,7 @@ The request and report formats for the Executor are defined in `executor_interfa
 
 3. **Pre-register the predictions before launching.** In the iteration's `### Pre-registered Predictions` block, write for every non-control condition its predicted direction on the construct the hypothesis is about, against its control — `↑`, `↓` or `↔` — and one line on what each possible outcome would mean for the hypothesis. Include the positive control's expected `↑`/`↓` and each construal check's intended direction. **This block is written before any eval runs and is never edited afterwards** — not to fix wording, not to "clarify". Step 2i scores the outcomes against it as written. The Analyst builds its own scanners from the neutral topic, so the prediction is about the construct, and Step 2i matches it to whichever validated scanner operationalises that construct; when none does, the row is scored `unscorable — no matching instrument`, which is itself worth recording.
 
-4. **Launch the Experiment Executor sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) with `--tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts`, and poll with `wait`. The Executor drives a detached batch runner and reports only when the batch is terminal, so expect it to run as long as the evals do — hours for sandboxed evals.
+4. **Launch the Experiment Executor sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) with `--tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts`, and wait for it with a background `wait`. The Executor drives a detached batch runner and reports only when the batch is terminal, so expect it to run as long as the evals do — hours for sandboxed evals.
 
 5. **Read the Executor's report** at the launcher's per-invocation path (`<iteration_dir>/artefacts/executor/report_<iteration_name>_executor_<n>.md`); there is no separate save step. Read the **Zero-sample pairs** line first — a pair that completed zero samples is an execution defect, never a rate.
 
@@ -350,7 +350,7 @@ This is the orchestrator's most important cognitive task. The Transcript Analyst
 
    *Logs produced before opaque ids existed* cannot be fixed by renaming. Neutrally named staging directories (symlinks, as one archived investigation used) hide the directory name but not the symlink target or the names inside each `.eval` (`task_file`, tags, metadata), so the check still blocks. Either re-run those conditions under ids, or record the exposure — every channel and condition the check listed, and which measurements it could have touched — in the log and the Phase 3 caveats, and proceed on that recorded decision. Never proceed past a block silently.
 
-3. **Launch the Transcript Analyst sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) — `launch analyst <request.json> --investigation investigations/<investigation_name> --tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts` — and poll with `wait`.
+3. **Launch the Transcript Analyst sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) — `launch analyst <request.json> --investigation investigations/<investigation_name> --tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts` — and wait for it with a background `wait`.
 
 4. **After the Analyst returns**, review the scan results path provided in the report for sanity-checking summary statistics.
 

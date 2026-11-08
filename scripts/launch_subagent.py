@@ -671,7 +671,10 @@ def main(argv: list[str] | None = None) -> int:
         except ValueError as e:
             print(json.dumps({"status": "error", "errors": [str(e)]}))
             return 1
-        print(json.dumps({**receipt, "status": "launched", "next": f"uv run python scripts/launch_subagent.py wait {receipt['receipt']} --timeout 540"}, indent=2))
+        # The lead waits in the background (see subagent_invocation.md
+        # §General Pattern), so the hint carries the long, cache-sparing timeout
+        next_cmd = f"uv run python scripts/launch_subagent.py wait {receipt['receipt']} --timeout 3300"
+        print(json.dumps({**receipt, "status": "launched", "next": f"{next_cmd}  (run_in_background: true)"}, indent=2))
         return 0
     if args.cmd == "status":
         r = load_receipt(args.receipt)
