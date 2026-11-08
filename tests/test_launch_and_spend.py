@@ -390,7 +390,7 @@ def test_spend_sums_sidecars_and_eval_usage(tmp_path):
     )
     # A `status.json` that is not a runner status file (no `schema`) is not an eval run.
     write_json(inv / "elsewhere" / "status.json", {"pairs": {"z": {"model_usage": {"openai/gpt-5": {"total_tokens": 10_000}}}}})
-    s = spend.collect(str(inv))
+    s = spend.collect(str(inv), projects_dir=str(tmp_path / "no-projects"))
     assert s["subagents"]["total_cost_usd"] == 3.75
     assert s["subagents"]["invocations"] == 3
     assert s["subagents"]["by_agent"]["Analyst"] == {"cost_usd": 2.25, "invocations": 2, "turns": 61}
@@ -400,3 +400,61 @@ def test_spend_sums_sidecars_and_eval_usage(tmp_path):
     text = spend.render(s)
     assert "sub-agent spend: $3.75 over 3 invocation(s)" in text
     assert "openai/gpt-5" in text
+
+
+def _session_line(**fields) -> str:
+    return json.dumps(fields) + "\n"
+
+
+def _assistant(msg_id, model, usage, content=()):
+    return _session_line(type="assistant", entrypoint="cli", message={"id": msg_id, "model": model, "usage": usage, "content": list(content)})
+
+
+def test_spend_prices_the_lead_session_that_wrote_into_the_investigation(tmp_path):
+    """Only the lead that started with the skill and wrote here is counted, each call once."""
+    repo = tmp_path / "repo"
+    inv = repo / "investigations" / "demo"
+    inv.mkdir(parents=True)
+    projects = tmp_path / "projects"
+    folder = projects / spend._project_slug(str(repo))
+    folder.mkdir(parents=True)
+    write = {"type": "tool_use", "name": "Write", "input": {"file_path": str(inv / "INVESTIGATION-LOG.md")}}
+    usage = {
+        "input_tokens": 1_000_000, "output_tokens": 100_000, "cache_read_input_tokens": 10_000_000,
+        "cache_creation_input_tokens": 500_000, "cache_creation": {"ephemeral_1h_input_tokens": 500_000, "ephemeral_5m_input_tokens": 0},
+    }
+    (folder / "lead.jsonl").write_text(
+        _session_line(type="user", message={"content": "<command-name>/diagnose</command-name>"})
+        # The same message on two lines (one per content block) is one call
+        + _assistant("m1", "claude-opus-5-5", usage, [write])
+        + _assistant("m1", "claude-opus-5-5", usage)
+        + _assistant("m2", "claude-mystery-9", {"input_tokens": 5, "output_tokens": 5})
+    )
+    # Started with the skill but only read this investigation: not its lead
+    (folder / "reader.jsonl").write_text(
+        _session_line(type="user", message={"content": "<command-name>/diagnose</command-name>"})
+        + _assistant("r1", "claude-opus-5-5", usage, [{"type": "tool_use", "name": "Read", "input": {"file_path": str(inv / "FINDINGS-REPORT.md")}}])
+    )
+    # Wrote here but was never a lead session (e.g. a tidy-up session)
+    (folder / "other.jsonl").write_text(_assistant("o1", "claude-opus-5-5", usage, [write]))
+
+    s = spend.collect(str(inv), projects_dir=str(projects))
+    lead = s["lead"]
+    assert [x["session"] for x in lead["sessions"]] == ["lead"]
+    # Opus 5.5: 1M in x $4 + 0.1M out x $20 + 10M reads x $0.20 + 0.5M 1-hour writes x $8
+    assert lead["total_cost_usd"] == 4.0 + 2.0 + 2.0 + 4.0
+    assert lead["sessions"][0]["calls"] == 2
+    assert lead["sessions"][0]["unpriced_calls"] == 1
+    assert lead["unpriced_models"] == ["claude-mystery-9"]
+    assert s["total_cost_usd"] == 12.0
+    text = spend.render(s)
+    assert "total spend: $12.00 (sub-agents $0.00 + lead $12.00" in text
+    assert "no price for: claude-mystery-9" in text
+
+
+def test_lead_pricing_handles_unsplit_writes_and_fast_mode():
+    """An unsplit cache write is priced as 5-minute; fast mode doubles the call."""
+    usage = {"cache_creation_input_tokens": 1_000_000}
+    assert spend._price_call("claude-opus-5-5", usage) == 4.0 * 1.25
+    assert spend._price_call("claude-opus-5-5", {**usage, "speed": "fast"}) == 4.0 * 1.25 * 2
+    assert spend._price_call("claude-unknown", usage) is None
