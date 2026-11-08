@@ -15,7 +15,7 @@ All execution goes through the batch runner, `scripts/execute_evals.py`. It take
 
 ```bash
 uv run python scripts/execute_evals.py run <request_file>                 # prints a JSON receipt with run_dir
-uv run python scripts/execute_evals.py wait <run_dir> --timeout 540       # exit 0 = terminal, 3 = still running
+uv run python scripts/execute_evals.py wait <run_dir> --timeout 3300      # exit 0 = terminal, 3 = still running
 uv run python scripts/execute_evals.py status <run_dir>                   # score-free snapshot
 uv run python scripts/execute_evals.py report <run_dir>                   # draft report in the contract's shape
 ```
@@ -37,7 +37,7 @@ The protocol has two phases: **launch** and **report**. Judgement is needed only
 
 ### Phase 2: Wait, then report
 
-5. Poll: `uv run python scripts/execute_evals.py wait <run_dir> --timeout 540`, with the Bash tool's `timeout` parameter set to 600000 ms so the call outlives the wait. Exit code 3 means still running — call it again. Do not sleep in a loop, do not use `timeout`, and do not background anything; each `wait` call is one foreground command that returns. Sandboxed evals take an hour or more per condition; keep polling until exit code 0. A status of `completed`, `interrupted` or `failed` is terminal.
+5. Wait: `uv run python scripts/execute_evals.py wait <run_dir> --timeout 3300`, with the Bash tool's `timeout` parameter set to 3600000 ms so the call outlives the wait. Exit code 3 means still running — call it again. Use this long wait even though the runner's receipt suggests `--timeout 540`: every return from `wait` costs a turn, and a turn after more than five idle minutes re-reads your whole context at full price, so short polls spend most of your budget on waiting. `wait` still returns the moment the batch is terminal, so the long timeout never delays your report. Do not sleep in a loop, do not use `timeout`, and do not background anything; each `wait` call is one foreground command that returns. Sandboxed evals take an hour or more per condition; keep polling until exit code 0. A status of `completed`, `interrupted` or `failed` is terminal.
 6. Run `uv run python scripts/execute_evals.py report <run_dir>` and read the draft. It is already in the contract's section shape, with every pair accounted for, evidence attached to every structural failure, the Concurrency Decision fields filled, and the zero-sample line present.
 7. **Only if** the draft shows pairs under Structural or Preflight Exclusions (structural), diagnose from the evidence — exit code, command, scrubbed output tail. Decide which of three cases applies:
    - *A fix exists within the rules.* The cause is transient in nature but exhausted the runner's retries (a provider outage that has since cleared, a Docker daemon that was restarting), or the sandbox pool needed `uv run inspect sandbox cleanup docker`. Apply that fix and re-run exactly those pairs once: `uv run python scripts/execute_evals.py run <request_file> --only <pair_id,...> --quarantine-existing-logs`, then `wait` and `report` on the new run directory. Fold the second run's outcome for those pairs into your final report and name both run directories in **Additional Notes**. One re-run, no more.

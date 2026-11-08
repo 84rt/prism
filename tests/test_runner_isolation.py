@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -180,8 +181,24 @@ def test_bash_timeouts_reach_the_options_on_every_route(monkeypatch, route):
     assert env["BASH_DEFAULT_TIMEOUT_MS"] == "600000"
     assert env["BASH_MAX_TIMEOUT_MS"] == "3600000"
     assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
-    # The Executor's `wait` poll (540 s) fits under the default.
-    assert int(env["BASH_DEFAULT_TIMEOUT_MS"]) > 540_000
+    # The Executor's long `wait` (3300 s) fits under the ceiling.
+    assert int(env["BASH_MAX_TIMEOUT_MS"]) > 3300_000
+
+
+def test_executor_waits_long_enough_to_spare_its_cache():
+    """The Executor's wait must be one long call, not a short poll.
+
+    A turn after more than five idle minutes re-reads the whole context at full
+    price, so a short poll made waiting most of an Executor's cost. The wait
+    must also fit inside the Bash timeout the prompt asks for, and that inside
+    the runner's ceiling.
+    """
+    from subagents.experiment_executor.system_prompt import SYSTEM_PROMPT
+
+    waits = [int(t) for t in re.findall(r"execute_evals\.py wait <run_dir> --timeout (\d+)", SYSTEM_PROMPT)]
+    assert waits and all(t >= 3000 for t in waits)
+    bash_ms = int(re.search(r"`timeout` parameter set to (\d+) ms", SYSTEM_PROMPT).group(1))
+    assert max(waits) * 1000 < bash_ms <= runner.BASH_MAX_TIMEOUT_MS
 
 
 def test_user_exported_bash_timeout_wins(monkeypatch):

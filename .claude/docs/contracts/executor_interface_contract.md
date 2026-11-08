@@ -133,7 +133,7 @@ The request is executed by a deterministic batch runner, `scripts/execute_evals.
 
 ```bash
 uv run python scripts/execute_evals.py run <request.json>              # validate, build commands, launch detached; prints a receipt
-uv run python scripts/execute_evals.py wait <run_dir> --timeout 540    # block until terminal (exit 0) or timeout (exit 3)
+uv run python scripts/execute_evals.py wait <run_dir> --timeout 3300   # block until terminal (exit 0) or timeout (exit 3)
 uv run python scripts/execute_evals.py status <run_dir>                # score-free status snapshot
 uv run python scripts/execute_evals.py report <run_dir>                # draft report in this contract's shape
 ```

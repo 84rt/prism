@@ -240,14 +240,14 @@ ISOLATION_ENV: dict[str, str] = {
 # moved to the background rather than killed. In one smoke run an Analyst scan
 # did exactly that: the command left the agent's view and slipped past the
 # no-background guard in `_build_hooks`, which only sees the call as issued.
-# So every sub-agent runs with a 10-minute default (long enough for the
-# Executor's 540 s `launch_subagent.py wait` poll and a typical scan) and a
-# 60-minute ceiling an agent may request explicitly for a long scan, and with
+# So every sub-agent runs with a 10-minute default (long enough for a typical
+# scan) and a 60-minute ceiling an agent may request explicitly — the
+# Executor's 3300 s `execute_evals.py wait` and a long scan — and with
 # background tasks disabled so a timeout ends the command instead of
 # detaching it. All three names were checked against the bundled CLI of the
 # pinned `claude-agent-sdk` (0.2.165, CLI 2.1.294); a user's own exported
 # value wins, as with the context-window override — so a user who exports a
-# default below the Executor's 540 s poll reintroduces the problem.
+# ceiling below the Executor's 3300 s wait reintroduces the problem.
 BASH_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000  # 600000
 BASH_MAX_TIMEOUT_MS = 60 * 60 * 1000  # 3600000
 
