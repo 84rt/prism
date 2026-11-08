@@ -203,7 +203,6 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
         "condition_A": "/absolute/path/to/iter_01/logs/c_3f9a",
         "condition_B": "/absolute/path/to/iter_01/logs/c_8b21"
     },
-    "scanning_model": "openai/gpt-4.1-mini",
     "constraints": {"limit": 100},
     "execution_notes": ["condition_B: 7 of 100 samples hit the message limit"],
     "artefacts_dir": "/absolute/path/to/investigation/artefacts",
@@ -216,7 +215,7 @@ uv run python scripts/dump_transcripts.py <logs dir or .eval> --out <dir>
 - `topic` must be a **neutral description** — never the hypothesis
 - Use **opaque condition labels** (condition_A, condition_B) — randomise the mapping to conditions — pointing at directories named by opaque condition ids, never by a real condition name or a role word
 - **Before every launch, run `uv run python scripts/check_blinding.py <CONDITION_LABEL_MAP_iter<N>.json> <request.json>`; a non-zero exit blocks the invocation.** Exit 1 lists each blocking hit (channel — label, path, symlink target, file name, `task_file`, tags, metadata — file, and offending token); exit 2 is a usage error; warnings (a differing `task_args`, mixed-iteration layouts) print without changing the exit code and are recorded in the log and the report's caveats. The map itself is denied to every sub-agent by the runner's file hooks (`runner.ALWAYS_RESTRICTED`) and listed again in the Analyst's `RESTRICTED_FILES`
-- `scanning_model`, `constraints`, and `artefacts_dir` are optional. If `scanning_model` is an `openrouter/…` string, pin its route the same way target-model routes are pinned — the scanner is a measurement instrument held constant across conditions, and unpinned routing lets it drift between condition scans in a way that is indistinguishable from a real effect (see `analyst_interface_contract.md §Scanning model`)
+- `scanning_model`, `constraints`, and `artefacts_dir` are optional. Omit `scanning_model` unless you have a reason to set it (a cross-family scanner for a Claude target, say): the Analyst then uses the project default, Haiku 5.5 where it validates and Sonnet 5.5 where it doesn't (`analyst_interface_contract.md §Scanning model`). If `scanning_model` is an `openrouter/…` string, pin its route the same way target-model routes are pinned — the scanner is a measurement instrument held constant across conditions, and unpinned routing lets it drift between condition scans in a way that is indistinguishable from a real effect (see `analyst_interface_contract.md §Scanning model`)
 - `subagent_model` is optional; the model the Analyst agent runs on. **Distinct from `scanning_model`**, which is the model Scout uses for LLM scanners — `subagent_model` changes which model *does the analysis*, `scanning_model` changes which model the scanners *call*
 - `subagent_thinking` is optional; the Analyst's extended-thinking config (see General Pattern above)
 - When `artefacts_dir` is provided, the analyst writes all file outputs to `<artefacts_dir>/analyst/`

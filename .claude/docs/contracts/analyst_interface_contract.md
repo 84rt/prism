@@ -36,7 +36,12 @@ The analyst partitions transcripts by condition label using these paths. The ana
 
 ### Scanning model (optional)
 
-The model to use for LLM-based scanning. If not specified, the analyst uses the project default.
+The model to use for LLM-based scanning. If not specified, the analyst uses the project default:
+
+- **Try `anthropic/claude-haiku-5-5` first.** Keep it for a scanner when its validation reaches `reliable` (κ ≥ 0.6) and precision ≥ 0.6.
+- **Otherwise use `anthropic/claude-sonnet-5-5`** for that scanner: re-validate it with Sonnet on the same validation set, then deploy it with Sonnet across every condition. Report both validations under §Validation metrics.
+
+Haiku costs a small fraction of Sonnet per token, and scanning every transcript of every condition is the Analyst's largest model spend, so it is worth one validation pass to find out whether it is good enough. Never pick an older model from memory (e.g. a Sonnet 4.x): the current ones are both cheaper and stronger. The choice is per scanner and fixed before deployment, so each scanner is still one model across all conditions. The validator follows the usual cross-family rule (§Validation Metrics). Both default models reject sampling parameters: leave `temperature`, `top_p` and `top_k` unset, or every call fails.
 
 **The scanner is a measurement instrument and must be held constant across conditions.** Every condition's transcripts must be scanned by the same model, reached the same way, in the same scanning session where practical. This matters more here than for target models: the analyst's headline output is a per-condition detection rate, so anything that shifts scanner behaviour between scanning condition A and condition B produces a difference in the results that has nothing to do with the experiment.
 
