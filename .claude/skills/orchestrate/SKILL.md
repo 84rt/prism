@@ -74,8 +74,7 @@ Phase 3: Report to User
     → Synthesize findings across iterations, present evidence, suggest next steps
 ```
 
-For detailed step-by-step responsibilities at each phase, consult:
-**@.claude/docs/investigator/orchestrator_responsibilities.md**
+Step-by-step responsibilities at each phase, edge cases and anti-patterns: **@.claude/docs/investigator/orchestrator_responsibilities.md** — read it in full before Phase 1.
 
 ## State Management
 
@@ -120,13 +119,14 @@ Before entering Phase 2, explicitly discuss with the user how much autonomy the 
 
 Record the agreement in the investigation log. When in doubt about whether to continue or pause, **default to pausing** — the cost of an unnecessary check-in is low, but the cost of running an uninformative experiment is real (time, compute, and analytical complexity).
 
-## Key References
+## Reading Plan
 
-- **Hypothesis refinement:** Read `hypothesis-methodology.md` for the full formulation framework, worked examples, neutral topic translation, and iteration logic.
-- **Experimental design patterns:** Read `experimental-design-patterns.md` for condition design, sample sizing, confound management, and failure handling.
-- **Methodological principles:** Read `@.claude/docs/investigator/eval_science_principles.md` for the science-of-evaluations framework, construct validity, and common methodological pitfalls.
-- **Analyst delegation:** Read `@.claude/docs/investigator/orchestrator_analyst_guide.md` for how to construct neutral topics, pre-check execution data, and interpret the analyst's report.
-- **Analyst interface contract:** Read `@.claude/docs/contracts/analyst_interface_contract.md` for the exact request and report formats shared between orchestrator and analyst.
-- **Explorer interface contract:** Read `@.claude/docs/contracts/explorer_interface_contract.md` for the exact request and report formats shared between orchestrator and explorer.
-- **Sub-agent invocation:** Read `@.claude/docs/investigator/subagent_invocation.md` for exact CLI commands, JSON input schemas, and expected outputs.
-- **Pipeline mechanics:** Read `@.claude/docs/investigator/orchestrator_responsibilities.md` for detailed step-by-step responsibilities, edge cases, and anti-patterns.
+Loaded now: this skill, `subagent_invocation.md` and `orchestrator_responsibilities.md` (read it in full before Phase 1). Everything else is read when a step needs it, so it does not ride along in every turn:
+
+| Read | When |
+|---|---|
+| `.claude/skills/orchestrate/hypothesis-methodology.md` | Before Phase 1 (formulation framework, worked examples, neutral topic translation, iteration logic) |
+| `.claude/docs/investigator/eval_science_principles.md` | Before Phase 1 (construct validity, the five validity questions, common pitfalls); by section afterwards |
+| `.claude/skills/orchestrate/experimental-design-patterns.md` | Before the first Step 2b (condition design, sample sizing, confound management, failure handling) |
+| `.claude/docs/investigator/orchestrator_analyst_guide.md` | Before the first Step 2f (neutral topics, pre-checking execution data, interpreting the Analyst's report, deriving construal-check verdicts) |
+| `.claude/docs/contracts/explorer_interface_contract.md`, `analyst_interface_contract.md` | Only to settle a question about one of their fields or report sections — `subagent_invocation.md` gives every request field |
