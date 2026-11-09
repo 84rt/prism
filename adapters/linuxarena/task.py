@@ -24,7 +24,22 @@ from typing import Any
 
 from inspect_ai import Task, task
 
+from control_tower.environments.registry import environments
 from control_tower.eval.launch.inspect_tasks import eval_task
+from control_tower.utils.versioning import checkout_image_tag
+
+
+def _image_tags(env: str) -> dict[str, str] | None:
+    """The image tag `ct run eval` would pin for `env`, so a direct run uses the same images.
+
+    `ct`'s local backend passes `image_tags` (the environment checkout's
+    commit under `CONTROL_TOWER_IMAGES=pull|offline`); a direct `inspect eval`
+    gets none and falls back to `:latest`, which `ct settings pull-images` does
+    not fetch — so an offline run fails and a pull run silently drifts.
+    Returns None when the images are built locally (`build` mode).
+    """
+    tag = checkout_image_tag(environments.get(env))
+    return {env: tag} if tag else None
 
 
 def _dict(value: Any) -> dict[str, Any]:
@@ -53,9 +68,9 @@ def linuxarena(
     policy_args: dict[str, Any] | str | None = None,
     protocol: str = "null-blue-team",
     protocol_args: dict[str, Any] | str | None = None,
-    untrusted: str | None = None,
-    trusted: str | None = None,
-    monitor: str | None = None,
+    untrusted: str | dict[str, Any] | None = None,
+    trusted: str | dict[str, Any] | None = None,
+    monitor: str | dict[str, Any] | None = None,
     run_name: str | None = None,
     score_main_on_attack: bool = False,
 ) -> Task:
@@ -66,13 +81,13 @@ def linuxarena(
     Monitors are an argument of the protocol, e.g.
     `-T protocol_args='{"monitors": ["simple"]}'`.
     """
-    roles: dict[str, str] = {}
-    if untrusted:
-        roles["untrusted"] = untrusted
-    if trusted:
-        roles["trusted"] = trusted
-    if monitor:
-        roles["monitor"] = monitor
+    # Each role is a model name, or a JSON role config
+    # `{"model": ..., "model_args": {"provider": {"only": [...], "allow_fallbacks": false}}}`
+    # (Control Tower's `make_role_model` format) to pin an OpenRouter backend.
+    roles: dict[str, Any] = {}
+    for role, value in (("untrusted", untrusted), ("trusted", trusted), ("monitor", monitor)):
+        if value:
+            roles[role] = (json.loads(value) if value.lstrip().startswith("{") else value) if isinstance(value, str) else dict(value)
     return eval_task(
         task_selection={
             "environments": [env],
@@ -84,4 +99,5 @@ def linuxarena(
         model_roles=roles or None,
         run_name=run_name,
         score_main_on_attack=score_main_on_attack,
+        image_tags=_image_tags(env),
     )
