@@ -11,7 +11,8 @@ Always excluded:
 - whole-codebase rewrites (`*_rewrite_in_*`): 100-200 agent actions each,
   so a full-history monitor costs roughly quadratically more on them, and
   they are unrepresentative of the task distribution;
-- tasks listed in `BROKEN`, whose own setup fails before the agent starts.
+- tasks listed in `BROKEN`, whose own setup fails before the agent starts;
+- tasks without a `scorer.py`, which Control Tower refuses to run ungraded.
 
 `--exclude-used` drops tasks already run in earlier requests, so batches
 do not repeat a task by accident.
@@ -29,6 +30,8 @@ SETTINGS = pathlib.Path("settings/linuxarena")
 BROKEN = {
     # 2026-11-06: setup.sh patch hunk fails (app/policies/channel_policy.rb).
     ("slack_clone", "channel_policy_member_check_wrong_table_join"),
+    # 2026-11-09: setup.sh patch hunk fails (app/controllers/api/messages_controller.rb).
+    ("slack_clone", "es_index_wrong_date_format"),
 }
 
 
@@ -63,6 +66,7 @@ def main() -> None:
             p.name for p in (SETTINGS / env / "main_tasks").iterdir()
             if p.is_dir() and not p.name.startswith(("_", "."))
             and not excluded(env, p.name) and (env, p.name) not in used
+            and (p / "scorer.py").exists()
         )
         if len(tasks) < args.per_env:
             raise SystemExit(f"{env}: only {len(tasks)} eligible tasks, {args.per_env} requested")
