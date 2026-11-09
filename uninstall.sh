@@ -119,6 +119,7 @@ unlink_file "scripts/check_blinding.py"
 unlink_file "scripts/check_keys.py"
 unlink_file "scripts/new_ids.py"
 unlink_file "scripts/headroom.py"
+unlink_file "scripts/run_status.py"
 
 # subagents
 unlink_file "subagents/__init__.py"
@@ -173,6 +174,7 @@ unlink_file ".claude/docs/investigator/model_forensics_principles.md"
 unlink_file ".claude/docs/investigator/orchestrator_responsibilities.md"
 unlink_file ".claude/docs/references/scout_reference.md"
 unlink_file ".claude/docs/investigator/subagent_invocation.md"
+unlink_file ".claude/docs/pipelines.json"
 
 # .claude/skills/orchestrate
 unlink_file ".claude/skills/orchestrate/SKILL.md"

@@ -174,6 +174,7 @@ link_file "scripts/check_blinding.py"
 link_file "scripts/check_keys.py"
 link_file "scripts/new_ids.py"
 link_file "scripts/headroom.py"
+link_file "scripts/run_status.py"
 
 # subagents
 link_file "subagents/__init__.py"
@@ -228,6 +229,7 @@ link_file ".claude/docs/investigator/model_forensics_principles.md"
 link_file ".claude/docs/investigator/orchestrator_responsibilities.md"
 link_file ".claude/docs/references/scout_reference.md"
 link_file ".claude/docs/investigator/subagent_invocation.md"
+link_file ".claude/docs/pipelines.json"
 
 # .claude/skills/orchestrate
 link_file ".claude/skills/orchestrate/SKILL.md"
@@ -265,6 +267,7 @@ GITIGNORE_ENTRIES=(
     "scripts/check_keys.py"
     "scripts/new_ids.py"
     "scripts/headroom.py"
+    "scripts/run_status.py"
     ".claude/docs/investigator/orchestrator_analyst_guide.md"
     ".claude/docs/contracts/analyst_forensic_addendum.md"
     ".claude/docs/contracts/analyst_interface_contract.md"
@@ -281,6 +284,7 @@ GITIGNORE_ENTRIES=(
     ".claude/docs/investigator/orchestrator_responsibilities.md"
     ".claude/docs/references/scout_reference.md"
     ".claude/docs/investigator/subagent_invocation.md"
+    ".claude/docs/pipelines.json"
     ".claude/skills/diagnose/"
     ".claude/skills/orchestrate/"
     ".claude/settings.json"
