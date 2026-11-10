@@ -1860,7 +1860,8 @@ def run_worker(run_dir: str) -> int:
                     # log at all, which the Error Summary already covers.
                     e["zero_samples"] = bool(r.log_path) and not (r.samples_completed or 0)
                     if e["zero_samples"] and r.id not in status.data["zero_sample_pairs"]:
-                        status.data["zero_sample_pairs"].append(r.id)
+                        # Sorted, since parallel pairs finish in any order
+                        status.data["zero_sample_pairs"] = sorted(status.data["zero_sample_pairs"] + [r.id])
             elif kind == "reduction":
                 status.data["concurrency"]["reductions"].append(asdict(payload))
             status.save()
