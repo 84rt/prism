@@ -47,3 +47,35 @@ def test_each_lead_sizes_a_round_before_launching_it(manual, lead_in, launch):
     for quantity in ("episodes", "hours", "dollars"):
         assert quantity in rule, f"{manual}'s size check no longer projects {quantity}"
     assert text.index(lead_in) < text.index(launch), f"{manual}'s size check comes after the launch"
+
+
+# Every place that states when to split a forensic round across Analysts
+SPLIT_RULES = [
+    ".claude/docs/contracts/analyst_forensic_addendum.md",
+    ".claude/docs/investigator/subagent_invocation.md",
+    ".claude/docs/investigator/diagnostician_analyst_guide.md",
+]
+
+
+@pytest.mark.parametrize("doc", SPLIT_RULES)
+def test_a_round_splits_across_analysts_only_above_twelve_conditions(doc):
+    """One Analyst takes a round of up to about twelve conditions.
+
+    Each split invocation re-runs the grader, its audit and a full re-grade of
+    every transcript: in the sandbagging rerun that was about a third of each
+    Analyst's cost, for rounds one Analyst would have finished well within
+    its turn cap.
+
+    Parameters
+    ----------
+    doc : str
+        A document stating the split threshold, relative to the repository root.
+
+    Returns
+    -------
+    None
+    """
+    text = (REPO_ROOT / doc).read_text()
+    assert "120 scanner×condition passes" in text, f"{doc} lost the raised pass threshold"
+    assert "twelve conditions" in text or "> 12 conditions" in text, f"{doc} lost the raised condition threshold"
+    assert "24 scanner" not in text and "eight conditions" not in text, f"{doc} still states the old threshold"
