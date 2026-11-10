@@ -31,7 +31,7 @@ def test_docker_memory_readings_are_read_in_mb():
 def test_capacity_follows_whichever_limit_binds():
     # The sandbagging eval on this machine: tiny sandboxes, so cores bind
     light = {"containers_seen": 2, "peak_container_mb": 2.0, "min_free_mb": 9300}
-    assert ee.machine_capacity(light, 10, True)[0] == 30
+    assert ee.machine_capacity(light, 10, True)[0] == 20
     assert ee.machine_capacity(light, 10, True)[1].startswith("cores")
     # Heavy sandboxes: memory binds, 9300 MB × 0.5 / 1000 MB
     heavy = {"containers_seen": 2, "peak_container_mb": 1000.0, "min_free_mb": 9300}

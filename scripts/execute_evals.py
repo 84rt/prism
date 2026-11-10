@@ -99,9 +99,10 @@ DEFAULT_MAX_CONNECTIONS = 5
 # memory it may plan to use over the heaviest sandbox's peak, a few sandboxes
 # per core, and a hard cap; split evenly with other live runs on the machine
 # and re-asked before every condition starts. Measured on a 10-core / 16 GB
-# box: the sandbagging eval at 20 in flight held free memory at ~9.3 GB.
+# box: the sandbagging eval at 20 in flight held free memory at ~9.3 GB;
+# at 30 memory stayed fine but load peaked at 41 on 10 cores.
 AUTO_MEMORY_SHARE = 0.5  # the other half is headroom, which also absorbs a newcomer's overlap
-AUTO_PER_CORE = 3  # busy sandboxes compete for the processor
+AUTO_PER_CORE = 2  # busy sandboxes compete for the processor
 AUTO_MAX_IN_FLIGHT = 40  # provider limits above ~10 at once are untested
 AUTO_MIN_CONTAINER_MB = 100  # idle sandboxes read ~2 MB; this covers the eval process's share
 AUTO_MIN_ALONE = DEFAULT_MAX_PARALLEL * DEFAULT_MAX_CONNECTIONS  # never below the old default alone
