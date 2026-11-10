@@ -75,7 +75,7 @@ def test_only_this_experiments_sandboxes_are_measured(tmp_path):
     def docker(args):
         calls.append(args)
         if args[0] == "ps":
-            return f"ours-1\t{exp / 'c_a'}\ntheirs-1\t/somewhere/else\n"
+            return f"ours-1\tinspect-t-iours\t{exp / 'c_a'}\ntheirs-1\tinspect-t-itheirs\t/somewhere/else\n"
         return "ours-1\t41.2MiB / 15.6GiB\n"
 
     assert ee.experiment_sandbox_memory(str(exp), docker) == {"ours-1": 41.2}

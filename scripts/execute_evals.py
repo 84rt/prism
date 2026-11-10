@@ -844,7 +844,13 @@ def _kill_group(proc: subprocess.Popen) -> None:
 # for a Prism run is a condition folder inside the run's experiment directory
 _PROJECT_LABEL = "com.docker.compose.project"
 _WORKDIR_LABEL = "com.docker.compose.project.working_dir"
+# The compose files the project was started from, comma-separated. For a task
+# with only a Dockerfile, Inspect writes the compose file into its own data
+# folder, so the working directory above is that folder, not the task's.
+_CONFIG_LABEL = "com.docker.compose.project.config_files"
 DOCKER_TIMEOUT = 120
+# One `docker ps` line per container: project, working directory, compose files
+_PS_FORMAT = "{{.Label \"%s\"}}\t{{.Label \"%s\"}}\t{{.Label \"%s\"}}" % (_PROJECT_LABEL, _WORKDIR_LABEL, _CONFIG_LABEL)
 
 
 def _docker(args: list[str], timeout: int = DOCKER_TIMEOUT) -> str | None:
@@ -854,6 +860,108 @@ def _docker(args: list[str], timeout: int = DOCKER_TIMEOUT) -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     return out.stdout if out.returncode == 0 else None
+
+
+def _inside(path: str, root: str) -> bool:
+    """Whether ``path`` is ``root`` or somewhere beneath it, symlinks resolved.
+
+    Parameters
+    ----------
+    path, root : str
+        Directories; ``root`` already resolved with ``os.path.realpath``.
+
+    Returns
+    -------
+    bool
+        e.g. True for ``/exp/c_1`` and for ``/exp`` itself; False for ``/exp_copy``.
+    """
+    resolved = os.path.realpath(path)
+    return resolved == root or resolved.startswith(root + os.sep)
+
+
+def _build_contexts(compose_file: str) -> list[str]:
+    """The ``build: context:`` directories a compose file names, made absolute.
+
+    Parameters
+    ----------
+    compose_file : str
+        Path to a compose file.
+
+    Returns
+    -------
+    list[str]
+        e.g. ``["/exp/c_1"]`` for Inspect's generated file for a Dockerfile in
+        ``/exp/c_1``; empty when the file is gone or names no build.
+    """
+    try:
+        with open(compose_file) as f:
+            text = f.read()
+    except OSError:
+        return []
+    base = os.path.dirname(compose_file)
+    contexts = re.findall(r"^\s*context:\s*(.+?)\s*$", text, flags=re.MULTILINE)
+    return [os.path.join(base, c.strip("\"'")) for c in contexts]
+
+
+def _started_inside(exp_dir: str, workdir: str, config_files: str) -> bool:
+    """Whether a compose project was started for a task inside ``exp_dir``.
+
+    Either its working directory is inside (a task with its own compose file),
+    or one of its compose files builds from a folder inside (a task with only a
+    Dockerfile, whose compose file Inspect writes to its own data folder). A
+    sandbox with no Dockerfile or compose file at all names no folder of the
+    task, so it cannot be told apart from another run's and is never matched.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    workdir : str
+        The project's working-directory label.
+    config_files : str
+        The project's comma-separated compose-files label.
+
+    Returns
+    -------
+    bool
+    """
+    root = os.path.realpath(exp_dir)
+    if workdir and _inside(workdir, root):
+        return True
+    return any(_inside(ctx, root)
+               for f in config_files.split(",") if f
+               for ctx in _build_contexts(f))
+
+
+def _our_containers(exp_dir: str, docker: Any, running_only: bool = False) -> list[tuple[str, str]] | None:
+    """The Inspect sandbox containers started for tasks inside ``exp_dir``.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    docker : Callable
+        Runs a docker command.
+    running_only : bool
+        Leave out stopped containers.
+
+    Returns
+    -------
+    list[tuple[str, str]] | None
+        ``(container name, compose project)`` pairs, e.g.
+        ``[("inspect-sandbagging-i6tmri7-default-1", "inspect-sandbagging-i6tmri7")]``;
+        None when docker could not be asked.
+    """
+    all_flag = [] if running_only else ["-a"]
+    out = docker(["ps", *all_flag, "--filter", f"label={_PROJECT_LABEL}", "--format", "{{.Names}}\t" + _PS_FORMAT])
+    if out is None:
+        return None
+    ours = []
+    for line in out.splitlines():
+        name, project, workdir, config_files = (line.split("\t") + ["", "", "", ""])[:4]
+        if project.startswith("inspect-") and _started_inside(exp_dir, workdir, config_files):
+            ours.append((name, project))
+    return ours
 
 
 def leftover_sandboxes(exp_dir: str, docker: Any = None) -> list[str] | None:
@@ -873,18 +981,8 @@ def leftover_sandboxes(exp_dir: str, docker: Any = None) -> list[str] | None:
         when docker could not be asked. Containers started anywhere else, by
         other runs or other folders, are never listed.
     """
-    docker = docker or _docker
-    fmt = "{{.Label \"%s\"}}\t{{.Label \"%s\"}}" % (_PROJECT_LABEL, _WORKDIR_LABEL)
-    out = docker(["ps", "-a", "--filter", f"label={_PROJECT_LABEL}", "--format", fmt])
-    if out is None:
-        return None
-    root = os.path.realpath(exp_dir) + os.sep
-    projects = set()
-    for line in out.splitlines():
-        project, _, workdir = line.partition("\t")
-        if project.startswith("inspect-") and workdir and os.path.realpath(workdir).startswith(root):
-            projects.add(project)
-    return sorted(projects)
+    ours = _our_containers(exp_dir, docker or _docker)
+    return None if ours is None else sorted({project for _, project in ours})
 
 
 def _other_live_run(run_dir: str) -> str | None:
@@ -989,13 +1087,10 @@ def experiment_sandbox_memory(exp_dir: str, docker: Any = None) -> dict[str, flo
         None when docker could not be asked. Other runs' containers are left out.
     """
     docker = docker or _docker
-    fmt = "{{.Names}}\t{{.Label \"%s\"}}" % _WORKDIR_LABEL
-    listing = docker(["ps", "--filter", f"label={_PROJECT_LABEL}", "--format", fmt])
-    if listing is None:
+    found = _our_containers(exp_dir, docker, running_only=True)
+    if found is None:
         return None
-    root = os.path.realpath(exp_dir) + os.sep
-    ours = [name for name, _, workdir in (l.partition("\t") for l in listing.splitlines())
-            if workdir and os.path.realpath(workdir).startswith(root)]
+    ours = [name for name, _ in found]
     if not ours:
         return {}
     stats = docker(["stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}", *ours])
@@ -2773,6 +2868,36 @@ def _cleanup_notes(cleanup: dict[str, Any]) -> list[str]:
     return notes
 
 
+def _merge_cleanup(earlier: dict[str, Any] | None, again: dict[str, Any]) -> dict[str, Any]:
+    """Combine the worker's clean-up record with a second pass made after it.
+
+    Parameters
+    ----------
+    earlier : dict | None
+        The worker's ``sandbox_cleanup`` record; None when it never wrote one
+        (killed before its ``finally``).
+    again : dict
+        The second pass's record, in the same shape.
+
+    Returns
+    -------
+    dict
+        ``{"removed", "failed", "skipped"}``: everything either pass removed;
+        failures and the skip reason from the latest pass that ran, e.g. a
+        worker that removed two projects followed by a pass that found none
+        gives ``{"removed": ["inspect-a", "inspect-b"], "failed": [], "skipped": None}``.
+    """
+    if not earlier:
+        return again
+    ran_again = again["skipped"] is None
+    return {
+        "removed": sorted(set(earlier.get("removed") or []) | set(again["removed"])),
+        "failed": again["failed"] if ran_again else list(earlier.get("failed") or []),
+        # Skipped only if neither pass got to look
+        "skipped": again["skipped"] if earlier.get("skipped") and not ran_again else None,
+    }
+
+
 def stop_run(run_dir: str, timeout: float = 300.0, docker: Any = None) -> dict[str, Any]:
     """Stop a run cleanly: its evals get to remove their own containers first.
 
@@ -2804,10 +2929,12 @@ def stop_run(run_dir: str, timeout: float = 300.0, docker: Any = None) -> dict[s
         data = wait_for(run_dir, timeout, interval=5.0)
 
     # The worker cleans up as it exits; this catches a worker that was killed
-    # or never got that far. Containers already removed are simply not found.
+    # or never got that far. Containers already removed are simply not found,
+    # so the worker's own record of what it removed is kept alongside.
     if data.get("state") in TERMINAL_STATES or not _worker_alive(data):
         status = Status.load(run_dir)
-        status.data["sandbox_cleanup"] = remove_leftover_sandboxes(status.data["experiment_dir"], run_dir, docker)
+        again = remove_leftover_sandboxes(status.data["experiment_dir"], run_dir, docker)
+        status.data["sandbox_cleanup"] = _merge_cleanup(status.data.get("sandbox_cleanup"), again)
         if status.data.get("state") not in TERMINAL_STATES:
             status.data["state"] = "interrupted"
             status.data["finished_at"] = _now()

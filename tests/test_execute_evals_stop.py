@@ -23,18 +23,20 @@ class FakeDocker:
 
     Parameters
     ----------
-    containers : list[tuple[str, str]]
-        ``(compose project, working directory)`` pairs.
+    containers : list[tuple]
+        ``(compose project, working directory)`` pairs, or triples adding the
+        comma-separated compose files the project was started from.
     """
 
-    def __init__(self, containers: list[tuple[str, str]]):
-        self.containers = containers
+    def __init__(self, containers: list[tuple]):
+        self.containers = [(*c, "")[:3] for c in containers]
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str], timeout: int = 0) -> str | None:
         self.calls.append(args)
         if args[0] == "ps":
-            return "".join(f"{p}\t{w}\n" for p, w in self.containers)
+            # Container name, then the three labels `_PS_FORMAT` asks for
+            return "".join(f"{p}-default-1\t{p}\t{w}\t{c}\n" for p, w, c in self.containers)
         return ""
 
     @property
@@ -65,6 +67,32 @@ def test_only_this_experiments_inspect_containers_are_listed(tmp_path):
     assert ee.leftover_sandboxes(str(exp), lambda args, timeout=0: None) is None
 
 
+def test_a_compose_file_in_the_experiment_folder_itself_counts(tmp_path):
+    exp, _ = make_run(tmp_path, "r1")
+    assert ee.leftover_sandboxes(str(exp), FakeDocker([("inspect-x-iroot", str(exp))])) == ["inspect-x-iroot"]
+
+
+def test_a_dockerfile_only_task_is_found_through_its_generated_compose_file(tmp_path):
+    # Inspect writes such a task's compose file into its own data folder, so
+    # the working directory is that folder; the build context names the task
+    exp, _ = make_run(tmp_path, "r1")
+    data_dir = tmp_path / "inspect_data" / "docker-compose"
+    data_dir.mkdir(parents=True)
+    ours = data_dir / "inspect-x-iours.yaml"
+    ours.write_text(f"services:\n  default:\n    build:\n      context: {exp / 'c_1'}\n")
+    theirs = data_dir / "inspect-x-itheirs.yaml"
+    theirs.write_text(f"services:\n  default:\n    build:\n      context: \"{tmp_path / 'elsewhere'}\"\n")
+    generic = data_dir / "inspect-x-igeneric.yaml"
+    generic.write_text("services:\n  default:\n    image: \"aisiuk/inspect-tool-support\"\n")
+    docker = FakeDocker([
+        ("inspect-x-iours", str(data_dir), str(ours)),
+        ("inspect-x-itheirs", str(data_dir), str(theirs)),
+        ("inspect-x-igeneric", str(data_dir), str(generic)),
+        ("inspect-x-igone", str(data_dir), str(data_dir / "deleted.yaml")),
+    ])
+    assert ee.leftover_sandboxes(str(exp), docker) == ["inspect-x-iours"]
+
+
 def test_leftovers_removed_only_when_no_other_run_beside_is_going(tmp_path):
     exp, run = make_run(tmp_path, "r1")
     docker = FakeDocker([("inspect-x-i1", str(exp / "c_1"))])
@@ -88,6 +116,31 @@ def test_stop_cleans_up_after_a_worker_that_is_already_gone(tmp_path):
     assert data["state"] == "interrupted"
     assert data["sandbox_cleanup"]["removed"] == ["inspect-x-i1"]
     assert json.loads((run / "status.json").read_text())["state"] == "interrupted"
+
+
+def test_stop_keeps_what_the_worker_already_removed(tmp_path):
+    # The worker cleaned up on its way out; the stop's second pass finds
+    # nothing, which must not erase the worker's record
+    earlier = {"removed": ["inspect-x-i1", "inspect-x-i2"], "failed": [], "skipped": None}
+    exp, run = make_run(tmp_path, "r1", state="interrupted", sandbox_cleanup=earlier)
+    data = ee.stop_run(str(run), timeout=1, docker=FakeDocker([]))
+    assert data["sandbox_cleanup"] == earlier
+
+
+def test_cleanup_records_merge():
+    skipped = {"removed": [], "failed": [], "skipped": "another run"}
+    ran = {"removed": ["inspect-b"], "failed": ["inspect-c"], "skipped": None}
+    # No worker record: the second pass stands alone
+    assert ee._merge_cleanup(None, skipped) == skipped
+    # The worker ran; a second pass that was skipped leaves its record standing
+    assert ee._merge_cleanup(ran, skipped) == ran
+    # The worker was skipped; the second pass ran
+    assert ee._merge_cleanup(skipped, ran) == ran
+    # Both skipped: still skipped
+    assert ee._merge_cleanup(skipped, skipped)["skipped"] == "another run"
+    # Both ran: removals add up, failures are the latest pass's
+    merged = ee._merge_cleanup({"removed": ["inspect-a"], "failed": ["inspect-b"], "skipped": None}, ran)
+    assert merged == {"removed": ["inspect-a", "inspect-b"], "failed": ["inspect-c"], "skipped": None}
 
 
 def test_report_notes_say_what_was_removed_and_what_is_still_running():
