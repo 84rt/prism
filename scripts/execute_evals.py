@@ -45,6 +45,7 @@ diagnostic tail for failed commands.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -779,20 +780,146 @@ def watch_live_counts(status: Status, stop: threading.Event, interval: float = L
 # ---------------------------------------------------------------------------
 
 
+# How long a stopped eval gets to shut down by itself. Inspect treats SIGINT as
+# a cancel and removes its sandbox containers on the way out, which takes tens
+# of seconds for a batch of them; SIGTERM it does not handle, so it dies at once
+# and leaves every container running.
+STOP_GRACE_SECONDS = 90
+TERM_GRACE_SECONDS = 10
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
-    """Terminate a child and everything in its process group."""
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        proc.communicate(timeout=10)
-    except subprocess.TimeoutExpired:
+    """Stop a child and everything in its process group, gently first.
+
+    SIGINT, so Inspect can cancel and clean up its sandboxes; then SIGTERM;
+    then SIGKILL, each after a grace period.
+    """
+    for sig, grace in ((signal.SIGINT, STOP_GRACE_SECONDS), (signal.SIGTERM, TERM_GRACE_SECONDS)):
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            os.killpg(proc.pid, sig)
         except ProcessLookupError:
-            pass
-        proc.communicate()
+            return
+        try:
+            proc.communicate(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.communicate()
+
+
+# ---------------------------------------------------------------------------
+# Leftover sandboxes
+# ---------------------------------------------------------------------------
+
+# Labels Docker Compose puts on every container: the project Inspect named it
+# (``inspect-<task>-i<random>``) and the folder its compose file sits in, which
+# for a Prism run is a condition folder inside the run's experiment directory
+_PROJECT_LABEL = "com.docker.compose.project"
+_WORKDIR_LABEL = "com.docker.compose.project.working_dir"
+DOCKER_TIMEOUT = 120
+
+
+def _docker(args: list[str], timeout: int = DOCKER_TIMEOUT) -> str | None:
+    """Run a docker command; its stdout, or None if docker is missing or it failed."""
+    try:
+        out = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def leftover_sandboxes(exp_dir: str, docker: Any = None) -> list[str] | None:
+    """Inspect's sandbox projects still present that were started from inside ``exp_dir``.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    docker : Callable
+        Runs a docker command; None for ``_docker``. Tests pass a stand-in.
+
+    Returns
+    -------
+    list[str] | None
+        Project names, sorted, e.g. ``["inspect-sandbagging-i6tmri7"]``; None
+        when docker could not be asked. Containers started anywhere else, by
+        other runs or other folders, are never listed.
+    """
+    docker = docker or _docker
+    fmt = "{{.Label \"%s\"}}\t{{.Label \"%s\"}}" % (_PROJECT_LABEL, _WORKDIR_LABEL)
+    out = docker(["ps", "-a", "--filter", f"label={_PROJECT_LABEL}", "--format", fmt])
+    if out is None:
+        return None
+    root = os.path.realpath(exp_dir) + os.sep
+    projects = set()
+    for line in out.splitlines():
+        project, _, workdir = line.partition("\t")
+        if project.startswith("inspect-") and workdir and os.path.realpath(workdir).startswith(root):
+            projects.add(project)
+    return sorted(projects)
+
+
+def _other_live_run(run_dir: str) -> str | None:
+    """Another unfinished run beside this one whose worker is alive, if any.
+
+    Its containers sit under the same experiment directory, so removing
+    leftovers then could remove its live sandboxes.
+    """
+    parent = os.path.dirname(os.path.abspath(run_dir))
+    for other in sorted(glob.glob(os.path.join(parent, "*", "status.json"))):
+        other_dir = os.path.dirname(other)
+        if os.path.samefile(other_dir, run_dir):
+            continue
+        try:
+            with open(other) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("state") not in TERMINAL_STATES and _worker_alive(data):
+            return other_dir
+    return None
+
+
+def remove_leftover_sandboxes(exp_dir: str, run_dir: str, docker: Any = None) -> dict[str, Any]:
+    """Remove the sandbox containers a finished or stopped run left behind.
+
+    Only once every eval of the run has ended: Inspect normally removes its own
+    containers, so any still there from this run's experiment directory are
+    leftovers of an eval that was killed. Skipped while another run beside this
+    one is still going.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    run_dir : str
+        This run's directory.
+    docker : Callable
+        Runs a docker command; None for ``_docker``. Tests pass a stand-in.
+
+    Returns
+    -------
+    dict
+        ``{"removed": [...], "failed": [...], "skipped": reason | None}``.
+    """
+    docker = docker or _docker
+    result: dict[str, Any] = {"removed": [], "failed": [], "skipped": None}
+    other = _other_live_run(run_dir)
+    if other:
+        result["skipped"] = f"another run in this experiment is still going ({other})"
+        return result
+    projects = leftover_sandboxes(exp_dir, docker)
+    if projects is None:
+        result["skipped"] = "docker could not be asked (not installed or not running)"
+        return result
+    for project in projects:
+        done = docker(["compose", "-p", project, "down", "--volumes", "--remove-orphans"]) is not None
+        result["removed" if done else "failed"].append(project)
+    return result
 
 
 def run_single(
@@ -1916,6 +2043,12 @@ def run_worker(run_dir: str) -> int:
         status.data["errors"].append(f"runner exception: {type(e).__name__}: {e}")
         status.data["state"] = "failed"
     finally:
+        # Every eval has ended by now, so containers still up from this
+        # experiment are leftovers of one that was killed
+        try:
+            status.data["sandbox_cleanup"] = remove_leftover_sandboxes(exp_dir, run_dir)
+        except Exception as e:
+            status.data["errors"].append(f"leftover sandbox cleanup failed: {type(e).__name__}: {e}")
         status.data["finished_at"] = _now()
         status.data["total_wall_clock_seconds"] = round(time.monotonic() - start, 1)
         status.save()
@@ -2289,6 +2422,61 @@ def wait_for(run_dir: str, timeout: float, interval: float = 15.0) -> dict[str, 
         _SHUTDOWN.wait(min(interval, max(0.0, deadline - time.monotonic())))
 
 
+def _cleanup_notes(cleanup: dict[str, Any]) -> list[str]:
+    """Report notes for `remove_leftover_sandboxes`'s result; none when nothing was left."""
+    notes = []
+    if cleanup.get("removed"):
+        notes.append(f"Removed {len(cleanup['removed'])} sandbox container set(s) left running by killed evals: {', '.join(cleanup['removed'])}.")
+    if cleanup.get("failed"):
+        notes.append(f"Could not remove {len(cleanup['failed'])} leftover sandbox container set(s): {', '.join(cleanup['failed'])}; they are still running.")
+    if cleanup.get("skipped"):
+        notes.append(f"Leftover sandbox check skipped: {cleanup['skipped']}.")
+    return notes
+
+
+def stop_run(run_dir: str, timeout: float = 300.0, docker: Any = None) -> dict[str, Any]:
+    """Stop a run cleanly: its evals get to remove their own containers first.
+
+    Signals the worker, which asks each running eval to cancel (SIGINT, the
+    signal Inspect cleans up on), waits for the run to reach a terminal state,
+    then removes any of this experiment's containers still left. Killing the
+    processes directly instead leaves every sandbox running.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    timeout : float
+        Seconds to wait for the worker to finish stopping.
+    docker : Callable
+        Runs a docker command; None for ``_docker``. Tests pass a stand-in.
+
+    Returns
+    -------
+    dict
+        The run's status data, with ``sandbox_cleanup`` filled in.
+    """
+    data = Status.load(run_dir).data
+    if data.get("state") not in TERMINAL_STATES and _worker_alive(data):
+        try:
+            os.kill(int(_worker_pid(data)), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        data = wait_for(run_dir, timeout, interval=5.0)
+
+    # The worker cleans up as it exits; this catches a worker that was killed
+    # or never got that far. Containers already removed are simply not found.
+    if data.get("state") in TERMINAL_STATES or not _worker_alive(data):
+        status = Status.load(run_dir)
+        status.data["sandbox_cleanup"] = remove_leftover_sandboxes(status.data["experiment_dir"], run_dir, docker)
+        if status.data.get("state") not in TERMINAL_STATES:
+            status.data["state"] = "interrupted"
+            status.data["finished_at"] = _now()
+        status.save()
+        data = status.data
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Draft report in the contract's section shape
 # ---------------------------------------------------------------------------
@@ -2579,6 +2767,7 @@ def render_report(data: dict[str, Any]) -> str:
     out.append("")
     notes = list(data.get("notes") or [])
     notes.extend(data.get("errors") or [])
+    notes.extend(_cleanup_notes(data.get("sandbox_cleanup") or {}))
     notes.append(f"Run directory: `{data.get('run_dir')}` (status file, plan, worker log; raw eval output is quarantined under `private/` and is score-bearing — do not read it).")
     for n in notes:
         out.append(f"- {n}")
@@ -2618,6 +2807,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_report = sub.add_parser("report", help="render the draft report from the status file")
     p_report.add_argument("run_dir")
+
+    p_stop = sub.add_parser("stop", help="stop a run cleanly, removing the sandbox containers it leaves")
+    p_stop.add_argument("run_dir")
+    p_stop.add_argument("--timeout", type=float, default=300.0, help="seconds to wait for the evals to stop (default 300)")
 
     p_worker = sub.add_parser("_worker", help=argparse.SUPPRESS)
     p_worker.add_argument("run_dir")
@@ -2671,6 +2864,17 @@ def main(argv: list[str] | None = None) -> int:
             f.write(text)
         print(text)
         return 0
+
+    if args.cmd == "stop":
+        data = stop_run(args.run_dir, args.timeout)
+        cleanup = data.get("sandbox_cleanup") or {}
+        print(f"state: {data.get('state')}")
+        print(f"leftover sandboxes removed: {', '.join(cleanup.get('removed') or []) or 'none'}")
+        if cleanup.get("failed"):
+            print(f"could not remove: {', '.join(cleanup['failed'])}")
+        if cleanup.get("skipped"):
+            print(f"cleanup skipped: {cleanup['skipped']}")
+        return 0 if data.get("state") in TERMINAL_STATES else 3
 
     if args.cmd == "_worker":
         return run_worker(args.run_dir)

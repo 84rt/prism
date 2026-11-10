@@ -594,7 +594,7 @@ Round size: <arms> arms × <n> = <episodes> episodes; projected <hours> h at <co
 
 ## Relaunch, in order
 <paste `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished` — one ready-to-run `launch` command per unfinished invocation, each pointing at its persisted request under requests/; change only `subagent_route`/`subagent_model` in a copy if a route substitution is recorded>
-- An Executor cut off mid-batch: relaunch with a request restricted to the pairs not completed (read them from `execute_evals.py status <run_dir>`, which is score-free); never re-run a completed arm. A pair that completed with `[credentials]`-tagged sample errors counts as not completed — its capped samples are not data — and is re-run whole.
+- An Executor cut off mid-batch: relaunch with a request restricted to the pairs not completed (read them from `execute_evals.py status <run_dir>`, which is score-free); never re-run a completed arm. To stop a batch on purpose, run `uv run python scripts/execute_evals.py stop <run_dir>` rather than killing its processes, which leaves its sandbox containers running. A pair that completed with `[credentials]`-tagged sample errors counts as not completed — its capped samples are not data — and is re-run whole.
 
 ## Executed but ungraded
 | Round | Log directory | Pre-registration table (INVESTIGATION-LOG.md lines) | Table sha256 |

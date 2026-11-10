@@ -698,7 +698,7 @@ Written at the investigation root beside the log when the investigation is suspe
 
 ## Relaunch, in order
 <paste `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished` — one ready-to-run `launch` command per unfinished invocation, each pointing at its persisted request under requests/>
-- An Executor cut off mid-batch: relaunch with a request restricted to the pairs not completed (from `execute_evals.py status <run_dir>`, score-free); never re-run a completed pair. A pair that completed with `[credentials]`-tagged sample errors counts as not completed — its capped samples are not data — and is re-run whole.
+- An Executor cut off mid-batch: relaunch with a request restricted to the pairs not completed (from `execute_evals.py status <run_dir>`, score-free); never re-run a completed pair. To stop a batch on purpose, run `uv run python scripts/execute_evals.py stop <run_dir>` rather than killing its processes, which leaves its sandbox containers running. A pair that completed with `[credentials]`-tagged sample errors counts as not completed — its capped samples are not data — and is re-run whole.
 
 ## Executed but unanalysed
 | Iteration | Log directory | Pre-registered Predictions (INVESTIGATION-LOG.md lines) | Table sha256 |

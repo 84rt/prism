@@ -18,6 +18,7 @@ uv run python scripts/execute_evals.py run <request_file>                 # prin
 uv run python scripts/execute_evals.py wait <run_dir> --timeout 3300      # exit 0 = terminal, 3 = still running
 uv run python scripts/execute_evals.py status <run_dir>                   # score-free snapshot
 uv run python scripts/execute_evals.py report <run_dir>                   # draft report in the contract's shape
+uv run python scripts/execute_evals.py stop <run_dir>                     # stop cleanly; never kill its processes
 ```
 
 Optional `run` flags — use only in the situations named in the protocol below: `--max-parallel N --max-connections M --rationale "..."` (raise the ceiling; refused without a rationale, which is recorded verbatim in the report), `--only <pair_id,...>` (re-run a subset), `--quarantine-existing-logs` (move a pair's stale `.eval` files aside instead of refusing to run).

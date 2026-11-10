@@ -16,8 +16,16 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 import check_report as cr
 import execute_evals as ee
+
+
+@pytest.fixture(autouse=True)
+def no_docker(monkeypatch):
+    """Runs end with a leftover-container check; here Docker reports no containers."""
+    monkeypatch.setattr(ee, "_docker", lambda args, timeout=0: "")
 from conftest import (
     LEAK_TOKENS,
     gate_prefix,

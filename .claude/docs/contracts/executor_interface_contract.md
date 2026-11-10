@@ -136,7 +136,10 @@ uv run python scripts/execute_evals.py run <request.json>              # validat
 uv run python scripts/execute_evals.py wait <run_dir> --timeout 3300   # block until terminal (exit 0) or timeout (exit 3)
 uv run python scripts/execute_evals.py status <run_dir>                # score-free status snapshot
 uv run python scripts/execute_evals.py report <run_dir>                # draft report in this contract's shape
+uv run python scripts/execute_evals.py stop <run_dir>                  # stop the run cleanly (see below)
 ```
+
+**Stopping a run.** Use `stop`, never a signal sent to the runner's processes. `stop` asks each running eval to cancel, the signal on which Inspect removes its sandbox containers, waits for the run to end, then removes any containers still left from this experiment directory; killing the processes directly leaves every sandbox running. The runner makes the same leftover check whenever a run ends, and its report's Additional Notes name any containers it removed or could not remove.
 
 The run directory is `<experiment_dir>/artefacts/executor/runs/<experiment_name>_<timestamp>/`. It holds `request.json`, `plan.json` (the rendered commands), `status.json`, `worker.log`, `draft_report.md`, and a `private/` subtree with each command's raw stdout/stderr and the quarantined preflight logs. **`private/` is score-bearing** (Inspect's plain display prints running metrics) and is never read by the Executor or the orchestrator.
 
