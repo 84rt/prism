@@ -79,14 +79,17 @@ signal.signal(signal.SIGTERM, _handle_signal)
 # ---------------------------------------------------------------------------
 
 # Default concurrency ceiling. Sized for a shared host running one Docker
-# sandbox per sample: one eval subprocess at a time, four concurrent model
-# connections inside it. These are the values R06 recovered by hand after an
-# unconstrained Executor opened 24 containers on a 10-core box. A request may
+# sandbox per sample: samples in flight (and so sandboxes) is the product,
+# 2 × 5 = 10. An unconstrained Executor once opened 24 containers on a 10-core,
+# 8 GB box and nearly ran it out of memory; a sandbagging rerun then held 10
+# in flight on a 10-core, 16 GB box for 28 hours with no errors (each idle
+# sandbox used about 2 MB). Two subprocesses rather than one at ten keeps
+# slots busy while a pair's slowest last samples finish. A request may
 # override them via `overrides`; the Executor agent may raise them only via
 # `--max-parallel` / `--max-connections` with a `--rationale`, which the draft
 # report records verbatim.
-DEFAULT_MAX_PARALLEL = 1
-DEFAULT_MAX_CONNECTIONS = 4
+DEFAULT_MAX_PARALLEL = 2
+DEFAULT_MAX_CONNECTIONS = 5
 
 # Per-command wall-clock limit. Generous: a 30-epoch sandboxed eval with a
 # 600 s task limit at four connections is over an hour, and the batch runs
@@ -1603,7 +1606,9 @@ def _usage_recorder(status: Status, pair: str) -> Any:
     """
     def record(kind: str, payload: Any) -> None:
         if kind == "result" and payload.model_usage:
-            status.pair(pair).setdefault("usage_attempts", []).append(payload.model_usage)
+            # Preflight probes run side by side, so this fires from worker threads.
+            with status.lock:
+                status.pair(pair).setdefault("usage_attempts", []).append(payload.model_usage)
 
     return record
 
@@ -1623,7 +1628,7 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
     pairs : list[PairPlan]
         Pairs to probe.
     config : ExecutionConfig
-        Retry/timeout parameters (concurrency is forced to 1).
+        Retry/timeout parameters (each probe runs as its own one-command batch).
     run_dir : str
         The run directory.
 
@@ -1642,20 +1647,55 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
         retry_backoff_seconds=config.retry_backoff_seconds,
         command_timeout=config.command_timeout,
     )
+    exp_dir = status.data["experiment_dir"]
+
+    def run_probe(p: PairPlan, kind: str) -> EvalResult | None:
+        """Run one pair's probe (``kind="preflight"``) or retest; None once shutting down."""
+        if _SHUTDOWN.is_set():
+            return None
+        with status.lock:
+            status.pair(p.id)["state"] = "preflight"
+            status.save()
+        shutil.rmtree(p.preflight_log_dir, ignore_errors=True)
+        command = p.preflight_command if kind == "preflight" else p.retest_command
+        cmd = CommandSpec(id=f"{kind}_{p.id}", command=command, log_dir=p.preflight_log_dir, cwd=p.cwd or exp_dir)
+        # Every probe/retest attempt spends tokens too; keep them for spend.py.
+        return execute([cmd], probe_config, capture_dir=capture, on_event=_usage_recorder(status, p.id)).results[0]
+
+    # --- Probes and retests, side by side ----------------------------------
+    # Run as many probes at once as the batch keeps samples in flight
+    # (max_parallel × max_connections): a probe is one sample, so preflight
+    # never holds more sandboxes than the main run will. One at a time, a
+    # round's eleven probes once took 75 minutes. A retest is three samples,
+    # so retests run a third as wide, after every probe has finished.
+    conc = status.data["concurrency"]
+    in_flight = max(1, conc["max_parallel"] * conc["max_connections"])
+    with ThreadPoolExecutor(max_workers=min(in_flight, max(1, len(pairs)))) as pool:
+        probes = dict(zip([p.id for p in pairs], pool.map(lambda p: run_probe(p, "preflight"), pairs)))
+
+    # Read each successful probe's log now: a retest overwrites it.
+    shapes: dict[str, dict[str, Any] | Exception | None] = {}
+    for p in pairs:
+        r = probes[p.id]
+        if r is not None and r.status == "success" and r.log_path:
+            try:
+                shapes[p.id] = sample_shape(r.log_path)
+            except Exception as e:
+                shapes[p.id] = e
+
+    # A sample error on the single probe earns the --limit 3 retest.
+    to_retest = [p for p in pairs if isinstance(shapes.get(p.id), dict) and shapes[p.id]["sample_errors"] > 0]
+    with ThreadPoolExecutor(max_workers=max(1, min(in_flight // 3, len(to_retest)))) as pool:
+        retests = dict(zip([p.id for p in to_retest], pool.map(lambda p: run_probe(p, "retest"), to_retest)))
+
+    # --- Outcomes, recorded in the pairs' original order --------------------
     surviving: list[PairPlan] = []
     durations: list[float] = []
 
     for p in pairs:
-        if _SHUTDOWN.is_set():
-            break
-        status.pair(p.id)["state"] = "preflight"
-        status.save()
-        shutil.rmtree(p.preflight_log_dir, ignore_errors=True)
-        cmd = CommandSpec(id=f"preflight_{p.id}", command=p.preflight_command, log_dir=p.preflight_log_dir, cwd=p.cwd or status.data["experiment_dir"])
-        # Every probe/retest attempt spends tokens too; keep them for spend.py.
-        record_usage = _usage_recorder(status, p.id)
-        report = execute([cmd], probe_config, capture_dir=capture, on_event=record_usage)
-        r = report.results[0]
+        r = probes[p.id]
+        if r is None or (p.id in retests and retests[p.id] is None):
+            continue  # shutting down before this pair's probe or retest ran
         entry: dict[str, Any] = {
             "outcome": None,
             "process_retries": r.process_retries,
@@ -1667,16 +1707,11 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
             durations.append(float(r.duration_seconds))
 
         if r.status == "success":
-            # Sample error on the single probe → --limit 3 retest.
-            shape = None
-            try:
-                shape = sample_shape(r.log_path) if r.log_path else None
-            except Exception as e:
-                entry["evidence"] = {"note": f"probe log unreadable: {e}"}
-            if shape and shape["sample_errors"] > 0:
-                shutil.rmtree(p.preflight_log_dir, ignore_errors=True)
-                retest_cmd = CommandSpec(id=f"retest_{p.id}", command=p.retest_command, log_dir=p.preflight_log_dir, cwd=p.cwd or status.data["experiment_dir"])
-                rr = execute([retest_cmd], probe_config, capture_dir=capture, on_event=record_usage).results[0]
+            shape = shapes.get(p.id)
+            if isinstance(shape, Exception):
+                entry["evidence"] = {"note": f"probe log unreadable: {shape}"}
+            if p.id in retests:
+                rr = retests[p.id]
                 try:
                     rshape = sample_shape(rr.log_path) if rr.log_path else {"samples": 0, "sample_errors": 0}
                 except Exception:
@@ -2152,7 +2187,7 @@ def render_status(data: dict[str, Any]) -> str:
         Multi-line text. Example::
 
             run: iter_00_20260917T120000Z  state: running  pid: 4242 (alive)
-            concurrency: max_parallel=1 (runner default) max_connections=4 (runner default)
+            concurrency: max_parallel=2 (runner default) max_connections=5 (runner default)
             preflight: done — 2 passed, 0 excluded
             pairs:
               c_0e4d / openai/gpt-5   running   samples -/-   attempts 1

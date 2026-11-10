@@ -12,6 +12,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import check_report as cr
@@ -157,7 +159,7 @@ def test_build_pairs_renders_policy_flags_routing_and_defaults(tmp_path):
     assert "--metadata condition=treatment --metadata model=openrouter/deepseek/deepseek-r1 --metadata route=openrouter:novita" in cmd
     assert "--no-fail-on-error --retry-on-error 3" in cmd
     assert "-T system=alt.txt" in cmd
-    assert "--sample-id blackmail_none-none_replacement --epochs 30 --max-connections 4" in cmd
+    assert f"--sample-id blackmail_none-none_replacement --epochs 30 --max-connections {ee.DEFAULT_MAX_CONNECTIONS}" in cmd
     # JSON (not Python) rendering of the -M object, lowercase false.
     assert "-M 'provider={\"order\": [\"novita\"], \"allow_fallbacks\": false}'" in cmd
     # Pinned sample id: the probe is the pinned invocation without --epochs, no --limit.
@@ -205,8 +207,8 @@ def test_default_ceiling_and_override_sources(tmp_path):
     run_dir, problems = ee.prepare_run(path)
     assert not problems
     c = ee.Status.load(run_dir).data["concurrency"]
-    assert (c["max_parallel"], c["max_parallel_source"]) == (1, "runner default")
-    assert (c["max_connections"], c["max_connections_source"]) == (4, "runner default")
+    assert (c["max_parallel"], c["max_parallel_source"]) == (ee.DEFAULT_MAX_PARALLEL, "runner default")
+    assert (c["max_connections"], c["max_connections_source"]) == (ee.DEFAULT_MAX_CONNECTIONS, "runner default")
 
     path2, _ = make_request(tmp_path / "b", overrides={"max_parallel": 2, "max_connections": 8})
     run_dir2, _ = ee.prepare_run(path2)
@@ -266,6 +268,73 @@ def run_foreground(tmp_path, fake_eval_script, monkeypatch, *, mode="ok", overri
     return run_dir, req, code
 
 
+FOUR_CONDITIONS = {f"c{i}": {"task": "task.py", "args": {}} for i in range(4)}
+
+
+def _spy_on_execute(monkeypatch):
+    """Wrap ``ee.execute`` to record how many probes, and how many retests, ran at once.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Used to swap in the wrapper.
+
+    Returns
+    -------
+    dict[str, int]
+        Peak concurrency per kind, e.g. ``{"preflight": 3, "retest": 1}``, filled as the run goes.
+    """
+    real = ee.execute
+    active = {"preflight": 0, "retest": 0}
+    peak = {"preflight": 0, "retest": 0}
+    lock = threading.Lock()
+
+    def spy(commands, *args, **kwargs):
+        kind = commands[0].id.split("_", 1)[0]
+        if kind not in active:
+            return real(commands, *args, **kwargs)
+        with lock:
+            active[kind] += 1
+            peak[kind] = max(peak[kind], active[kind])
+        time.sleep(0.3)  # long enough for side-by-side probes to overlap
+        try:
+            return real(commands, *args, **kwargs)
+        finally:
+            with lock:
+                active[kind] -= 1
+
+    monkeypatch.setattr(ee, "execute", spy)
+    return peak
+
+
+def test_preflight_probes_run_side_by_side_up_to_the_batch_width(tmp_path, fake_eval_script, monkeypatch):
+    seen = _spy_on_execute(monkeypatch)
+    run_dir, _, code = run_foreground(
+        tmp_path, fake_eval_script, monkeypatch, conditions=FOUR_CONDITIONS,
+        overrides={"max_parallel": 1, "max_connections": 3},
+    )
+    assert code == 0
+    # Three samples in flight → three probes at once, never all four.
+    assert seen == {"preflight": 3, "retest": 0}
+    data = ee.Status.load(run_dir).data
+    assert list(data["preflight"]["pairs"]) == data["pair_order"]
+    assert {e["outcome"] for e in data["preflight"]["pairs"].values()} == {"passed"}
+
+
+def test_errored_probes_are_retested_a_third_as_wide(tmp_path, fake_eval_script, monkeypatch):
+    seen = _spy_on_execute(monkeypatch)
+    run_dir, _, _ = run_foreground(
+        tmp_path, fake_eval_script, monkeypatch, mode="sample_error", conditions=FOUR_CONDITIONS,
+        overrides={"max_parallel": 1, "max_connections": 3},
+    )
+    pf = ee.Status.load(run_dir).data["preflight"]["pairs"]
+    # Every probe errored, so every pair was retested and judged on the retest.
+    assert all(e["retest"] is not None for e in pf.values())
+    assert {e["outcome"] for e in pf.values()} == {"excluded-all-samples-deterministic"}
+    # Retests are three samples each, so at three in flight they run one at a time.
+    assert seen == {"preflight": 3, "retest": 1}
+
+
 def test_foreground_run_with_preflight_is_score_free(tmp_path, fake_eval_script, monkeypatch):
     run_dir, req, code = run_foreground(tmp_path, fake_eval_script, monkeypatch, overrides={"epochs": 2})
     assert code == 0
@@ -318,7 +387,7 @@ def test_draft_report_has_contract_headings_in_order(tmp_path, fake_eval_script,
     assert report.startswith("### Summary")
     assert "Preflight skipped (skip_preflight=true)." in report
     assert "**Zero-sample pairs:** none." in report
-    assert "- **Chosen `max_parallel`**: 1" in report
+    assert f"- **Chosen `max_parallel`**: {ee.DEFAULT_MAX_PARALLEL}" in report
     assert "| baseline | openai/gpt-5 | direct |" in report
     assert "| treatment | openai/gpt-5 | 0 | 0 | 0 |" in report
 

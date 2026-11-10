@@ -49,7 +49,7 @@ The protocol has two phases: **launch** and **report**. Judgement is needed only
 
 ### Raising the concurrency ceiling
 
-The runner's default is `max_parallel: 1`, `max_connections: 4` — sized for a shared host running one Docker sandbox per sample. You may raise it at launch (`run … --max-parallel N --max-connections M --rationale "..."`) only when the request's `overrides` do not set it and you have concrete grounds: an API-only eval (no compose or Docker files next to the task) with several pairs, on a host whose `nproc` and `free -m` you have checked. The rationale you give is printed verbatim in the report. When in doubt, leave the default: a slow, clean completion beats a cascade of resource-contention failures, and the runner already halves concurrency on contention.
+The runner's default is `max_parallel: 2`, `max_connections: 5` — sized for a shared host running one Docker sandbox per sample. You may raise it at launch (`run … --max-parallel N --max-connections M --rationale "..."`) only when the request's `overrides` do not set it and you have concrete grounds: an API-only eval (no compose or Docker files next to the task) with several pairs, on a host whose `nproc` and `free -m` you have checked. The rationale you give is printed verbatim in the report. When in doubt, leave the default: a slow, clean completion beats a cascade of resource-contention failures, and the runner already halves concurrency on contention.
 
 ## Methodological Principles
 

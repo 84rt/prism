@@ -89,7 +89,7 @@ A mapping of execution-parameter overrides. Supported keys:
 
 Unrecognised keys are ignored with a note in **Additional Notes**. Other flags (`--retry-on-error 3`, `--no-fail-on-error`, `--display plain`, and `--with "openai>=…"` on `openrouter/…` models) are applied to every invocation by the runner without being in overrides — these are policy, not configuration.
 
-**The concurrency ceiling is the runner's, not the Executor's.** `max_parallel: 1` / `max_connections: 4` are sized for a shared host running one Docker sandbox per sample (see `inspect_reference.md §Concurrency heuristics`). A caller who knows better sets them in `overrides`. The Executor may raise them only by passing `--max-parallel` / `--max-connections` together with `--rationale` to the runner; the rationale is recorded verbatim in the report's **Concurrency Decision**. Raising them silently is not possible — the runner refuses the flags without a rationale.
+**The concurrency ceiling is the runner's, not the Executor's.** `max_parallel: 2` / `max_connections: 5` are sized for a shared host running one Docker sandbox per sample (see `inspect_reference.md §Concurrency heuristics`). A caller who knows better sets them in `overrides`. The Executor may raise them only by passing `--max-parallel` / `--max-connections` together with `--rationale` to the runner; the rationale is recorded verbatim in the report's **Concurrency Decision**. Raising them silently is not possible — the runner refuses the flags without a rationale.
 
 **`runs_per_condition` has been removed.** It was documented as a key but never implemented — nothing ever multiplied the commands — so a caller setting it believed it had taken effect when it had not. The runner now refuses a request that carries it, naming `epochs` (with `sample_id`) as the repeated-sampling mechanism; see *Resample runs* below for the one case where repeated whole-eval runs would genuinely differ.
 
@@ -262,7 +262,7 @@ These are counts of transcript *shape*, not *quality*. A transcript with assista
 
 ### Concurrency Decision
 
-Structured fields documenting how the full-execution concurrency level was set. The runner fixes it: its default ceiling (`max_parallel: 1`, `max_connections: 4`, sized for a shared host with one sandbox per sample) applies unless the request's `overrides` set it, or the Executor raised it at launch with a recorded rationale (`execute_evals.py run … --max-parallel N --max-connections M --rationale "…"`). The runner then halves `max_parallel` on resource contention; `max_connections` is never changed mid-run.
+Structured fields documenting how the full-execution concurrency level was set. The runner fixes it: its default ceiling (`max_parallel: 2`, `max_connections: 5`, sized for a shared host with one sandbox per sample) applies unless the request's `overrides` set it, or the Executor raised it at launch with a recorded rationale (`execute_evals.py run … --max-parallel N --max-connections M --rationale "…"`). The runner then halves `max_parallel` on resource contention; `max_connections` is never changed mid-run.
 
 - **Chosen `max_parallel`**: integer
 - **Orchestrator override provided**: `yes (<value>)` | `no`

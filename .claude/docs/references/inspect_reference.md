@@ -98,18 +98,20 @@ Inspect has **four** nested concurrency dimensions; understanding them matters w
 |---|---|---|
 | `--max-samples` | Concurrent samples within a single eval | Orchestrator override or inherited default |
 | `--max-tasks` | Concurrent tasks within a single `inspect eval` process | Usually 1 for `eval` (not used here) |
-| `--max-connections` | Concurrent API calls within a single eval | The runner's ceiling (4) unless the request's `overrides` or an Executor CLI override sets it |
-| `--max-sandboxes` | Concurrent sandbox containers per provider (e.g., Docker) | Default: `2 * os.cpu_count()` |
+| `--max-connections` | Concurrent API calls within a single eval | The runner's ceiling (5) unless the request's `overrides` or an Executor CLI override sets it |
+| `--max-sandboxes` | Concurrent sandbox containers per provider (e.g., Docker), **per `inspect eval` process** | Default: `2 * os.cpu_count()` |
 
-The batch runner adds a **fifth** dimension externally: `max_parallel` eval subprocesses (distinct `inspect eval` processes launched by `execute_evals.py`; the runner's ceiling of 1 unless overridden, halved on resource contention). Total load on the machine and on the APIs multiplies across all five.
+The batch runner adds a **fifth** dimension externally: `max_parallel` eval subprocesses (distinct `inspect eval` processes launched by `execute_evals.py`; the runner's ceiling of 2 unless overridden, halved on resource contention). Total load on the machine and on the APIs multiplies across all five.
 
-Sandbox pool is the most common bottleneck: multiple parallel evals all share the same `2 * cpu_count` sandbox slots per provider. If you launch 4 parallel sandbox-based evals with `max_samples=10` each, you are asking for 40 sandboxes from a pool of ~16 on an 8-core machine — contention, timeouts, and cascading failures follow.
+**Samples in flight is the number to budget**: `max_parallel × max_connections` (each process's `max_samples` defaults to its `max_connections`). On a sandboxed eval it is also the number of live containers, because nothing pools sandboxes *across* processes: each `inspect eval` enforces its own `2 * cpu_count` limit, so four parallel evals at `max_samples=10` open 40 containers on any machine that size allows.
 
 ### Concurrency heuristics
 
-- **The runner's ceiling is the default.** `scripts/execute_evals.py` applies `max_parallel: 1` and `max_connections: 4` unless the request's `overrides` set them. These are sized for a shared host running one Docker sandbox per sample: an unconstrained run once opened 24 containers on a 10-core / 8 GB box and drove free memory to ~65 MB. The request may set either key; the Executor may raise them only via `run --max-parallel N --max-connections M --rationale "..."`, and the rationale is recorded verbatim in the Concurrency Decision.
+- **The runner's ceiling is the default.** `scripts/execute_evals.py` applies `max_parallel: 2` and `max_connections: 5` (10 in flight) unless the request's `overrides` set them. These are sized for a shared host running one Docker sandbox per sample: an unconstrained run once opened 24 containers on a 10-core / 8 GB box and drove free memory to ~65 MB, while a sandbagging rerun held 10 in flight on a 10-core / 16 GB box for 28 hours without an error. The request may set either key; the Executor may raise them only via `run --max-parallel N --max-connections M --rationale "..."`, and the rationale is recorded verbatim in the Concurrency Decision.
+- **Split the budget across pairs rather than piling it on one.** At a fixed number in flight, two or more pairs at once keep slots busy while a pair's slowest last samples finish; `max_parallel: 1` with a high `max_connections` idles most of them through every pair's tail.
 - **API-only evals (no sandbox)**: raising `max_parallel` towards the number of condition-model pairs is usually safe; provider rate limits tend to be the binding constraint. Sandbox detection is recorded by the runner from preflight timing (10–30 s per probe suggests sandbox setup; 1–3 s suggests API-only) and from compose/Docker files next to the task.
-- **Sandbox-based evals**: keep the ceiling. Remember the sandbox pool (`--max-sandboxes`, default `2 × cpu_count`) is shared across every parallel eval on the host, including other investigations.
+- **Sandbox-based evals**: keep samples in flight near the host's core count unless free memory during a run shows room. Other investigations' runs on the same host add their own containers.
+- **Preflight runs side by side** at the batch's samples in flight (each probe is one sample), with retests a third as wide; it never holds more sandboxes than the main run.
 - **When in doubt**: run sequentially. A slow complete run beats a fast cascade of resource failures.
 
 ---
