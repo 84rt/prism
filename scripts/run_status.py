@@ -30,8 +30,8 @@ What it reports
   database in WAL mode that can't be read without taking a lock, so it is
   not used.
 - ``steps``: one short line per finished phase or round.
-- ``cost``: total dollars (helpers plus the lead, as `spend.py` reports them)
-  and eval tokens.
+- ``cost``: total dollars as `spend.py` totals them (helpers, the lead, evals
+  and the Analyst's own calls), and the eval tokens already inside that total.
 
 The JSON contract (camelCase keys, null for absent, ``version`` 1) is set by
 the panel: see the note at the top of the session-tracker mod's
@@ -677,8 +677,10 @@ def build_status(inv: str, hint: str | None = None, pipelines: dict[str, Any] | 
     state = run_state(inv)
     helpers = collect_helpers(receipts, spec)
 
-    # ---- Cost: helpers plus lead in dollars; eval usage in tokens ----
-    summary = spend.collect(inv, projects_dir)
+    # ---- Cost: everything in dollars, as spend.py totals it; eval tokens too ----
+    # Never online: the poll runs every 5 seconds, so prices for non-Claude
+    # models come only from the lists an earlier `spend.py` run cached
+    summary = spend.collect(inv, projects_dir, prices=spend.PriceBook(offline=True))
     eval_tokens = sum(int(t.get("total_tokens") or 0) for t in summary["evals"]["tokens_by_model"].values())
     cost: dict[str, Any] = {"usd": round(summary["total_cost_usd"], 2)}
     if eval_tokens:
@@ -732,7 +734,7 @@ def render(status: dict[str, Any]) -> str:
     lines.append(f"helpers: {len(status['helpers'])} launched")
     lines += [f"  {s}" for s in status["steps"]]
     tokens = status["cost"].get("evalTokens")
-    lines.append(f"cost: ${status['cost']['usd']:.2f}" + (f" plus {tokens:,} eval tokens" if tokens else ""))
+    lines.append(f"cost: ${status['cost']['usd']:.2f}" + (f" (including {tokens:,} eval tokens)" if tokens else ""))
     if status["report"]:
         lines.append(f"report: {status['report']}")
     return "\n".join(lines)

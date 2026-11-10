@@ -40,7 +40,8 @@ Usage
 -----
     uv run python scripts/spend.py investigations/<name> [--json] [--offline]
 
-``--offline`` skips OpenRouter's price list, so only Claude models are priced.
+``--offline`` never goes online: Claude models are priced from the table below,
+others from the price lists an earlier total cached (see `PRICE_CACHE_DIR_ENV`).
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 from collections import defaultdict
 from typing import Any, Callable
@@ -134,7 +136,7 @@ def _price_call(model: str, usage: dict[str, Any]) -> float | None:
     float | None
         USD, or None for a model missing from ``CLAUDE_PRICES_PER_MTOK``.
     """
-    prices = CLAUDE_PRICES_PER_MTOK.get(model)
+    prices = CLAUDE_PRICES_PER_MTOK.get(_normalise_id(model))
     if prices is None:
         return None
     inp, out, read = prices
@@ -178,12 +180,95 @@ TOKEN_KINDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1
 
 
 def _fetch_json(url: str) -> Any | None:
-    """GET a public JSON document, or None on any failure (offline, timeout, bad JSON)."""
+    """GET a public JSON document, or None on any failure (offline, timeout, bad JSON).
+
+    Parameters
+    ----------
+    url : str
+        The document's address.
+
+    Returns
+    -------
+    Any | None
+        The parsed JSON.
+    """
     try:
         with urllib.request.urlopen(url, timeout=CATALOGUE_TIMEOUT) as r:
             return json.loads(r.read())
     except Exception:
         return None
+
+
+# Price lists fetched once are kept on disk, so the panel's status poll (which
+# never goes online) and later totals can price from them. Prices change
+# rarely; a day-old list is refetched when the network is allowed.
+PRICE_CACHE_DIR_ENV = "PRISM_PRICE_CACHE_DIR"
+PRICE_CACHE_MAX_AGE = 24 * 3600.0
+
+
+def _price_cache_path(url: str) -> str:
+    """Where the cached copy of one price-list URL lives.
+
+    Parameters
+    ----------
+    url : str
+        The price list's address.
+
+    Returns
+    -------
+    str
+        e.g. ``~/.cache/prism/prices/openrouter.ai_api_v1_models.json``;
+        ``$PRISM_PRICE_CACHE_DIR`` replaces the folder when set.
+    """
+    folder = os.environ.get(PRICE_CACHE_DIR_ENV) or os.path.join(
+        os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"), "prism", "prices"
+    )
+    name = re.sub(r"[^A-Za-z0-9.-]+", "_", url.split("://", 1)[-1])
+    return os.path.join(folder, name + ".json")
+
+
+def _read_price_cache(url: str) -> tuple[Any, float] | None:
+    """The cached copy of a price list and its age in seconds, or None if there is none.
+
+    Parameters
+    ----------
+    url : str
+        The price list's address.
+
+    Returns
+    -------
+    tuple[Any, float] | None
+        ``(parsed JSON, seconds since it was fetched)``.
+    """
+    path = _price_cache_path(url)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data, time.time() - os.path.getmtime(path)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _write_price_cache(url: str, data: Any) -> None:
+    """Keep a freshly fetched price list on disk; a failure to write is ignored.
+
+    Parameters
+    ----------
+    url : str
+        The price list's address.
+    data : Any
+        Its parsed JSON.
+    """
+    path = _price_cache_path(url)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Written beside and renamed, so a reader never sees half a file
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def _normalise_id(model: str) -> str:
@@ -227,7 +312,8 @@ class PriceBook:
         Fetches a URL's JSON, or returns None; ``_fetch_json`` when None.
         Tests pass a stub.
     offline : bool
-        If True, never fetch: only ``CLAUDE_PRICES_PER_MTOK`` prices anything.
+        If True, never fetch: ``CLAUDE_PRICES_PER_MTOK`` and whatever price
+        lists an earlier, online total left in the cache price everything.
     """
 
     def __init__(self, fetch: Callable[[str], Any] | None = None, offline: bool = False):
@@ -237,9 +323,29 @@ class PriceBook:
         self._endpoints: dict[str, list[dict[str, Any]]] = {}
 
     def _get(self, url: str) -> Any | None:
+        """A price list: from the cache while fresh (or whenever offline), else fetched.
+
+        Parameters
+        ----------
+        url : str
+            The price list's address.
+
+        Returns
+        -------
+        Any | None
+            Its parsed JSON; a stale cached copy when a fetch fails; None
+            when neither is to be had.
+        """
+        cached = _read_price_cache(url)
+        if cached is not None and (self._offline or cached[1] < PRICE_CACHE_MAX_AGE):
+            return cached[0]
         if self._offline:
             return None
-        return (self._fetch or _fetch_json)(url)
+        data = (self._fetch or _fetch_json)(url)
+        if data is not None:
+            _write_price_cache(url, data)
+            return data
+        return cached[0] if cached is not None else None
 
     def claude(self, model: str) -> dict[str, float] | None:
         """Prism's own table, keyed by the bare Claude id."""
@@ -433,8 +539,39 @@ def collect_model_calls(root: str, prices: PriceBook) -> dict[str, Any]:
     }
 
 
-def _read_lead_session(path: str, investigation: str) -> dict[str, Any] | None:
+def _investigation_written(entry: dict[str, Any]) -> str | None:
+    """The investigation one session line wrote a file into, if any.
+
+    Parameters
+    ----------
+    entry : dict
+        One parsed line of a Claude Code session file.
+
+    Returns
+    -------
+    str | None
+        The investigation's folder name, e.g. ``"sandbagging_r2"`` for an Edit
+        of ``…/investigations/sandbagging_r2/INVESTIGATION-LOG.md``; None for a
+        line that wrote nothing there. Lines from Agent SDK sessions (a
+        helper's, never the lead's) are ignored.
+    """
+    if entry.get("type") != "assistant" or str(entry.get("entrypoint") or "").startswith("sdk"):
+        return None
+    written = None
+    for block in (entry.get("message") or {}).get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") in _WRITE_TOOLS:
+            m = re.search(r"investigations/([^/]+)/", str((block.get("input") or {}).get("file_path") or ""))
+            if m:
+                written = m.group(1)
+    return written
+
+
+def _read_lead_session(path: str, investigation: str, seen: set[str] | None = None) -> dict[str, Any] | None:
     """Total one session file's usage if it is this investigation's lead.
+
+    A session that worked on several investigations is split between them:
+    each call goes to the investigation most recently written into, and the
+    calls before its first write to the first one it wrote into.
 
     Parameters
     ----------
@@ -442,6 +579,10 @@ def _read_lead_session(path: str, investigation: str) -> dict[str, Any] | None:
         A Claude Code ``<session>.jsonl`` file.
     investigation : str
         Absolute path of the investigation directory.
+    seen : set[str] | None
+        Message ids already counted from other files, updated in place. A
+        resumed session's new file repeats the earlier messages with their
+        ids, so each call is counted once across all of the files.
 
     Returns
     -------
@@ -458,7 +599,7 @@ def _read_lead_session(path: str, investigation: str) -> dict[str, Any] | None:
         return None
 
     # ---------- Is this the investigation's lead? ----------
-    rel = "investigations/" + os.path.basename(investigation) + "/"
+    name = os.path.basename(investigation)
     is_lead_skill = any(m in line for line in lines for m in _LEAD_SKILL_MARKERS)
     if not is_lead_skill:
         return None
@@ -468,26 +609,32 @@ def _read_lead_session(path: str, investigation: str) -> dict[str, Any] | None:
             entries.append(json.loads(line))
         except json.JSONDecodeError:
             continue
-    wrote_here = False
-    for e in entries:
-        if e.get("type") != "assistant" or e.get("entrypoint") not in (None, "cli"):
-            continue
-        for block in (e.get("message") or {}).get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") in _WRITE_TOOLS:
-                target = str((block.get("input") or {}).get("file_path") or "")
-                if target.startswith(investigation + "/") or rel in target:
-                    wrote_here = True
-    if not wrote_here:
-        return None
 
-    # ---------- Sum each model call once ----------
+    # ---------- Which investigation each call worked for ----------
     # Claude Code writes one line per content block, each carrying the whole
     # message's usage, so calls are keyed by message id
-    calls: dict[str, tuple[str, dict[str, Any]]] = {}
+    calls: dict[str, tuple[str, dict[str, Any], str | None]] = {}
+    current = None
+    first_written = None
     for e in entries:
+        current = _investigation_written(e) or current
+        first_written = first_written or current
         msg = e.get("message") or {}
-        if e.get("type") == "assistant" and msg.get("usage") and msg.get("id"):
-            calls[msg["id"]] = (msg.get("model") or "?", msg["usage"])
+        # Claude Code's own placeholder replies (an error, an interrupted
+        # turn) carry a usage block but were never an API call
+        if e.get("type") == "assistant" and msg.get("usage") and msg.get("id") and msg.get("model") != "<synthetic>":
+            calls[msg["id"]] = (msg.get("model") or "?", msg["usage"], current)
+    if first_written is None:
+        return None
+    calls = {
+        mid: (model, usage)
+        for mid, (model, usage, inv) in calls.items()
+        if (inv or first_written) == name and (seen is None or mid not in seen)
+    }
+    if not calls:
+        return None
+    if seen is not None:
+        seen.update(calls)
 
     tokens: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     cost = 0.0
@@ -533,12 +680,16 @@ def collect_lead(root: str, projects_dir: str | None = None) -> dict[str, Any]:
     repo = os.path.dirname(os.path.dirname(investigation))
     folder = os.path.join(projects_dir or default_projects_dir(), _project_slug(repo))
     sessions = []
-    for path in sorted(glob.glob(os.path.join(folder, "*.jsonl"))):
-        s = _read_lead_session(path, investigation)
+    seen: set[str] = set()
+    # Oldest first, so a resumed session's repeated calls stay with the file
+    # that first made them
+    for path in sorted(glob.glob(os.path.join(folder, "*.jsonl")), key=lambda p: (os.path.getmtime(p), p)):
+        s = _read_lead_session(path, investigation, seen)
         if s is not None:
             sessions.append(s)
     total = sum(s["cost_usd"] for s in sessions)
-    unpriced = sorted({m for s in sessions for m in s["tokens_by_model"] if m not in CLAUDE_PRICES_PER_MTOK})
+    unpriced = sorted({m for s in sessions for m in s["tokens_by_model"]
+                       if _normalise_id(m) not in CLAUDE_PRICES_PER_MTOK})
     return {"total_cost_usd": round(total, 4), "sessions": sessions, "unpriced_models": unpriced}
 
 
@@ -698,7 +849,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Total an investigation's spend: sub-agents, lead, evals and the Analyst's scans.")
     parser.add_argument("investigation", help="investigations/<name> directory")
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--offline", action="store_true", help="skip OpenRouter's price list; only Claude models are priced")
+    parser.add_argument("--offline", action="store_true", help="never go online; price non-Claude models from cached price lists only")
     args = parser.parse_args(argv)
     if not os.path.isdir(args.investigation):
         print(f"not a directory: {args.investigation}", file=sys.stderr)

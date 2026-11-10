@@ -143,6 +143,24 @@ def _no_docker(monkeypatch):
     monkeypatch.setattr(execute_evals, "_docker", lambda args, timeout=0: "")
 
 
+@pytest.fixture(autouse=True)
+def _private_price_cache(tmp_path_factory, monkeypatch):
+    """Give each test an empty price-list cache of its own.
+
+    `spend.py` keeps fetched price lists on disk; without this a test's stub
+    list would land in the user's real cache, and a real cached list would
+    price a test's models.
+
+    Parameters
+    ----------
+    tmp_path_factory : pytest.TempPathFactory
+        Makes the empty folder.
+    monkeypatch : pytest.MonkeyPatch
+        Undoes the change after the test.
+    """
+    monkeypatch.setenv("PRISM_PRICE_CACHE_DIR", str(tmp_path_factory.mktemp("price_cache")))
+
+
 # --- Forensics corpus (container-local; see the module docstring) ---
 
 # A Path, so `CASES_ROOT / "case-…"` works; it also formats cleanly inside

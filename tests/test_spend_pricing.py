@@ -89,6 +89,29 @@ def test_offline_prices_claude_only():
     assert book.for_eval_model("anthropic/claude-opus-5-5", None)["input"] == pytest.approx(4e-6)
 
 
+def test_price_lists_fetched_once_serve_offline_books_and_failed_fetches():
+    slug = "openai/gpt-5.2"
+    fetched = []
+
+    def counting_fetch(url):
+        fetched.append(url)
+        return stub_fetch(url)
+
+    # An online book fetches the list and keeps it on disk
+    assert spend.PriceBook(fetch=counting_fetch).catalogue(slug)["input"] == pytest.approx(2e-6)
+    assert len(fetched) == 1
+    # A second book within the day reads the copy instead of fetching
+    assert spend.PriceBook(fetch=counting_fetch).catalogue(slug) is not None
+    assert len(fetched) == 1
+    # The panel's offline book prices from the copy and never fetches
+    assert spend.PriceBook(fetch=counting_fetch, offline=True).catalogue(slug) is not None
+    assert len(fetched) == 1
+    # Once the copy is a day old a fetch is tried; if it fails the old copy still serves
+    path = spend._price_cache_path(spend.OPENROUTER_MODELS_URL)
+    os.utime(path, (1, 1))
+    assert spend.PriceBook(fetch=lambda url: None).catalogue(slug) is not None
+
+
 def test_usage_shapes_count_cached_tokens_once():
     """OpenAI shapes include cached tokens in the input total; Anthropic's does not."""
     chat = {"prompt_tokens": 1000, "completion_tokens": 50, "prompt_tokens_details": {"cached_tokens": 600}}

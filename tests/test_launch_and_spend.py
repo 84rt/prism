@@ -412,8 +412,70 @@ def _session_line(**fields) -> str:
     return json.dumps(fields) + "\n"
 
 
-def _assistant(msg_id, model, usage, content=()):
-    return _session_line(type="assistant", entrypoint="cli", message={"id": msg_id, "model": model, "usage": usage, "content": list(content)})
+def _assistant(msg_id, model, usage, content=(), entrypoint="cli"):
+    return _session_line(type="assistant", entrypoint=entrypoint, message={"id": msg_id, "model": model, "usage": usage, "content": list(content)})
+
+
+def _lead_folder(tmp_path):
+    """A repo with two investigations and the Claude Code project folder its sessions go in."""
+    repo = tmp_path / "repo"
+    for name in ("demo", "other"):
+        (repo / "investigations" / name).mkdir(parents=True)
+    folder = tmp_path / "projects" / spend._project_slug(str(repo))
+    folder.mkdir(parents=True)
+    return repo / "investigations", folder
+
+
+SKILL = _session_line(type="user", message={"content": "<command-name>/diagnose</command-name>"})
+# Opus 5.5 at $4 per million input tokens: each call costs $4
+ONE_DOLLAR_FOUR = {"input_tokens": 1_000_000}
+
+
+def _write_into(path):
+    return {"type": "tool_use", "name": "Write", "input": {"file_path": str(path)}}
+
+
+def test_a_resumed_lead_session_is_counted_once(tmp_path, no_price_list):
+    invs, folder = _lead_folder(tmp_path)
+    first = SKILL + _assistant("m1", "claude-opus-5-5", ONE_DOLLAR_FOUR, [_write_into(invs / "demo" / "LOG.md")])
+    (folder / "a.jsonl").write_text(first)
+    # The resumed session's file repeats m1, then adds m2
+    (folder / "b.jsonl").write_text(first + _assistant("m2", "claude-opus-5-5", ONE_DOLLAR_FOUR))
+    os.utime(folder / "a.jsonl", (1, 1))
+    lead = spend.collect_lead(str(invs / "demo"), str(tmp_path / "projects"))
+    assert lead["total_cost_usd"] == 8.0
+    assert [(s["session"], s["calls"]) for s in lead["sessions"]] == [("a", 1), ("b", 1)]
+
+
+def test_a_lead_session_on_two_investigations_is_split_between_them(tmp_path, no_price_list):
+    invs, folder = _lead_folder(tmp_path)
+    (folder / "s.jsonl").write_text(
+        SKILL
+        # Scoping before the first write goes to the first investigation written into
+        + _assistant("m1", "claude-opus-5-5", ONE_DOLLAR_FOUR)
+        + _assistant("m2", "claude-opus-5-5", ONE_DOLLAR_FOUR, [_write_into(invs / "demo" / "LOG.md")])
+        + _assistant("m3", "claude-opus-5-5", ONE_DOLLAR_FOUR, [_write_into(invs / "other" / "LOG.md")])
+        + _assistant("m4", "claude-opus-5-5", ONE_DOLLAR_FOUR)
+    )
+    projects = str(tmp_path / "projects")
+    assert spend.collect_lead(str(invs / "demo"), projects)["total_cost_usd"] == 8.0
+    assert spend.collect_lead(str(invs / "other"), projects)["total_cost_usd"] == 8.0
+
+
+def test_a_lead_run_from_an_editor_counts_and_placeholders_do_not(tmp_path, no_price_list):
+    invs, folder = _lead_folder(tmp_path)
+    (folder / "ide.jsonl").write_text(
+        SKILL
+        + _assistant("m1", "claude-opus-5-5-20261101", ONE_DOLLAR_FOUR, [_write_into(invs / "demo" / "LOG.md")], entrypoint="claude-vscode")
+        # Claude Code's own stand-in reply after an error: never an API call
+        + _assistant("m2", "<synthetic>", {"input_tokens": 0, "output_tokens": 0}, entrypoint="claude-vscode")
+    )
+    # A helper's Agent SDK session that wrote here is still not the lead
+    (folder / "helper.jsonl").write_text(SKILL + _assistant("h1", "claude-opus-5-5", ONE_DOLLAR_FOUR, [_write_into(invs / "demo" / "x.md")], entrypoint="sdk-py"))
+    lead = spend.collect_lead(str(invs / "demo"), str(tmp_path / "projects"))
+    assert [s["session"] for s in lead["sessions"]] == ["ide"]
+    assert lead["total_cost_usd"] == 4.0
+    assert lead["unpriced_models"] == []
 
 
 def test_spend_prices_the_lead_session_that_wrote_into_the_investigation(tmp_path, no_price_list):
