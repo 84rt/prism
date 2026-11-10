@@ -232,9 +232,11 @@ The request and report formats for the Executor are defined in `executor_interfa
 
    **Redesign before launching, not after,** when either number says the iteration cannot be informative. If every row the hypothesis turns on has both arms forecast at the floor or ceiling (both intervals inside 0–20% or 80–100%), push the behaviour toward headroom, add a model known to show it, or switch eval. If a row's smallest detectable effect is larger than any plausible effect, shrink the design (fewer conditions, more n each) or grow n.
 
-4. **Launch the Experiment Executor sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) with `--tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts`, and wait for it with a background `wait`. The Executor drives a detached batch runner and reports only when the batch is terminal, so expect it to run as long as the evals do — hours for sandboxed evals.
+4. **Size the batch before launching.** Count the episodes it will run — conditions × models × samples × epochs — then project its hours (the last batch's per-pair Duration from its Executor report, or the Headroom Survey's run, scaled by episodes and by `max_parallel`) and its dollars (episodes × the measured per-episode cost, plus the iteration's sub-agent invocations). Write the three numbers into the Pre-registered Predictions block. If they exceed what the agreed spend and any deadline leave for this iteration, or overshoot the size you projected when deciding on the iteration, shrink the design before launching or ask the user. A batch whose size was never checked against its budget is not launched.
 
-5. **Read the Executor's report** at the launcher's per-invocation path. Read the **Zero-sample pairs** line first — a pair that completed zero samples is an execution defect, never a rate.
+5. **Launch the Experiment Executor sub-agent** through the detached launcher (`subagent_invocation.md §General Pattern`) with `--tag <iteration_name> --artefacts-dir <iteration_dir>/artefacts`, and wait for it with a background `wait`. The Executor drives a detached batch runner and reports only when the batch is terminal, so expect it to run as long as the evals do — hours for sandboxed evals.
+
+6. **Read the Executor's report** at the launcher's per-invocation path. Read the **Zero-sample pairs** line first — a pair that completed zero samples is an execution defect, never a rate.
 
 **What can go wrong:**
 - A task file path in `conditions` does not resolve inside the experiment directory. Double-check paths before launching.
@@ -614,6 +616,8 @@ Research scope unchanged since iteration 1.
 | Condition (vs control) | Predicted direction | Forecast: control → condition | Smallest detectable effect at planned n | What each outcome would mean |
 |---|---|---|---|---|
 | <condition> | ↑ / ↓ / ↔ | <≈ r (lo–hi) → ≈ r (lo–hi)> | <±pp> | <one line> |
+
+Batch size: <conditions × models × n × epochs> = <episodes> episodes; projected <hours> h at `max_parallel` <k>, <$> — within <what the agreed spend and deadline leave>.
 
 - What a well-read safety researcher would expect: <one line>
 - Redesign gate: <passed — rows with headroom and resolvable n | redesigned because …>
