@@ -28,3 +28,11 @@ The runner loads no settings files (`setting_sources=[]`: no `CLAUDE.md`, no aut
 - `main.py`'s `required_fields` is unchanged (`topic`, `transcript_source`). `agent.py` raises on a malformed `construal_checks` (both fields, non-list, empty property, duplicate ids), and on the retired single-string `manipulation_check` field, when the prompt is built rather than in the CLI's input validation.
 - `agent.py` renders the construal checks as their own `## Construal Checks` request section with the no-verdict rule attached, assigns `K<n>` to any check sent without an id, and appends a `## Work Order` section to every forensic request restating the addendum's order.
 - `execution_notes` is rendered under its own `## Execution Notes` heading with a data-quality-only rule.
+
+## Notes moved out of the Orchestrator's manual
+
+Implementation detail and future work that `.claude/docs/investigator/orchestrator_responsibilities.md` used to carry; the Orchestrator does not need it to run an investigation.
+
+- **`execution_notes` in the base pipeline.** `agent.py` renders it under its own `## Execution Notes` heading with a rule that it is data-quality context, never hypothesis context — in Orchestrator mode as in forensic mode.
+- **The score blackout.** Beyond the settings deny on the batch runner's `private/` directory, the blackout is behavioural: the final `.eval`s live in the log directories outside `private/` and no lead-side hook gates them by time. A time-gated hook is future work.
+- **`scripts/spend.py` under-counts.** Eval usage is reported in tokens, not dollars, and the Analyst's own scanner and validator calls are not captured. Dollar pricing and scanner capture are future work.
