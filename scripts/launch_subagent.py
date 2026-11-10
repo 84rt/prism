@@ -672,9 +672,10 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"status": "error", "errors": [str(e)]}))
             return 1
         # The lead waits in the background (see subagent_invocation.md
-        # §General Pattern), so the hint carries the long, cache-sparing timeout
+        # §General Pattern), so the hint carries the long, cache-sparing
+        # timeout; `next` stays a plain command so it can be run as given
         next_cmd = f"uv run python scripts/launch_subagent.py wait {receipt['receipt']} --timeout 3300"
-        print(json.dumps({**receipt, "status": "launched", "next": f"{next_cmd}  (run_in_background: true)"}, indent=2))
+        print(json.dumps({**receipt, "status": "launched", "next": next_cmd, "next_run_in_background": True}, indent=2))
         return 0
     if args.cmd == "status":
         r = load_receipt(args.receipt)
