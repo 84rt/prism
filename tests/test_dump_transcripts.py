@@ -7,7 +7,8 @@ dirs and are skipped when that corpus is not present (it is container-local).
 Run with the self-contained recipe from the fix briefs' Shared Preamble:
 
     uv run --with "inspect_ai==0.3.263" --with "inspect-scout==0.5.2" \
-        --with claude-agent-sdk==0.2.165 --with python-dotenv --with pytest pytest tests/
+        --with claude-agent-sdk==0.2.165 --with agent-client-protocol==0.12.1 \
+        --with python-dotenv --with pytest pytest tests/
 """
 
 from __future__ import annotations

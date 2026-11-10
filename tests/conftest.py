@@ -4,7 +4,12 @@ The tests are self-contained: they run with the pinned versions the six
 forensics runs used and never touch the case directories' venvs. Run with::
 
     uv run --with "inspect_ai==0.3.263" --with "inspect-scout==0.5.2" \
-        --with claude-agent-sdk==0.2.165 --with python-dotenv --with pytest pytest tests/
+        --with claude-agent-sdk==0.2.165 --with agent-client-protocol==0.12.1 \
+        --with python-dotenv --with pytest pytest tests/
+
+`agent-client-protocol` is pinned because Inspect imports it without an upper
+bound and its 1.0 release removed `acp.helpers`, so a fresh resolve fails at
+collection; 0.12.1 is what the demo folders' lockfiles hold.
 
 The scaffold has no package install, so the repo root (for `subagents.*`) and
 `scripts/` are put on `sys.path` here. Regression tests over the persisted
