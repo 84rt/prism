@@ -57,7 +57,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,12 +86,34 @@ signal.signal(signal.SIGTERM, _handle_signal)
 # 8 GB box and nearly ran it out of memory; a sandbagging rerun then held 10
 # in flight on a 10-core, 16 GB box for 28 hours with no errors (each idle
 # sandbox used about 2 MB). Two subprocesses rather than one at ten keeps
-# slots busy while a pair's slowest last samples finish. A request may
-# override them via `overrides`; the Executor agent may raise them only via
-# `--max-parallel` / `--max-connections` with a `--rationale`, which the draft
-# report records verbatim.
+# slots busy while a pair's slowest last samples finish. These are the
+# starting values: unless a request or the Executor sets either, automatic
+# sizing (below) replaces them once preflight has measured the sandboxes. A
+# request may override them via `overrides`; the Executor agent may raise them
+# only via `--max-parallel` / `--max-connections` with a `--rationale`, which
+# the draft report records verbatim.
 DEFAULT_MAX_PARALLEL = 2
 DEFAULT_MAX_CONNECTIONS = 5
+
+# Automatic sizing. Samples in flight = the smallest of: the share of free
+# memory it may plan to use over the heaviest sandbox's peak, a few sandboxes
+# per core, and a hard cap; split evenly with other live runs on the machine
+# and re-asked before every condition starts. Measured on a 10-core / 16 GB
+# box: the sandbagging eval at 20 in flight held free memory at ~9.3 GB.
+AUTO_MEMORY_SHARE = 0.5  # the other half is headroom, which also absorbs a newcomer's overlap
+AUTO_PER_CORE = 3  # busy sandboxes compete for the processor
+AUTO_MAX_IN_FLIGHT = 40  # provider limits above ~10 at once are untested
+AUTO_MIN_CONTAINER_MB = 100  # idle sandboxes read ~2 MB; this covers the eval process's share
+AUTO_MIN_ALONE = DEFAULT_MAX_PARALLEL * DEFAULT_MAX_CONNECTIONS  # never below the old default alone
+AUTO_MIN_SHARED = 4  # a run sharing the machine still makes progress
+AUTO_PER_CONDITION = 10  # samples per condition process when splitting across conditions
+MEASURE_INTERVAL = 10  # seconds between sandbox memory samples during preflight
+RUN_REGISTRY_ENV = "PRISM_RUN_REGISTRY"  # where live runs register; default ~/.cache/prism/live_runs
+
+# The engine's thread pool only bounds how many commands *could* run; the
+# width chosen per start decides how many do
+EXECUTE_POOL = 64
+EXECUTE_POLL = 5  # seconds between checks for a finished command or a due retry
 
 # Per-command wall-clock limit. Generous: a 30-epoch sandboxed eval with a
 # 600 s task limit at four connections is over an hour, and the batch runs
@@ -923,6 +945,275 @@ def remove_leftover_sandboxes(exp_dir: str, run_dir: str, docker: Any = None) ->
     return result
 
 
+# ---------------------------------------------------------------------------
+# Automatic sizing: how many samples to keep in flight
+# ---------------------------------------------------------------------------
+
+_MEM_UNITS = {"b": 1 / 2**20, "kib": 1 / 1024, "kb": 1 / 1000, "mib": 1, "mb": 1, "gib": 1024, "gb": 1000}
+
+
+def parse_mem_mb(text: str) -> float | None:
+    """The used half of a ``docker stats`` memory reading, in MB.
+
+    Parameters
+    ----------
+    text : str
+        E.g. ``"12.3MiB / 15.6GiB"``.
+
+    Returns
+    -------
+    float | None
+        ``12.3`` for the example; None if it cannot be read.
+    """
+    m = re.match(r"\s*([\d.]+)\s*([A-Za-z]+)", text)
+    if not m or m.group(2).lower() not in _MEM_UNITS:
+        return None
+    return float(m.group(1)) * _MEM_UNITS[m.group(2).lower()]
+
+
+def experiment_sandbox_memory(exp_dir: str, docker: Any = None) -> dict[str, float] | None:
+    """Memory used now by each sandbox container started from inside ``exp_dir``.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    docker : Callable
+        Runs a docker command; None for ``_docker``. Tests pass a stand-in.
+
+    Returns
+    -------
+    dict[str, float] | None
+        Container name → MB, e.g. ``{"inspect-sandbagging-i6tmri7-default-1": 41.2}``;
+        None when docker could not be asked. Other runs' containers are left out.
+    """
+    docker = docker or _docker
+    fmt = "{{.Names}}\t{{.Label \"%s\"}}" % _WORKDIR_LABEL
+    listing = docker(["ps", "--filter", f"label={_PROJECT_LABEL}", "--format", fmt])
+    if listing is None:
+        return None
+    root = os.path.realpath(exp_dir) + os.sep
+    ours = [name for name, _, workdir in (l.partition("\t") for l in listing.splitlines())
+            if workdir and os.path.realpath(workdir).startswith(root)]
+    if not ours:
+        return {}
+    stats = docker(["stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}", *ours])
+    if stats is None:
+        return None
+    memory = {}
+    for line in stats.splitlines():
+        name, _, usage = line.partition("\t")
+        mb = parse_mem_mb(usage)
+        if mb is not None:
+            memory[name] = mb
+    return memory
+
+
+class SandboxSampler:
+    """Sample this experiment's sandbox memory in the background while preflight runs.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    interval : float
+        Seconds between samples.
+    docker : Callable
+        Runs a docker command; None for ``_docker``.
+    """
+
+    def __init__(self, exp_dir: str, interval: float = MEASURE_INTERVAL, docker: Any = None):
+        self.exp_dir, self.interval, self.docker = exp_dir, interval, docker
+        self.peaks: dict[str, float] = {}
+        self.min_free_mb: int | None = None
+        self.docker_ok = True
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _sample(self) -> None:
+        memory = experiment_sandbox_memory(self.exp_dir, self.docker)
+        if memory is None:
+            self.docker_ok = False
+        for name, mb in (memory or {}).items():
+            self.peaks[name] = max(mb, self.peaks.get(name, 0.0))
+        free = _host_resources()["free_mem_mb"]
+        if free is not None:
+            self.min_free_mb = free if self.min_free_mb is None else min(free, self.min_free_mb)
+
+    def _run(self) -> None:
+        while True:
+            self._sample()
+            if self._stop.wait(self.interval):
+                return
+
+    def start(self) -> "SandboxSampler":
+        self._thread.start()
+        return self
+
+    def stop(self) -> dict[str, Any]:
+        """Stop sampling and summarise.
+
+        Returns
+        -------
+        dict
+            ``{"containers_seen": 2, "peak_container_mb": 41.2, "min_free_mb": 9304, "docker": True}``.
+        """
+        self._stop.set()
+        self._thread.join()
+        return {
+            "containers_seen": len(self.peaks),
+            "peak_container_mb": round(max(self.peaks.values()), 1) if self.peaks else None,
+            "min_free_mb": self.min_free_mb,
+            "docker": self.docker_ok,
+        }
+
+
+def machine_capacity(measured: dict[str, Any] | None, nproc: int | None, sandboxed: bool) -> tuple[int, str]:
+    """How many samples this machine can keep in flight, from preflight's measurements.
+
+    Parameters
+    ----------
+    measured : dict | None
+        `SandboxSampler.stop`'s summary; None when preflight did not run.
+    nproc : int | None
+        The machine's core count.
+    sandboxed : bool
+        Whether the eval runs one sandbox per sample.
+
+    Returns
+    -------
+    tuple[int, str]
+        The capacity and how it was reached, e.g.
+        ``(30, "cores: 3 x 10 (memory allows 46; heaviest sandbox 100 MB)")``.
+    """
+    if not sandboxed:
+        return AUTO_MAX_IN_FLIGHT, "no sandboxes: the hard cap"
+    if not measured or not measured.get("containers_seen") or not measured.get("min_free_mb"):
+        return AUTO_MIN_ALONE, "sandboxes not measured: the old default"
+    per_sample = max(measured["peak_container_mb"] or 0.0, AUTO_MIN_CONTAINER_MB)
+    by_memory = int(measured["min_free_mb"] * AUTO_MEMORY_SHARE // per_sample)
+    by_cores = AUTO_PER_CORE * (nproc or 1)
+    limits = {"memory": by_memory, "cores": by_cores, "cap": AUTO_MAX_IN_FLIGHT}
+    binding = min(limits, key=limits.get)
+    detail = f"memory allows {by_memory} at {per_sample:.0f} MB each; {AUTO_PER_CORE} per core allows {by_cores}; cap {AUTO_MAX_IN_FLIGHT}"
+    return max(1, limits[binding]), f"{binding} ({detail})"
+
+
+def target_in_flight(capacity: int, live_runs: int) -> int:
+    """This run's share of the machine: an even split with the other live runs.
+
+    A run never waits for room: arriving beside a run that holds everything,
+    it takes its share at once (the memory headroom covers the overlap) and
+    the older run drops to its share at its next condition start.
+
+    Parameters
+    ----------
+    capacity : int
+        From `machine_capacity`.
+    live_runs : int
+        Live runs on the machine, this one included.
+
+    Returns
+    -------
+    int
+        E.g. 30 alone, 15 beside one other run, never below the floors.
+    """
+    if live_runs <= 1:
+        return max(capacity, AUTO_MIN_ALONE)
+    return max(capacity // live_runs, AUTO_MIN_SHARED)
+
+
+def split_in_flight(in_flight: int, unfinished: int) -> tuple[int, int]:
+    """Spread samples in flight over conditions running at once.
+
+    Parameters
+    ----------
+    in_flight : int
+        Samples to keep in flight.
+    unfinished : int
+        Conditions not yet finished (running or waiting).
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(conditions at once, connections each)``: 30 over eleven → ``(3, 10)``;
+        10 → ``(2, 5)``; 30 with one condition left → ``(1, 30)``.
+    """
+    width = max(1, min(max(unfinished, 1), max(2, round(in_flight / AUTO_PER_CONDITION))))
+    return width, max(1, in_flight // width)
+
+
+def with_connections(command: str, connections: int) -> str:
+    """The command with its ``--max-connections`` value replaced.
+
+    Parameters
+    ----------
+    command : str
+        A rendered ``inspect eval`` command carrying ``--max-connections N``.
+    connections : int
+        The new value.
+
+    Returns
+    -------
+    str
+        The command, changed only in that flag.
+    """
+    return re.sub(r"--max-connections \d+", f"--max-connections {connections}", command)
+
+
+def _run_registry() -> str:
+    return os.environ.get(RUN_REGISTRY_ENV) or os.path.expanduser("~/.cache/prism/live_runs")
+
+
+def register_live_run(run_dir: str) -> str:
+    """Record this worker as a live run on the machine, for other runs' even split.
+
+    Parameters
+    ----------
+    run_dir : str
+        This run's directory.
+
+    Returns
+    -------
+    str
+        The registry entry's path, removed by `unregister_live_run`.
+    """
+    os.makedirs(_run_registry(), exist_ok=True)
+    path = os.path.join(_run_registry(), f"{os.getpid()}.json")
+    with open(path, "w") as f:
+        json.dump({"pid": os.getpid(), "pid_start": _pid_start_time(os.getpid()), "run_dir": run_dir}, f)
+    return path
+
+
+def unregister_live_run(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def count_live_runs() -> int:
+    """Live runs on this machine, this one included; dead entries are pruned.
+
+    Returns
+    -------
+    int
+        E.g. 2 while another Prism run is executing evals; at least 1.
+    """
+    live = 0
+    for entry in glob.glob(os.path.join(_run_registry(), "*.json")):
+        try:
+            with open(entry) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if _pid_alive(data.get("pid"), data.get("pid_start")):
+            live += 1
+        else:
+            unregister_live_run(entry)  # a killed run never cleaned up
+    return max(live, 1)
+
+
 def run_single(
     command: str,
     timeout: int = DEFAULT_COMMAND_TIMEOUT,
@@ -992,41 +1283,6 @@ def run_single(
         return -1, time.monotonic() - start, "", str(e)
 
 
-def run_batch(
-    commands: list[CommandSpec],
-    concurrency: int,
-    timeout: int = DEFAULT_COMMAND_TIMEOUT,
-    capture_dir: str | None = None,
-    attempt_index: dict[str, int] | None = None,
-) -> list[tuple[CommandSpec, int, float, str, str]]:
-    """Run a batch of commands with the given concurrency level.
-
-    Returns list of (command, returncode, duration, stdout, stderr).
-    """
-    results: list[tuple[CommandSpec, int, float, str, str]] = []
-
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        future_to_cmd = {}
-        for cmd in commands:
-            if _SHUTDOWN.is_set():
-                break
-            n = (attempt_index or {}).get(cmd.id, 0)
-            future = executor.submit(
-                run_single, cmd.command, timeout, cmd.cwd, capture_dir, f"{cmd.id}.attempt{n}"
-            )
-            future_to_cmd[future] = cmd
-
-        for future in as_completed(future_to_cmd):
-            cmd = future_to_cmd[future]
-            try:
-                returncode, duration, stdout, stderr = future.result()
-            except Exception as e:
-                returncode, duration, stdout, stderr = -1, 0.0, "", str(e)
-            results.append((cmd, returncode, duration, stdout, stderr))
-
-    return results
-
-
 def _stash_failed_attempt_logs(cmd: CommandSpec, attempt: int, capture_dir: str | None) -> None:
     """Move any .eval a failed attempt wrote out of the pair's log directory.
 
@@ -1060,8 +1316,13 @@ def execute(
     config: ExecutionConfig,
     capture_dir: str | None = None,
     on_event: Any = None,
+    size_launch: Any = None,
 ) -> ExecutionReport:
     """Run all commands with error handling, retries, and graceful degradation.
+
+    Commands start as slots free up, not in fixed groups: a condition that
+    finishes early hands its slot straight to the next one instead of idling
+    until its slowest neighbour is done.
 
     Parameters
     ----------
@@ -1073,14 +1334,21 @@ def execute(
         Where raw per-attempt stdout/stderr are written (score-bearing; see
         `run_single`).
     on_event : callable | None
-        ``on_event(kind, payload)`` called with ``("batch_start", [ids])``,
-        ``("result", EvalResult)`` and ``("reduction", ConcurrencyReduction)``
-        so a status file can be kept current while the batch runs.
+        ``on_event(kind, payload)`` called with ``("batch_start", [id])`` as
+        each command starts, ``("launch", {...})`` with its sizing when
+        ``size_launch`` is set, ``("result", EvalResult)`` and
+        ``("reduction", ConcurrencyReduction)``, so a status file can be kept
+        current while the run goes.
+    size_launch : callable | None
+        ``size_launch(unfinished) -> (width, connections)``, asked before every
+        start: how many commands may run at once now, and the
+        ``--max-connections`` the next one gets (None keeps its command as
+        built). None runs ``config.max_parallel`` at once with commands as built.
 
     Returns
     -------
     ExecutionReport
-        Per-command results in the original order plus batch-level fields.
+        Per-command results in the original order plus run-level fields.
     """
     report = ExecutionReport(concurrency_used=config.max_parallel)
     total_start = time.monotonic()
@@ -1093,64 +1361,95 @@ def execute(
         report.total_wall_clock_seconds = 0.0
         return report
 
-    # Track per-command state
-    pending = list(commands)
+    # --- State ---------------------------------------------------------------
+    # The queue holds (not_before, command); a retry waits out its backoff
+    # there without holding up commands that are ready
+    queue: list[tuple[float, CommandSpec]] = [(0.0, c) for c in commands]
+    running: dict[Any, tuple[CommandSpec, int, int]] = {}  # future -> (command, launch number, width then)
     completed_results: dict[str, EvalResult] = {}
     retry_counts: dict[str, int] = {c.id: 0 for c in commands}
-    current_concurrency = config.max_parallel
-    batch_num = 0
+    ceiling: int | None = None if size_launch else config.max_parallel  # lowered on resource contention
+    recent: list[str | None] = []  # error class of each finished attempt, None for success
+    launches = 0
+    last_reduction = 0  # launch count when the ceiling was last lowered
+    peak = 0
 
-    while pending and not _SHUTDOWN.is_set():
-        batch_num += 1
+    def width_and_connections() -> tuple[int, int | None]:
+        if size_launch is None:
+            return max(1, ceiling or 1), None
+        width, connections = size_launch(len(queue) + len(running))
+        return max(1, min(width, ceiling) if ceiling else width), connections
 
-        # Partition into batches of current_concurrency
-        batch = pending[:current_concurrency]
-        pending = pending[current_concurrency:]
-        emit("batch_start", [c.id for c in batch])
+    with ThreadPoolExecutor(max_workers=EXECUTE_POOL) as pool:
+        while (queue or running) and not _SHUTDOWN.is_set():
 
-        # Run the batch
-        batch_results = run_batch(
-            batch, current_concurrency, config.command_timeout, capture_dir, retry_counts
-        )
+            # --- Start every due command the current width allows ------------
+            while queue and not _SHUTDOWN.is_set():
+                width, connections = width_and_connections()
+                if len(running) >= width:
+                    break
+                now = time.monotonic()
+                due = next((i for i, (not_before, _) in enumerate(queue) if not_before <= now), None)
+                if due is None:
+                    break
+                _, cmd = queue.pop(due)
+                launches += 1
+                command = with_connections(cmd.command, connections) if connections else cmd.command
+                emit("batch_start", [cmd.id])
+                if size_launch is not None:
+                    emit("launch", {"id": cmd.id, "width": width, "connections": connections})
+                future = pool.submit(
+                    run_single, command, config.command_timeout, cmd.cwd, capture_dir,
+                    f"{cmd.id}.attempt{retry_counts[cmd.id]}",
+                )
+                running[future] = (cmd, launches, width)
+                peak = max(peak, len(running))
 
-        # Process results
-        failed_in_batch: list[tuple[CommandSpec, str]] = []  # (cmd, error_class)
-        resource_contention_count = 0
+            # --- Wait for a finish, or for a retry to fall due ----------------
+            if not running:
+                if queue:
+                    _SHUTDOWN.wait(max(0.0, min(nb for nb, _ in queue) - time.monotonic()))
+                continue
+            done, _ = wait(list(running), timeout=EXECUTE_POLL, return_when=FIRST_COMPLETED)
 
-        for cmd, returncode, duration, stdout, stderr in batch_results:
-            # Verify the log
-            log_info = verify_eval_log(cmd.log_dir)
+            for future in done:
+                cmd, launch_no, width_then = running.pop(future)
+                try:
+                    returncode, duration, stdout, stderr = future.result()
+                except Exception as e:
+                    returncode, duration, stdout, stderr = -1, 0.0, "", str(e)
 
-            result = EvalResult(
-                id=cmd.id,
-                log_path=log_info.get("log_path"),
-                status=log_info.get("status", "unknown"),
-                samples_completed=log_info.get("samples_completed"),
-                samples_total=log_info.get("samples_total"),
-                duration_seconds=log_info.get("duration_seconds", duration),
-                process_retries=retry_counts[cmd.id],
-                batch=batch_num,
-                model_usage=log_info.get("model_usage", {}),
-            )
+                # Verify the log
+                log_info = verify_eval_log(cmd.log_dir)
+                result = EvalResult(
+                    id=cmd.id,
+                    log_path=log_info.get("log_path"),
+                    status=log_info.get("status", "unknown"),
+                    samples_completed=log_info.get("samples_completed"),
+                    samples_total=log_info.get("samples_total"),
+                    duration_seconds=log_info.get("duration_seconds", duration),
+                    process_retries=retry_counts[cmd.id],
+                    batch=launch_no,
+                    model_usage=log_info.get("model_usage", {}),
+                )
+                if log_info.get("error"):
+                    # A log's error message is the eval's own text and can quote
+                    # scorer output; it is scrubbed like any captured stream.
+                    result.errors.append(scrub_scores(log_info["error"]))
 
-            if log_info.get("error"):
-                # A log's error message is the eval's own text and can quote
-                # scorer output; it is scrubbed like any captured stream.
-                result.errors.append(scrub_scores(log_info["error"]))
+                # Success
+                if returncode == 0 and log_info.get("status") == "success":
+                    recent.append(None)
+                    completed_results[cmd.id] = result
+                    emit("result", result)
+                    continue
 
-            # Determine success
-            if returncode == 0 and log_info.get("status") == "success":
-                completed_results[cmd.id] = result
-                emit("result", result)
-            else:
+                # Failure: classify and say why
                 # Both streams: Inspect reports prerequisite failures on stdout.
                 diagnostic = combine_output(stdout, stderr)
                 error_class = classify_error(returncode, diagnostic)
                 result.error_class = error_class
-
-                if error_class == "resource_contention":
-                    resource_contention_count += 1
-
+                recent.append(error_class)
                 if diagnostic:
                     # The tag rides on the already-scrubbed tail, so the
                     # blackout holds for credential failures as for any other.
@@ -1168,87 +1467,71 @@ def execute(
                     )
                 result.errors.append(f"exit_code={returncode}")
 
+                # The attempts that finished around this one, for spotting a
+                # failure shared by the whole run rather than one condition
+                window = recent[-max(2, width_then):]
+                failures = [c for c in window if c is not None]
+                widespread = len(window) > 1 and len(failures) > len(window) / 2
+                uniform = widespread and all(c == failures[0] for c in failures)
+
+                # Resource contention halves how many run at once, once per
+                # generation of starts (simultaneous failures count once)
+                if error_class == "resource_contention" and width_then > 1 and launch_no > last_reduction:
+                    reduction = ConcurrencyReduction(
+                        batch=launch_no,
+                        previous_level=width_then,
+                        new_level=max(1, width_then // 2),
+                        reason=f"Resource contention detected at launch {launch_no}",
+                    )
+                    report.concurrency_reductions.append(reduction)
+                    emit("reduction", reduction)
+                    ceiling = reduction.new_level
+                    last_reduction = launches
+
                 if should_retry(error_class, retry_counts[cmd.id], config.max_retries):
                     # A failed attempt may have left a partial .eval behind.
                     # Move it out before retrying: a second log in the pair's
                     # directory would double the Analyst's pool.
                     _stash_failed_attempt_logs(cmd, retry_counts[cmd.id], capture_dir)
                     retry_counts[cmd.id] += 1
-                    failed_in_batch.append((cmd, error_class))
                     result.status = "retrying"
                     emit("result", result)
+                    # A transient error hitting most of the run gets a longer wait
+                    backoff = compute_backoff(retry_counts[cmd.id] - 1, config.retry_backoff_seconds)
+                    if uniform and failures[0] == "transient":
+                        backoff *= 2
+                    # Retries go to the front, so they run as soon as they are due
+                    queue.insert(0, (time.monotonic() + backoff, cmd))
                 else:
                     # Exhausted retries or structural failure
                     result.process_retries = retry_counts[cmd.id]
                     completed_results[cmd.id] = result
                     emit("result", result)
 
-        # Cascading failure detection
-        backoff_multiplier = 1.0
-        if len(batch) > 1 and len(failed_in_batch) > len(batch) / 2:
-            error_classes = [ec for _, ec in failed_in_batch]
-            if all(ec == "resource_contention" for ec in error_classes):
-                new_concurrency = max(1, current_concurrency // 2)
-                if new_concurrency < current_concurrency:
-                    reduction = ConcurrencyReduction(
-                        batch=batch_num,
-                        previous_level=current_concurrency,
-                        new_level=new_concurrency,
-                        reason=f"Resource contention: {resource_contention_count}/{len(batch)} commands failed",
+                # The same unretryable error across the run: systemic, abort
+                # what has not started. A uniform routing failure means the
+                # pinned provider is down for every command.
+                if width_then > 1 and uniform and failures[0] in ("structural", "routing") and queue:
+                    report.errors.append(
+                        f"Launch {launch_no}: all failures are {failures[0]} — aborting remaining commands"
                     )
-                    report.concurrency_reductions.append(reduction)
-                    emit("reduction", reduction)
-                    current_concurrency = new_concurrency
-            elif all(ec == error_classes[0] for ec in error_classes) and error_classes[0] in ("structural", "routing"):
-                # All the same unretryable error — systemic problem, abort
-                # remaining. A uniform routing failure means the pinned provider
-                # is down for every command, so continuing only wastes time.
-                report.errors.append(
-                    f"Batch {batch_num}: all failures are {error_classes[0]} — aborting remaining commands"
-                )
-                for remaining_cmd in pending:
-                    aborted = EvalResult(
-                        id=remaining_cmd.id,
-                        status="aborted",
-                        errors=[f"Aborted due to systemic {error_classes[0]} failure"],
-                    )
-                    completed_results[remaining_cmd.id] = aborted
-                    emit("result", aborted)
-                pending = []
-                break
-            elif all(ec == "transient" for ec in error_classes):
-                # All same transient error — double the backoff for retries
-                backoff_multiplier = 2.0
-        elif resource_contention_count > 0 and current_concurrency > 1:
-            # Even a single resource contention in a batch warrants reduction
-            new_concurrency = max(1, current_concurrency // 2)
-            if new_concurrency < current_concurrency:
-                reduction = ConcurrencyReduction(
-                    batch=batch_num,
-                    previous_level=current_concurrency,
-                    new_level=new_concurrency,
-                    reason=f"Resource contention detected in batch {batch_num}",
-                )
-                report.concurrency_reductions.append(reduction)
-                emit("reduction", reduction)
-                current_concurrency = new_concurrency
+                    for _, remaining_cmd in queue:
+                        if remaining_cmd.id in completed_results:
+                            continue
+                        aborted = EvalResult(
+                            id=remaining_cmd.id,
+                            status="aborted",
+                            errors=[f"Aborted due to systemic {failures[0]} failure"],
+                        )
+                        completed_results[remaining_cmd.id] = aborted
+                        emit("result", aborted)
+                    queue = []
 
-        # Queue retries with backoff
-        if failed_in_batch:
-            max_backoff = max(
-                compute_backoff(retry_counts[cmd.id] - 1, config.retry_backoff_seconds)
-                for cmd, _ in failed_in_batch
-            ) * backoff_multiplier
-            if not _SHUTDOWN.is_set():
-                _SHUTDOWN.wait(max_backoff)
-            # Prepend retries so they run in the next iteration
-            retry_commands = [cmd for cmd, _ in failed_in_batch]
-            pending = retry_commands + pending
-
-    # Handle shutdown
+    # Handle shutdown: anything queued, and anything stopped mid-run
     if _SHUTDOWN.is_set():
         report.status = "interrupted"
-        for remaining_cmd in pending:
+        unfinished = [c for _, c in queue] + [c for c, _, _ in running.values()]
+        for remaining_cmd in unfinished:
             if remaining_cmd.id not in completed_results:
                 interrupted = EvalResult(
                     id=remaining_cmd.id,
@@ -1263,7 +1546,7 @@ def execute(
         completed_results.get(cmd.id, EvalResult(id=cmd.id, status="not_run"))
         for cmd in commands
     ]
-    report.concurrency_used = config.max_parallel
+    report.concurrency_used = peak
     report.total_wall_clock_seconds = round(time.monotonic() - total_start, 1)
 
     return report
@@ -1831,6 +2114,8 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
     # so retests run a third as wide, after every probe has finished.
     conc = status.data["concurrency"]
     in_flight = max(1, conc["max_parallel"] * conc["max_connections"])
+    # The probes are real samples in real sandboxes: measure them for sizing
+    sampler = SandboxSampler(exp_dir).start()
     with ThreadPoolExecutor(max_workers=min(in_flight, max(1, len(pairs)))) as pool:
         probes = dict(zip([p.id for p in pairs], pool.map(lambda p: run_probe(p, "preflight"), pairs)))
 
@@ -1848,6 +2133,8 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
     to_retest = [p for p in pairs if isinstance(shapes.get(p.id), dict) and shapes[p.id]["sample_errors"] > 0]
     with ThreadPoolExecutor(max_workers=max(1, min(in_flight // 3, len(to_retest)))) as pool:
         retests = dict(zip([p.id for p in to_retest], pool.map(lambda p: run_probe(p, "retest"), to_retest)))
+    with status.lock:
+        conc["measured"] = sampler.stop()
 
     # --- Outcomes, recorded in the pairs' original order --------------------
     surviving: list[PairPlan] = []
@@ -2040,7 +2327,27 @@ def run_worker(run_dir: str) -> int:
                         status.data["zero_sample_pairs"] = sorted(status.data["zero_sample_pairs"] + [r.id])
             elif kind == "reduction":
                 status.data["concurrency"]["reductions"].append(asdict(payload))
+            elif kind == "launch":
+                status.data["concurrency"]["auto"]["launches"].append({"pair": payload["id"], **sizing, "conditions_at_once": payload["width"], "connections": payload["connections"]})
             status.save()
+
+        # --- Automatic sizing ----------------------------------------------
+        # Only when neither knob was set by the request or the Executor: then
+        # every condition start re-asks the machine's capacity and how many
+        # runs share it, so an older run shrinks when a newer one arrives
+        conc = status.data["concurrency"]
+        size_launch = None
+        sizing: dict[str, int] = {}
+        if conc.get("max_parallel_source") == "runner default" and conc.get("max_connections_source") == "runner default":
+            capacity, basis = machine_capacity(conc.get("measured"), (conc.get("resources") or {}).get("nproc"), bool(conc.get("sandbox_detected")))
+            conc["auto"] = {"capacity": capacity, "basis": basis, "launches": []}
+            registry_entry = register_live_run(run_dir)
+
+            def size_launch(unfinished: int) -> tuple[int, int]:
+                live = count_live_runs()
+                n = target_in_flight(capacity, live)
+                sizing.update(live_runs=live, in_flight=n)
+                return split_in_flight(n, unfinished)
 
         # Samples finished so far, for the lead's status view and the panel's
         # run tab, which would otherwise see a condition's count only at its end
@@ -2048,10 +2355,12 @@ def run_worker(run_dir: str) -> int:
         counter = threading.Thread(target=watch_live_counts, args=(status, stop_counting), daemon=True)
         counter.start()
         try:
-            report = execute(commands, config, capture_dir=os.path.join(_quarantine_dir(run_dir), "eval_output"), on_event=on_event)
+            report = execute(commands, config, capture_dir=os.path.join(_quarantine_dir(run_dir), "eval_output"), on_event=on_event, size_launch=size_launch)
         finally:
             stop_counting.set()
             counter.join()
+            if size_launch is not None:
+                unregister_live_run(registry_entry)
         status.data["errors"].extend(report.errors)
         status.data["state"] = "interrupted" if report.status == "interrupted" else "completed"
         # Anything still pending (e.g. excluded before launch) keeps its state.
@@ -2389,10 +2698,18 @@ def render_status(data: dict[str, Any]) -> str:
     lines = [f"run: {data.get('run_id')}  state: {state}  pid: {pid} ({'alive' if alive else 'not running'})"]
     lines.append(f"started: {data.get('started_at')}  updated: {data.get('updated_at')}  finished: {data.get('finished_at')}")
     c = data.get("concurrency", {})
-    lines.append(
-        f"concurrency: max_parallel={c.get('max_parallel')} ({c.get('max_parallel_source')}) "
-        f"max_connections={c.get('max_connections')} ({c.get('max_connections_source')})"
-    )
+    last = ((c.get("auto") or {}).get("launches") or [None])[-1]
+    if last:
+        # Automatic sizing: the latest condition start says where it stands
+        lines.append(
+            f"concurrency: automatic, capacity {c['auto']['capacity']}; latest start {last['in_flight']} in flight "
+            f"({last['conditions_at_once']} at once × {last['connections']}, live runs {last['live_runs']})"
+        )
+    else:
+        lines.append(
+            f"concurrency: max_parallel={c.get('max_parallel')} ({c.get('max_parallel_source')}) "
+            f"max_connections={c.get('max_connections')} ({c.get('max_connections_source')})"
+        )
     pf = data.get("preflight", {})
     if pf.get("skipped"):
         lines.append("preflight: skipped (skip_preflight=true)")
@@ -2753,16 +3070,30 @@ def render_report(data: dict[str, Any]) -> str:
     if c.get("max_parallel_source") == "request overrides":
         override = f"yes ({c.get('max_parallel')})"
     res = c.get("resources") or {}
-    out.append(f"- **Chosen `max_parallel`**: {c.get('max_parallel')}")
+    auto = c.get("auto")
+    launches = (auto or {}).get("launches") or []
+    if auto:
+        widest = max((l["conditions_at_once"] for l in launches), default=c.get("max_parallel"))
+        out.append(f"- **Chosen `max_parallel`**: {widest} (automatic; at most this many conditions at once)")
+    else:
+        out.append(f"- **Chosen `max_parallel`**: {c.get('max_parallel')}")
     out.append(f"- **Orchestrator override provided**: {override}")
     out.append(f"- **Resources observed**: nproc={res.get('nproc')}, free_mem_mb={res.get('free_mem_mb')}")
     sd = c.get("sandbox_detected")
     out.append(f"- **Sandbox detected**: {'yes' if sd else 'no' if sd is False else 'unknown'} (evidence: {c.get('sandbox_evidence') or 'none recorded'})")
+    if auto:
+        m = c.get("measured") or {}
+        measured = (f"heaviest of {m.get('containers_seen')} preflight sandboxes {m.get('peak_container_mb')} MB, lowest free memory {m.get('min_free_mb')} MB"
+                    if m.get("containers_seen") else "no preflight sandboxes measured")
+        starts = "; ".join(f"{l['pair']}: {l['in_flight']} in flight, {l['conditions_at_once']} at once × {l['connections']} (live runs {l['live_runs']})" for l in launches) or "none"
+        out.append(f"- **Automatic sizing**: capacity {auto['capacity']}, set by {auto['basis']}; {measured}. Condition starts: {starts}")
     if c.get("reductions"):
-        out.append("- **Reductions applied during execution**: " + "; ".join(f"batch {r['batch']}: {r['previous_level']}→{r['new_level']} ({r['reason']})" for r in c["reductions"]))
+        out.append("- **Reductions applied during execution**: " + "; ".join(f"launch {r['batch']}: {r['previous_level']}→{r['new_level']} ({r['reason']})" for r in c["reductions"]))
     else:
         out.append("- **Reductions applied during execution**: none")
-    if c.get("max_parallel_source") == "cli override":
+    if auto:
+        out.append("- **Rationale**: no override was requested, so the runner sized each condition start from preflight's sandbox measurements and the number of live runs on the machine, split evenly between them.")
+    elif c.get("max_parallel_source") == "cli override":
         out.append(f"- **Rationale**: Executor raised the runner ceiling via CLI override — {c.get('rationale')}")
     elif c.get("max_parallel_source") == "request overrides":
         out.append(f"- **Rationale**: the request's `overrides.max_parallel` was applied as given; the runner's ceiling (max_parallel={DEFAULT_MAX_PARALLEL}, max_connections={DEFAULT_MAX_CONNECTIONS}) is the default only.")

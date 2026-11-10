@@ -83,6 +83,20 @@ def _refuse_query(*args, **kwargs):
 
 
 @pytest.fixture(autouse=True)
+def _private_run_registry(tmp_path, monkeypatch):
+    """Give each test its own live-run registry, so test runs never count as real ones.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        The test's temporary directory.
+    monkeypatch : pytest.MonkeyPatch
+        Sets ``PRISM_RUN_REGISTRY`` for the test.
+    """
+    monkeypatch.setenv("PRISM_RUN_REGISTRY", str(tmp_path / "live_runs"))
+
+
+@pytest.fixture(autouse=True)
 def _spend_guard(request, monkeypatch):
     """Make the Agent SDK's `query` raise and clear provider keys, per test.
 

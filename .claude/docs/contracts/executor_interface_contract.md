@@ -83,13 +83,13 @@ A mapping of execution-parameter overrides. Supported keys:
 | `sample_id` | str | Maps to `--sample-id` (comma-separated ids; runs only those dataset entries) |
 | `epochs` | int | Maps to `--epochs` |
 | `skip_preflight` | bool | If `true`, the runner does not run preflight and goes straight to full execution |
-| `max_parallel` | int | Upper bound on concurrent eval subprocesses. **Default 1** (the runner's ceiling) |
-| `max_connections` | int | Maps to `--max-connections` (concurrent API calls within an eval). **Default 4** |
+| `max_parallel` | int | Concurrent eval subprocesses. **Unset: automatic sizing** (starting value 2) |
+| `max_connections` | int | Maps to `--max-connections` (concurrent API calls within an eval). **Unset: automatic sizing** (starting value 5) |
 | `command_timeout_seconds` | int | Wall-clock limit per `inspect eval` subprocess. Default 14400 (4 h) |
 
 Unrecognised keys are ignored with a note in **Additional Notes**. Other flags (`--retry-on-error 3`, `--no-fail-on-error`, `--display plain`, and `--with "openai>=…"` on `openrouter/…` models) are applied to every invocation by the runner without being in overrides — these are policy, not configuration.
 
-**The concurrency ceiling is the runner's, not the Executor's.** `max_parallel: 2` / `max_connections: 5` are sized for a shared host running one Docker sandbox per sample (see `inspect_reference.md §Concurrency heuristics`). A caller who knows better sets them in `overrides`. The Executor may raise them only by passing `--max-parallel` / `--max-connections` together with `--rationale` to the runner; the rationale is recorded verbatim in the report's **Concurrency Decision**. Raising them silently is not possible — the runner refuses the flags without a rationale.
+**The concurrency level is the runner's, not the Executor's.** With neither key set, the runner sizes it automatically: it measures preflight's sandboxes, works out what the machine can hold, splits that evenly with other live Prism runs on the machine, and re-asks before every condition starts (see `inspect_reference.md §Concurrency heuristics`). A caller who knows better sets either key in `overrides`, which turns automatic sizing off. The Executor may raise them only by passing `--max-parallel` / `--max-connections` together with `--rationale` to the runner; the rationale is recorded verbatim in the report's **Concurrency Decision**. Raising them silently is not possible — the runner refuses the flags without a rationale.
 
 **`runs_per_condition` has been removed.** It was documented as a key but never implemented — nothing ever multiplied the commands — so a caller setting it believed it had taken effect when it had not. The runner now refuses a request that carries it, naming `epochs` (with `sample_id`) as the repeated-sampling mechanism; see *Resample runs* below for the one case where repeated whole-eval runs would genuinely differ.
 
@@ -274,14 +274,15 @@ Per condition-model pair that reached full execution, every distinct model name 
 
 ### Concurrency Decision
 
-Structured fields documenting how the full-execution concurrency level was set. The runner fixes it: its default ceiling (`max_parallel: 2`, `max_connections: 5`, sized for a shared host with one sandbox per sample) applies unless the request's `overrides` set it, or the Executor raised it at launch with a recorded rationale (`execute_evals.py run … --max-parallel N --max-connections M --rationale "…"`). The runner then halves `max_parallel` on resource contention; `max_connections` is never changed mid-run.
+Structured fields documenting how the full-execution concurrency level was set. The runner fixes it: automatic sizing applies unless the request's `overrides` set either key, or the Executor set one at launch with a recorded rationale (`execute_evals.py run … --max-parallel N --max-connections M --rationale "…"`). Under automatic sizing an extra **Automatic sizing** field gives the capacity, what set it, the preflight measurements and every condition start's size. The runner halves how many conditions run at once on resource contention; a running condition's `max_connections` never changes, though later conditions may start with a different one.
 
 - **Chosen `max_parallel`**: integer
 - **Orchestrator override provided**: `yes (<value>)` | `no`
 - **Resources observed**: e.g., `nproc=8, free_mem_mb=14336`
 - **Sandbox detected**: `yes` | `no` (evidence: preflight timing, e.g., `~18s per command suggests sandbox setup`)
+- **Automatic sizing** *(only when it applied)*: the machine's capacity and the limit that set it, preflight's sandbox measurements, and each condition start's samples in flight, conditions at once × connections, and live runs on the machine
 - **Reductions applied during execution**: list with reasons, or `none`
-- **Rationale**: one to two sentences tying the fields above to the level used — the runner default, the request override, or the Executor's recorded reason for raising it
+- **Rationale**: one to two sentences tying the fields above to the level used — automatic sizing, the request override, or the Executor's recorded reason for setting it
 
 ### Execution Summary
 

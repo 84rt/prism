@@ -79,7 +79,7 @@ The user presents a research question. The orchestrator helps articulate it as t
    - Sample limit (full dataset or a subset for rapid iteration?)
    - Number of epochs per sample
    - Whether to skip preflight validation
-   - Parallelism preferences (`max_parallel` — how many eval runs to execute concurrently; if unset, the batch runner's ceiling applies: one eval process, four API connections)
+   - Parallelism preferences (`max_parallel` — how many eval runs to execute concurrently; if unset, the batch runner sizes it automatically from the machine and its other runs)
    - Any other Inspect CLI overrides
 
    **Do not read determinism off the task's configuration.** `temperature=0` and `seed` are silently no-ops on Anthropic endpoints and on most routed providers, so a task that declares itself deterministic still has run-to-run spread. Determinism is established empirically or not at all; the noise-floor rule in Step 2j says how. If the eval's own design leans on determinism (a fixed-seed shuffle, a cached solver), record that as a scoping fact rather than an assumption to inherit.
@@ -292,7 +292,7 @@ The report structure is defined in `executor_interface_contract.md §Report Form
    - **What goes in:** per-condition sample-level retry counts, sample-error counts, preflight exclusions and transcript termination counts (no-assistant-message, limit hits, error terminations), each under that invocation's opaque `condition_X` label; and the note that retried samples may exhibit distribution shift relative to non-retried ones (the retry succeeded conditional on a prior failure, which can introduce selection effects).
    - **What never goes in:** a real condition name or role word, the hypothesis, any expected direction or comparison ("condition_B should be lower"), or an error's *content* where that content reveals what a condition is (a task error quoting the manipulated file). Non-directional execution facts only. `check_blinding.py` scans this field with the rest of the request.
 
-8. **Audit the Concurrency Decision.** The batch runner sets the concurrency level — its default ceiling (`max_parallel: 2`, `max_connections: 5`), your request's `overrides`, or an Executor override whose recorded rationale you should check is concrete (an API-only eval on a host whose resources were read). If `Reductions applied during execution` is non-empty, the runner hit resource contention and halved `max_parallel`, and some commands were retried. This is not a failure but is worth noting if wall-clock matters for the investigation.
+8. **Audit the Concurrency Decision.** The batch runner sets the concurrency level — automatic sizing (its **Automatic sizing** field shows each condition start), your request's `overrides`, or an Executor override whose recorded rationale you should check is concrete (an API-only eval on a host whose resources were read). If `Reductions applied during execution` is non-empty, the runner hit resource contention and halved how many conditions run at once, and some commands were retried. This is not a failure but is worth noting if wall-clock matters for the investigation.
 
 9. **Record in investigation log.** Update the investigation log with: condition-model pairs completed / failed / excluded, key errors, retry counts, transcript termination patterns, and the concurrency level used.
 
