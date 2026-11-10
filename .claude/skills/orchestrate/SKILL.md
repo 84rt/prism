@@ -69,7 +69,7 @@ The full pipeline has three phases:
 Phase 1: Scoping Discussion (with user)
     → Refine hypothesis, identify eval environment, agree on models and parameters
     → Headroom survey: can the target behaviour move on each eval × model cell at all?
-Phase 2: Investigation Loop (autonomous, may repeat up to ~3 iterations)
+Phase 2: Investigation Loop (autonomous, may repeat up to 3 iterations)
     → Explorer → review → apply modifications → Executor → review → translate topic → Analyst → interpret → decide
 Phase 3: Report to User
     → Synthesize findings across iterations, present evidence, suggest next steps

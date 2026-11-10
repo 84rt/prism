@@ -506,7 +506,7 @@ These questions don't have mechanical answers. They require judgement — the ki
 
 **Decision criteria:**
 - **Only informative iterations count.** An iteration is *informative* when at least one pre-registered row was scored `hit` or `miss` — a comparison with headroom (no floor/ceiling exposure), measured by a passing scanner, on a condition whose construal check (if any) succeeded. A quiet iteration that was quiet because nothing it ran could register an effect is not evidence of anything and must never be the basis for concluding. It still counts toward the escalation cap below — it spent budget — and two uninformative iterations in a row are themselves a reason to escalate: the design, not the hypothesis, is the problem. Record `Informative: yes | no — <why>` in the Decision block.
-- If after 3 iterations the findings are still ambiguous, escalate to user rather than continuing to iterate.
+- If after 3 iterations the findings are still ambiguous, escalate to user rather than continuing to iterate. This is the cap unless the autonomy agreement set a different iteration scope.
 - **Spare time goes to the biggest open question, not an early stop.** When you conclude with time and budget left over (an agreed deadline still hours away, a user who won't be back until morning), first write `FINDINGS-REPORT.md` in full, so the report is complete whatever happens next. Then give the top-ranked runner-up a small probe: pre-registered as usual, inside the Agreed Scope, and capped at a quarter of the last iteration's spend. Prefer the runner-up whose answer would most change the report. Add its result to the report as a clearly marked addendum, without rewriting the conclusions above it.
 - **When the user is away, escalation is a mode, not a message.** If the autonomy agreement has the user unavailable (an overnight run, a brief that says not to pause), escalating means stopping full-size iterations. The next step is a headroom survey of the cells under consideration (Phase 1 step 9) or a re-scope within the Agreed Scope's leash. Each following iteration is capped at a quarter of the last one's spend, projected with `scripts/spend.py`, until one is informative. Record `Escalated (user away): cheap mode` in the Decision block and lead the Phase 3 report with it.
 - If the investigation has consumed significant compute, check with the user before continuing.
@@ -821,7 +821,7 @@ If Model A succeeded but Model B failed entirely, the orchestrator can still sen
 
 6. **Reusing condition labels across iterations without re-randomising.** Each Analyst invocation should use freshly randomised condition-label mappings. If condition_A always maps to the control, the firewall is weakened.
 
-7. **Running too many iterations without user check-in.** Autonomous investigation is valuable, but after 2-3 iterations, the user should be consulted. The orchestrator might be pursuing a dead end.
+7. **Running too many iterations without user check-in.** Autonomous investigation is valuable, but after 3 iterations (or 2 uninformative ones in a row, §2j), the user should be consulted. The orchestrator might be pursuing a dead end.
 
 8. **Applying diffs without verifying them.** Always read modified files back after applying changes. A misapplied diff can silently confound the experiment.
 
