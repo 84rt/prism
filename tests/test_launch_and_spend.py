@@ -367,7 +367,13 @@ def test_spend_guard_is_active():
 # ---------------------------------------------------------------------------
 
 
-def test_spend_sums_sidecars_and_eval_usage(tmp_path):
+@pytest.fixture
+def no_price_list(monkeypatch):
+    """Keep spend tests off the network: OpenRouter's price list finds nothing."""
+    monkeypatch.setattr(spend, "_fetch_json", lambda url: None)
+
+
+def test_spend_sums_sidecars_and_eval_usage(tmp_path, no_price_list):
     inv = tmp_path / "investigations" / "demo"
     analyst = inv / "iterations" / "01" / "artefacts" / "analyst"
     write_json(inv / "artefacts" / "critic" / "cost_iter0_critic_1.json", {"prism_cost": 1, "agent": "Critic", "total_cost_usd": 1.5, "num_turns": 4})
@@ -410,7 +416,7 @@ def _assistant(msg_id, model, usage, content=()):
     return _session_line(type="assistant", entrypoint="cli", message={"id": msg_id, "model": model, "usage": usage, "content": list(content)})
 
 
-def test_spend_prices_the_lead_session_that_wrote_into_the_investigation(tmp_path):
+def test_spend_prices_the_lead_session_that_wrote_into_the_investigation(tmp_path, no_price_list):
     """Only the lead that started with the skill and wrote here is counted, each call once."""
     repo = tmp_path / "repo"
     inv = repo / "investigations" / "demo"

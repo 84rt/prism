@@ -216,6 +216,10 @@ DEFAULT_MAX_TURNS = 100
 # logs the usage line to stderr.
 COST_FILE_ENV = "PRISM_COST_FILE"
 
+# Where a sub-agent's own Python logs the usage of each model call it makes
+# (read by `transcript_analyst/call_log/sitecustomize.py`; see `_model_calls_env`)
+MODEL_CALLS_FILE_ENV = "PRISM_MODEL_CALLS_FILE"
+
 # OpenRouter exposes an Anthropic-Messages-compatible endpoint, so the Claude
 # Code CLI the Agent SDK spawns can be pointed at it without a local proxy. This
 # is what allows a sub-agent to run on a non-Claude model — e.g. running the
@@ -321,6 +325,32 @@ def _cache_ttl_env(cache_ttl: str | None) -> dict[str, str]:
     if cache_ttl not in CACHE_TTLS:
         raise ValueError(f"cache_ttl must be one of {CACHE_TTLS}, not {cache_ttl!r}")
     return {CACHE_TTL_ENV: os.environ.get(CACHE_TTL_ENV) or cache_ttl}
+
+def _model_calls_env() -> dict[str, str]:
+    """Turn on the per-call usage log for the Python a sub-agent runs.
+
+    Puts ``transcript_analyst/call_log/`` (whose ``sitecustomize.py`` Python
+    loads at startup) first on ``PYTHONPATH``, and names the log file beside
+    the invocation's cost sidecar: ``cost_iter_01_analyst_4.json`` gives
+    ``model_calls_iter_01_analyst_4.jsonl``. ``scripts/spend.py`` prices it.
+
+    Returns
+    -------
+    dict[str, str]
+        ``PYTHONPATH`` and ``PRISM_MODEL_CALLS_FILE``, or ``{}`` when the launch
+        has no cost sidecar to sit beside (a run outside the launcher).
+    """
+    cost_file = os.environ.get(COST_FILE_ENV)
+    if not cost_file:
+        return {}
+    folder, name = os.path.split(cost_file)
+    stem = os.path.splitext(name)[0].removeprefix("cost_")
+    hook_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcript_analyst", "call_log")
+    path = [hook_dir] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
+    return {
+        "PYTHONPATH": os.pathsep.join(path),
+        MODEL_CALLS_FILE_ENV: os.path.join(folder, f"model_calls_{stem}.jsonl"),
+    }
 
 # The one project setting sub-agents relied on, passed explicitly now that
 # project settings are not loaded: secrets in `.env` files are never read.
@@ -1254,6 +1284,7 @@ async def run_agent(
     route: str | None = None,
     max_turns: int | None = None,
     cache_ttl: str | None = None,
+    log_model_calls: bool = False,
 ) -> str:
     """Run an Agent SDK agent and return its output.
 
@@ -1302,6 +1333,10 @@ async def run_agent(
             default (5 minutes on an API key). Set by roles that wait on long
             commands, so the wait doesn't expire their cache (see
             `_cache_ttl_env`).
+        log_model_calls: If True, log the usage of every model call the
+            agent's own Python scripts make, for roles that call models
+            directly (the analyst's scanners and validators); see
+            `_model_calls_env`.
 
     Returns:
         The agent's output as a string.
@@ -1375,7 +1410,13 @@ async def run_agent(
         permission_mode="bypassPermissions",
         max_turns=max_turns or DEFAULT_MAX_TURNS,
         cwd=working_dir,
-        env={**ISOLATION_ENV, **_bash_timeout_env(), **_cache_ttl_env(cache_ttl), **route_env},
+        env={
+            **ISOLATION_ENV,
+            **_bash_timeout_env(),
+            **_cache_ttl_env(cache_ttl),
+            **(_model_calls_env() if log_model_calls else {}),
+            **route_env,
+        },
         **({"hooks": hooks} if hooks else {}),
     )
 

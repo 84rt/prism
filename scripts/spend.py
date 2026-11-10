@@ -1,6 +1,6 @@
 """Running spend total for an investigation.
 
-Sums three telemetry sources:
+Sums four telemetry sources:
 
 - **Sub-agent cost sidecars** — ``cost_*.json`` files written by
   ``subagents/runner.py`` from the Agent SDK's result message (USD, turns,
@@ -17,24 +17,30 @@ Sums three telemetry sources:
   header's ``model_usage``: every attempt's (``usage_attempts`` — preflight
   probe, retest, and each full-run attempt including retried ones), or the
   final attempt's alone in a status file written before that field existed.
+- **The Analyst's own model calls** — ``model_calls_*.jsonl`` files, one line
+  per call that the Transcript Analyst's scanner and validator scripts make,
+  written by ``subagents/transcript_analyst/call_log/sitecustomize.py``. These
+  never pass through the SDK result the sidecar records.
 
-Eval spend is reported in tokens per model, not USD: the runner has no price
-table and the target models vary per investigation. Both lead agents consume
-these figures: the Diagnostician's budget exit (``diagnostician_responsibilities.md``
-§Stopping rule) and the Orchestrator's spend check before each Decision
-(``orchestrator_responsibilities.md`` Step 2j). The headline total is sub-agents
-plus lead; both parts are shown.
+Eval usage and the Analyst's calls are priced per token. Claude models use
+``CLAUDE_PRICES_PER_MTOK``; every other model uses OpenRouter's public price
+list (no key needed), at the pinned provider's own rates when the eval ran
+through a pinned OpenRouter route. A call whose usage reports its own cost
+(OpenRouter's ``usage.cost``) is taken at that figure. Prices are today's, not
+the run's. A model with no known price adds nothing to the total and is listed
+as unpriced, so a nonzero unpriced list means the total under-counts.
 
-Known limitation — the total under-counts: eval usage is not priced in USD,
-and the Transcript Analyst's own scanner and validator model calls (made from
-inside its scans, not through the SDK result the sidecar records) are not
-captured at all. Callers keep headroom below the cap rather than spending to
-it. Dollar pricing for eval usage and capture of the Analyst's scanner spend
-are future work.
+Both lead agents consume these figures: the Diagnostician's budget exit
+(``diagnostician_responsibilities.md`` §Stopping rule) and the Orchestrator's
+spend check before each Decision (``orchestrator_responsibilities.md`` Step
+2j). The headline total is sub-agents plus lead plus evals plus the Analyst's
+calls; every part is shown.
 
 Usage
 -----
-    uv run python scripts/spend.py investigations/<name> [--json]
+    uv run python scripts/spend.py investigations/<name> [--json] [--offline]
+
+``--offline`` skips OpenRouter's price list, so only Claude models are priced.
 """
 
 from __future__ import annotations
@@ -45,19 +51,23 @@ import json
 import os
 import re
 import sys
+import urllib.request
 from collections import defaultdict
-from typing import Any
+from typing import Any, Callable
 
-# API prices for the models a lead agent runs on, in USD per million tokens:
-# (input, output, cache read). Cache writes are priced from input: 1.25x for
-# the 5-minute cache, 2x for the 1-hour cache Claude Code uses for a main
-# session. A model missing here is reported in tokens with no dollar figure,
-# never guessed at. Update with each model release.
-LEAD_PRICES_PER_MTOK: dict[str, tuple[float, float, float]] = {
+# API prices for the Claude models Prism's agents and scanners run on, in USD
+# per million tokens: (input, output, cache read). Cache writes are priced from
+# input: 1.25x for the 5-minute cache, 2x for the 1-hour cache Claude Code uses
+# for a main session. Haiku's rate is its rate for prompts under 100K tokens,
+# which scanner calls stay well within. A Claude model missing here falls back
+# to OpenRouter's price list, then to tokens with no dollar figure, never a
+# guess. Update with each model release.
+CLAUDE_PRICES_PER_MTOK: dict[str, tuple[float, float, float]] = {
     "claude-fable-5-1": (10.0, 50.0, 0.25),
     "claude-opus-5-5": (4.0, 20.0, 0.20),
     "claude-opus-4-8": (5.0, 25.0, 0.50),
     "claude-sonnet-5-5": (2.0, 10.0, 0.20),
+    "claude-haiku-5-5": (0.10, 0.50, 0.01),
 }
 CACHE_WRITE_5M_MULTIPLIER = 1.25
 CACHE_WRITE_1H_MULTIPLIER = 2.0
@@ -122,9 +132,9 @@ def _price_call(model: str, usage: dict[str, Any]) -> float | None:
     Returns
     -------
     float | None
-        USD, or None for a model missing from ``LEAD_PRICES_PER_MTOK``.
+        USD, or None for a model missing from ``CLAUDE_PRICES_PER_MTOK``.
     """
-    prices = LEAD_PRICES_PER_MTOK.get(model)
+    prices = CLAUDE_PRICES_PER_MTOK.get(model)
     if prices is None:
         return None
     inp, out, read = prices
@@ -147,6 +157,280 @@ def _price_call(model: str, usage: dict[str, Any]) -> float | None:
     if usage.get("speed") == "fast":
         cost *= FAST_MODE_MULTIPLIER
     return cost
+
+
+# ---------- Prices for any model: Claude table, then OpenRouter's list ----------
+
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+OPENROUTER_ENDPOINTS_URL = "https://openrouter.ai/api/v1/models/{slug}/endpoints"
+CATALOGUE_TIMEOUT = 15.0
+
+# Which OpenRouter vendor prefix a direct API's models are listed under
+_HOST_VENDORS = {
+    "api.anthropic.com": "anthropic",
+    "api.openai.com": "openai",
+    "generativelanguage.googleapis.com": "google",
+}
+
+# Token counts in one shape for every source: uncached input, output, cache
+# reads, and cache writes by lifetime
+TOKEN_KINDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
+
+
+def _fetch_json(url: str) -> Any | None:
+    """GET a public JSON document, or None on any failure (offline, timeout, bad JSON)."""
+    try:
+        with urllib.request.urlopen(url, timeout=CATALOGUE_TIMEOUT) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+def _normalise_id(model: str) -> str:
+    """Model id in a form that matches across providers' spellings.
+
+    Lower-cased, dots as dashes, and any trailing release date dropped, so
+    ``claude-sonnet-5.5``, ``claude-sonnet-5-5`` and ``gpt-5.2-2025-12-11``
+    match the catalogue's ``claude-sonnet-5-5`` and ``gpt-5-2``.
+    """
+    m = model.lower().replace(".", "-")
+    return re.sub(r"-(\d{4}-\d{2}-\d{2}|\d{8})$", "", m)
+
+
+def _openrouter_prices(pricing: dict[str, Any]) -> dict[str, float] | None:
+    """USD-per-token prices from an OpenRouter ``pricing`` block.
+
+    A missing cache price falls back to the input price, which over- rather
+    than under-states spend.
+    """
+    try:
+        inp = float(pricing["prompt"])
+        out = float(pricing["completion"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    write = float(pricing.get("input_cache_write") or inp)
+    return {
+        "input": inp,
+        "output": out,
+        "cache_read": float(pricing.get("input_cache_read") or inp),
+        "cache_write_5m": write,
+        "cache_write_1h": float(pricing.get("input_cache_write_1h") or write),
+    }
+
+
+class PriceBook:
+    """Per-token prices for any model, each looked up at most once per run.
+
+    Parameters
+    ----------
+    fetch : Callable[[str], Any] | None
+        Fetches a URL's JSON, or returns None; ``_fetch_json`` when None.
+        Tests pass a stub.
+    offline : bool
+        If True, never fetch: only ``CLAUDE_PRICES_PER_MTOK`` prices anything.
+    """
+
+    def __init__(self, fetch: Callable[[str], Any] | None = None, offline: bool = False):
+        self._fetch = fetch
+        self._offline = offline
+        self._catalogue: dict[str, dict[str, float]] | None = None
+        self._endpoints: dict[str, list[dict[str, Any]]] = {}
+
+    def _get(self, url: str) -> Any | None:
+        if self._offline:
+            return None
+        return (self._fetch or _fetch_json)(url)
+
+    def claude(self, model: str) -> dict[str, float] | None:
+        """Prism's own table, keyed by the bare Claude id."""
+        p = CLAUDE_PRICES_PER_MTOK.get(_normalise_id(model))
+        if p is None:
+            return None
+        inp, out, read = (x / 1e6 for x in p)
+        return {
+            "input": inp,
+            "output": out,
+            "cache_read": read,
+            "cache_write_5m": inp * CACHE_WRITE_5M_MULTIPLIER,
+            "cache_write_1h": inp * CACHE_WRITE_1H_MULTIPLIER,
+        }
+
+    def catalogue(self, slug: str) -> dict[str, float] | None:
+        """OpenRouter's listed price for ``vendor/model``, matched on the normalised id."""
+        if self._catalogue is None:
+            data = self._get(OPENROUTER_MODELS_URL)
+            self._catalogue = {}
+            for m in (data or {}).get("data") or []:
+                prices = _openrouter_prices(m.get("pricing") or {})
+                if prices and isinstance(m.get("id"), str):
+                    self._catalogue.setdefault(_normalise_id(m["id"]), prices)
+        return self._catalogue.get(_normalise_id(slug))
+
+    def endpoint(self, slug: str, provider: str) -> dict[str, float] | None:
+        """One OpenRouter provider's own price for ``slug``, e.g. ``siliconflow``."""
+        if slug not in self._endpoints:
+            data = self._get(OPENROUTER_ENDPOINTS_URL.format(slug=slug))
+            self._endpoints[slug] = ((data or {}).get("data") or {}).get("endpoints") or []
+        want = provider.lower()
+        for e in self._endpoints[slug]:
+            tag = str(e.get("tag") or "").lower()
+            if want in (tag, tag.split("/")[0], str(e.get("provider_name") or "").lower()):
+                return _openrouter_prices(e.get("pricing") or {})
+        return None
+
+    def for_eval_model(self, model: str, route: str | None) -> dict[str, float] | None:
+        """Price for an Inspect model string used in an eval.
+
+        Parameters
+        ----------
+        model : str
+            Inspect's name, e.g. ``openrouter/deepseek/deepseek-r1-0528`` or
+            ``anthropic/claude-sonnet-5-5``.
+        route : str | None
+            The pair's route label when ``model`` is the pair's target, e.g.
+            ``openrouter:siliconflow``; None for any other model in the eval
+            (a grader, say).
+
+        Returns
+        -------
+        dict | None
+            Per-token prices, or None when no source knows the model.
+        """
+        vendor, _, rest = model.partition("/")
+        if vendor == "openrouter":
+            provider = (route or "").partition(":")[2]
+            if provider and provider != "unpinned":
+                pinned = self.endpoint(rest, provider)
+                if pinned:
+                    return pinned
+            return self.catalogue(rest)
+        if vendor == "anthropic":
+            return self.claude(rest) or self.catalogue(model)
+        return self.catalogue(model)
+
+    def for_call(self, host: str, model: str) -> dict[str, float] | None:
+        """Price for one logged API call, from the host it went to and the model it reports."""
+        if "/" in model:
+            # OpenRouter reports the vendor-prefixed id
+            return self.claude(model.partition("/")[2]) or self.catalogue(model)
+        vendor = _HOST_VENDORS.get(host)
+        return self.claude(model) or (self.catalogue(f"{vendor}/{model}") if vendor else None)
+
+
+def _tokens_from_inspect(mu: dict[str, Any]) -> dict[str, int]:
+    """Inspect's ``ModelUsage`` as `TOKEN_KINDS`; its input count already excludes cached tokens."""
+    return {
+        "input": int(mu.get("input_tokens") or 0),
+        "output": int(mu.get("output_tokens") or 0),
+        "cache_read": int(mu.get("input_tokens_cache_read") or 0),
+        "cache_write_5m": int(mu.get("input_tokens_cache_write") or 0),
+        "cache_write_1h": 0,
+    }
+
+
+def _tokens_from_call(usage: dict[str, Any]) -> dict[str, int]:
+    """A raw API ``usage`` block as `TOKEN_KINDS`, whichever API shape it has.
+
+    OpenAI's chat (``prompt_tokens``) and Responses (``input_tokens_details``)
+    shapes count cached tokens inside the input total, so they are subtracted;
+    Anthropic's shape counts them separately and may split writes by lifetime.
+    """
+    def n(d: Any, key: str) -> int:
+        return int((d or {}).get(key) or 0) if isinstance(d, dict) else 0
+
+    if "prompt_tokens" in usage or "input_tokens_details" in usage or "output_tokens_details" in usage:
+        chat = "prompt_tokens" in usage
+        details = usage.get("prompt_tokens_details" if chat else "input_tokens_details")
+        read, write = n(details, "cached_tokens"), n(details, "cache_write_tokens")
+        total_in = n(usage, "prompt_tokens" if chat else "input_tokens")
+        return {
+            "input": max(total_in - read - write, 0),
+            "output": n(usage, "completion_tokens" if chat else "output_tokens"),
+            "cache_read": read,
+            "cache_write_5m": write,
+            "cache_write_1h": 0,
+        }
+    split = usage.get("cache_creation")
+    w1h, w5m = n(split, "ephemeral_1h_input_tokens"), n(split, "ephemeral_5m_input_tokens")
+    if w1h + w5m == 0:
+        w5m = n(usage, "cache_creation_input_tokens")
+    return {
+        "input": n(usage, "input_tokens"),
+        "output": n(usage, "output_tokens"),
+        "cache_read": n(usage, "cache_read_input_tokens"),
+        "cache_write_5m": w5m,
+        "cache_write_1h": w1h,
+    }
+
+
+def _cost(prices: dict[str, float], tokens: dict[str, int]) -> float:
+    """USD for a token count at per-token prices."""
+    return sum(tokens[k] * prices[k] for k in TOKEN_KINDS)
+
+
+def collect_model_calls(root: str, prices: PriceBook) -> dict[str, Any]:
+    """Price the Analyst's logged model calls under an investigation.
+
+    Parameters
+    ----------
+    root : str
+        ``investigations/<name>``, walked for ``model_calls_*.jsonl``.
+    prices : PriceBook
+        Where per-token prices come from.
+
+    Returns
+    -------
+    dict
+        ``{"total_cost_usd": x, "calls": n, "files": k, "unpriced_calls": u,
+        "unpriced_models": [...], "by_model": {model: {"calls": n,
+        "cost_usd": x, "input": ..., "output": ...}}}``. A call whose usage
+        carries its own ``cost`` (OpenRouter) is taken at that figure.
+    """
+    by_model: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "cost_usd": 0.0, **{k: 0 for k in TOKEN_KINDS}})
+    total = 0.0
+    calls = files = unpriced_calls = 0
+    unpriced: set[str] = set()
+    for dirpath, _dirs, names in os.walk(os.path.abspath(root)):
+        for fn in names:
+            if not (fn.startswith("model_calls_") and fn.endswith(".jsonl")):
+                continue
+            files += 1
+            try:
+                with open(os.path.join(dirpath, fn)) as f:
+                    lines = f.readlines()
+            except OSError:
+                continue
+            for line in lines:
+                try:
+                    rec = json.loads(line)
+                    model, usage = str(rec["model"]), dict(rec["usage"])
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                    continue
+                calls += 1
+                tokens = _tokens_from_call(usage)
+                m = by_model[model]
+                m["calls"] += 1
+                for k in TOKEN_KINDS:
+                    m[k] += tokens[k]
+                if isinstance(usage.get("cost"), (int, float)):
+                    cost = float(usage["cost"])
+                else:
+                    p = prices.for_call(str(rec.get("host") or ""), model)
+                    if p is None:
+                        unpriced_calls += 1
+                        unpriced.add(model)
+                        continue
+                    cost = _cost(p, tokens)
+                m["cost_usd"] += cost
+                total += cost
+    return {
+        "total_cost_usd": round(total, 4),
+        "calls": calls,
+        "files": files,
+        "unpriced_calls": unpriced_calls,
+        "unpriced_models": sorted(unpriced),
+        "by_model": {k: {**v, "cost_usd": round(v["cost_usd"], 4)} for k, v in sorted(by_model.items())},
+    }
 
 
 def _read_lead_session(path: str, investigation: str) -> dict[str, Any] | None:
@@ -254,11 +538,11 @@ def collect_lead(root: str, projects_dir: str | None = None) -> dict[str, Any]:
         if s is not None:
             sessions.append(s)
     total = sum(s["cost_usd"] for s in sessions)
-    unpriced = sorted({m for s in sessions for m in s["tokens_by_model"] if m not in LEAD_PRICES_PER_MTOK})
+    unpriced = sorted({m for s in sessions for m in s["tokens_by_model"] if m not in CLAUDE_PRICES_PER_MTOK})
     return {"total_cost_usd": round(total, 4), "sessions": sessions, "unpriced_models": unpriced}
 
 
-def collect(root: str, projects_dir: str | None = None) -> dict[str, Any]:
+def collect(root: str, projects_dir: str | None = None, prices: PriceBook | None = None) -> dict[str, Any]:
     """Walk an investigation directory and total its telemetry.
 
     Parameters
@@ -268,22 +552,29 @@ def collect(root: str, projects_dir: str | None = None) -> dict[str, Any]:
     projects_dir : str | None
         Claude Code's projects folder, where the lead sessions are found;
         ``default_projects_dir()`` when None.
+    prices : PriceBook | None
+        Source of per-token prices for evals and the Analyst's calls; a live
+        ``PriceBook()`` when None.
 
     Returns
     -------
     dict
-        ``total_cost_usd``: sub-agents plus lead; ``subagents``: total USD,
-        count, per-role totals and the list of sidecars; ``lead``: see
-        `collect_lead`; ``evals``: per-model token totals and per-run
-        summaries. Example::
+        ``total_cost_usd``: sub-agents plus lead plus evals plus the
+        Analyst's calls; ``subagents``: total USD, count, per-role totals and
+        the list of sidecars; ``lead``: see `collect_lead`; ``evals``: USD,
+        per-model token totals and costs, and per-run summaries;
+        ``analyst_calls``: see `collect_model_calls`. Example::
 
-            {"total_cost_usd": 40.34,
+            {"total_cost_usd": 52.84,
              "subagents": {"total_cost_usd": 12.34, "invocations": 7,
                            "by_agent": {"Transcript analyst": {"cost_usd": 9.1, "invocations": 3}}},
              "lead": {"total_cost_usd": 28.0, "sessions": [...], "unpriced_models": []},
-             "evals": {"runs": 4, "pairs": 9,
-                       "tokens_by_model": {"openai/gpt-5": {"input_tokens": 1e6, ...}}}}
+             "evals": {"total_cost_usd": 11.3, "runs": 4, "pairs": 9, "unpriced_models": [],
+                       "cost_by_model": {"openai/gpt-5": 11.3},
+                       "tokens_by_model": {"openai/gpt-5": {"input_tokens": 1e6, ...}}},
+             "analyst_calls": {"total_cost_usd": 1.2, "calls": 840, ...}}
     """
+    prices = prices or PriceBook()
     sidecars: list[dict[str, Any]] = []
     runs: list[dict[str, Any]] = []
     for dirpath, _dirs, files in os.walk(os.path.abspath(root)):
@@ -311,10 +602,13 @@ def collect(root: str, projects_dir: str | None = None) -> dict[str, Any]:
         a["turns"] += int(s.get("num_turns") or 0)
 
     tokens: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    cost_by_model: dict[str, float] = defaultdict(float)
+    unpriced_evals: set[str] = set()
     pair_count = 0
     run_summaries = []
     for r in runs:
         run_tokens = 0
+        run_cost = 0.0
         for e in r.get("pairs", {}).values():
             pair_count += 1
             # All attempts where recorded; older status files kept only the
@@ -329,11 +623,24 @@ def collect(root: str, projects_dir: str | None = None) -> dict[str, Any]:
                         if v:
                             tokens[model][k] += int(v)
                     run_tokens += int(mu.get("total_tokens") or 0)
-        run_summaries.append({"run_id": r.get("run_id"), "state": r.get("state"), "pairs": len(r.get("pairs", {})), "total_tokens": run_tokens, "path": r["_path"]})
+
+                    # The pair's route applies to its target model only, not
+                    # to a grader or other model the eval also called
+                    route = e.get("route") if model == e.get("model") else None
+                    p = prices.for_eval_model(model, route)
+                    if p is None:
+                        unpriced_evals.add(model)
+                        continue
+                    c = _cost(p, _tokens_from_inspect(mu))
+                    cost_by_model[model] += c
+                    run_cost += c
+        run_summaries.append({"run_id": r.get("run_id"), "state": r.get("state"), "pairs": len(r.get("pairs", {})), "total_tokens": run_tokens, "cost_usd": round(run_cost, 4), "path": r["_path"]})
+    eval_total = sum(cost_by_model.values())
 
     lead = collect_lead(root, projects_dir)
+    calls = collect_model_calls(root, prices)
     return {
-        "total_cost_usd": round(total + lead["total_cost_usd"], 4),
+        "total_cost_usd": round(total + lead["total_cost_usd"] + eval_total + calls["total_cost_usd"], 4),
         "subagents": {
             "total_cost_usd": round(total, 4),
             "invocations": len(sidecars),
@@ -342,18 +649,28 @@ def collect(root: str, projects_dir: str | None = None) -> dict[str, Any]:
         },
         "lead": lead,
         "evals": {
+            "total_cost_usd": round(eval_total, 4),
             "runs": len(runs),
             "pairs": pair_count,
+            "unpriced_models": sorted(unpriced_evals),
+            "cost_by_model": {m: round(v, 4) for m, v in sorted(cost_by_model.items())},
             "tokens_by_model": {m: dict(v) for m, v in sorted(tokens.items())},
             "run_summaries": run_summaries,
         },
+        "analyst_calls": calls,
     }
 
 
 def render(summary: dict[str, Any]) -> str:
     """Human-readable rendering of `collect`'s output."""
-    s, e, ld = summary["subagents"], summary["evals"], summary["lead"]
-    lines = [f"total spend: ${summary['total_cost_usd']:.2f} (sub-agents ${s['total_cost_usd']:.2f} + lead ${ld['total_cost_usd']:.2f}; eval usage below, in tokens)"]
+    s, e, ld, ac = summary["subagents"], summary["evals"], summary["lead"], summary["analyst_calls"]
+    lines = [
+        f"total spend: ${summary['total_cost_usd']:.2f} (sub-agents ${s['total_cost_usd']:.2f} + lead ${ld['total_cost_usd']:.2f}"
+        f" + evals ${e['total_cost_usd']:.2f} + analyst scans ${ac['total_cost_usd']:.2f})"
+    ]
+    unpriced = sorted(set(ld["unpriced_models"]) | set(e["unpriced_models"]) | set(ac["unpriced_models"]))
+    if unpriced:
+        lines.append(f"  under-counts: no price for {', '.join(unpriced)}; their usage is in tokens below")
     lines.append(f"sub-agent spend: ${s['total_cost_usd']:.2f} over {s['invocations']} invocation(s)")
     for agent, v in s["by_agent"].items():
         lines.append(f"  {agent:<24} ${v['cost_usd']:>8.2f}  {v['invocations']} invocation(s), {v['turns']} turns")
@@ -362,24 +679,31 @@ def render(summary: dict[str, Any]) -> str:
         unpriced = f" ({sess['unpriced_calls']} unpriced)" if sess["unpriced_calls"] else ""
         lines.append(f"  {sess['session']}  ${sess['cost_usd']:.2f}  {sess['calls']} model calls{unpriced}")
     if ld["unpriced_models"]:
-        lines.append(f"  no price for: {', '.join(ld['unpriced_models'])} (tokens only; add to LEAD_PRICES_PER_MTOK)")
-    lines.append(f"eval usage: {e['runs']} run(s), {e['pairs']} condition-model pair(s)")
+        lines.append(f"  no price for: {', '.join(ld['unpriced_models'])} (tokens only; add to CLAUDE_PRICES_PER_MTOK)")
+    lines.append(f"eval spend: ${e['total_cost_usd']:.2f} over {e['runs']} run(s), {e['pairs']} condition-model pair(s)")
     for model, t in e["tokens_by_model"].items():
-        lines.append(f"  {model:<40} in={t.get('input_tokens', 0):>10,} out={t.get('output_tokens', 0):>9,} total={t.get('total_tokens', 0):>11,}")
+        cost = e["cost_by_model"].get(model)
+        price = f"${cost:>8.2f}" if cost is not None else " unpriced"
+        lines.append(f"  {model:<40} {price}  in={t.get('input_tokens', 0):>10,} out={t.get('output_tokens', 0):>9,} total={t.get('total_tokens', 0):>11,}")
     if not e["tokens_by_model"]:
         lines.append("  (no eval usage recorded)")
+    lines.append(f"analyst scan spend: ${ac['total_cost_usd']:.2f} over {ac['calls']} model call(s)")
+    for model, m in ac["by_model"].items():
+        price = " unpriced" if model in ac["unpriced_models"] else f"${m['cost_usd']:>8.2f}"
+        lines.append(f"  {model:<40} {price}  {m['calls']} call(s), in={m['input']:>10,} out={m['output']:>9,}")
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Sum sub-agent cost sidecars and eval token usage.")
+    parser = argparse.ArgumentParser(description="Total an investigation's spend: sub-agents, lead, evals and the Analyst's scans.")
     parser.add_argument("investigation", help="investigations/<name> directory")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--offline", action="store_true", help="skip OpenRouter's price list; only Claude models are priced")
     args = parser.parse_args(argv)
     if not os.path.isdir(args.investigation):
         print(f"not a directory: {args.investigation}", file=sys.stderr)
         return 1
-    summary = collect(args.investigation)
+    summary = collect(args.investigation, prices=PriceBook(offline=args.offline))
     print(json.dumps(summary, indent=2) if args.json else render(summary))
     return 0
 
