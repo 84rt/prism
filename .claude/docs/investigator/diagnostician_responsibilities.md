@@ -34,7 +34,7 @@ The user presents an episode: a transcript (or a description of one) and a behav
 
 8. **Agree budget** (defaults below) and **autonomy** (the skill's Autonomy Agreement).
 
-9. **Initialise `investigations/<name>/`** with `INVESTIGATION-LOG.md` and `CANDIDATES.md` per §State Management. The Agreed Scope is written before Phase 1 begins.
+9. **Initialise `investigations/<name>/`** with `INVESTIGATION-LOG.md` and `CANDIDATES.md` per §State Management. The Agreed Scope is written before Phase 1 begins; its *Prism version* line is what `uv run --no-project python scripts/prism_version.py` prints, copied verbatim.
 
 ### Fixing the contrast class
 
@@ -406,7 +406,7 @@ Required report sections:
 6. **Recipes, if any** — where several factors are jointly sufficient rather than one being necessary, state the recipe and the interaction evidence for it. Do not collapse a recipe into a single headline cause.
 7. **Eliminated candidates** — with the evidence that eliminated each, and the confounds considered before elimination.
 8. **Candidate origins** — how many came from the CoT read, the user, the Critic, the Analyst's open-ended scan, or later evidence; and where the leading explanation came from.
-9. **Limitations** — grader validity, resample n, floor/ceiling exposure, construal checks whose derived verdict was not `succeeded`, eval-awareness rates, routing caveats (unpinned routing, below-native quantization, any re-pin and which rounds it split), blinding exposures (every `check_blinding.py` warning carried — a `task_args` difference above all — and any recorded exposure of pre-id logs), and every bypass or substitution. Write *"I did not consider X"* for a gap, never a reverse-engineered justification.
+9. **Limitations** — grader validity, resample n, floor/ceiling exposure, construal checks whose derived verdict was not `succeeded`, eval-awareness rates, routing caveats (unpinned routing, below-native quantization, any re-pin and which rounds it split), blinding exposures (every `check_blinding.py` warning carried — a `task_args` difference above all — and any recorded exposure of pre-id logs), and every bypass or substitution. Write *"I did not consider X"* for a gap, never a reverse-engineered justification. End with the Agreed Scope's *Prism version* line, verbatim; if it names this folder's own edits, say the instructions differed from the published Prism's there, and if it says *not frozen*, that later Prism changes could have reached the run mid-way.
 
    **Plus three standing limitations, stated in every forensic report:**
    - *Causal strength is bounded, not identified.* PN and PS are bounds absent a monotonicity argument that is rarely defensible for language models (`model_forensics_principles.md §5`).
@@ -493,6 +493,7 @@ variant may make them testable. Not rankable.>
 - Cost basis: <$/episode from the 1b log header; $/invocation per sub-agent role from cost.json once measured>
 - Diagnostician family = target family? <no | yes — mitigations per Phase 0>  |  Phase 4 pre-committed factor rule: <e.g. "highest-listed unvaried Mapper surface">
 - User-supplied leads: <verbatim, marked "no special status">
+- Prism version: <the line `uv run --no-project python scripts/prism_version.py` prints, verbatim>
 
 ## Phase 1: Initial Scoping
 ### Mapper Briefing Summary

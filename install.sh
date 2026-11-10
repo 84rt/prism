@@ -167,6 +167,8 @@ if [ "$PIN" = "1" ]; then
             echo "  The pinned copy is unchanged. Refresh the patch against the new commit and re-run."
             exit 1
         fi
+        # Recorded in the marker so scripts/prism_version.py can name it in reports
+        echo "local-edits ${LOCAL_PATCH#$TARGET_DIR/}" >> "$PIN_NEW/$PIN_MARKER"
         echo "Applied this folder's own edits: ${LOCAL_PATCH#$TARGET_DIR/}"
     fi
 
@@ -279,6 +281,7 @@ link_file "scripts/check_keys.py"
 link_file "scripts/new_ids.py"
 link_file "scripts/headroom.py"
 link_file "scripts/run_status.py"
+link_file "scripts/prism_version.py"
 
 # subagents
 link_file "subagents/__init__.py"
@@ -380,6 +383,7 @@ GITIGNORE_ENTRIES=(
     "scripts/new_ids.py"
     "scripts/headroom.py"
     "scripts/run_status.py"
+    "scripts/prism_version.py"
     ".claude/docs/investigator/orchestrator_analyst_guide.md"
     ".claude/docs/contracts/analyst_forensic_addendum.md"
     ".claude/docs/contracts/analyst_interface_contract.md"

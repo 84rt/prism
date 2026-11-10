@@ -126,6 +126,7 @@ unlink_file "scripts/check_keys.py"
 unlink_file "scripts/new_ids.py"
 unlink_file "scripts/headroom.py"
 unlink_file "scripts/run_status.py"
+unlink_file "scripts/prism_version.py"
 
 # subagents
 unlink_file "subagents/__init__.py"

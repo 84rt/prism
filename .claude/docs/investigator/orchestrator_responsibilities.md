@@ -96,7 +96,7 @@ The user presents a research question. The orchestrator helps articulate it as t
    - *Baseline drift policy*: If control conditions produce substantially different results across iterations, should the orchestrator re-run controls to check reproducibility (costs an extra iteration's compute) or flag the inconsistency and continue? Small sample sizes make some drift expected — agree on how much warrants action.
    - *Iteration cap*: Maximum number of investigation loop cycles before stopping, regardless of whether findings are conclusive. This prevents runaway costs on ambiguous questions.
 
-8. **Initialize the investigation directory.** Create `investigations/<investigation_name>/` at the workspace root, where `<investigation_name>` is a snake_case identifier for the research question (e.g., `agentic_misalignment_blind_spots`). All Orchestrator outputs for this investigation live here. Inside it, create `INVESTIGATION-LOG.md` to track state across iterations (see State Management below). The final `FINDINGS-REPORT.md` will be written here as a sibling at the end of the investigation (see Phase 3). The log's `## Agreed Scope` section (filled in by the end of Phase 1) is the load-bearing reference for downstream tactical/strategic categorisation at Phase 2j — write it explicitly enough that out-of-scope decisions can be detected later by comparing a proposed action against it.
+8. **Initialize the investigation directory.** Create `investigations/<investigation_name>/` at the workspace root, where `<investigation_name>` is a snake_case identifier for the research question (e.g., `agentic_misalignment_blind_spots`). All Orchestrator outputs for this investigation live here. Inside it, create `INVESTIGATION-LOG.md` to track state across iterations (see State Management below). The final `FINDINGS-REPORT.md` will be written here as a sibling at the end of the investigation (see Phase 3). The log's `## Agreed Scope` section (filled in by the end of Phase 1) is the load-bearing reference for downstream tactical/strategic categorisation at Phase 2j — write it explicitly enough that out-of-scope decisions can be detected later by comparing a proposed action against it. Its last line records which Prism is running: copy verbatim what `uv run --no-project python scripts/prism_version.py` prints (the commit, whether it is a frozen copy, and whether this folder applied its own edits to it).
 
 9. **Run the headroom survey before designing anything.** A design is only as informative as the cells it runs on. Where the target behaviour sits at 0% (or 100%) on every model, no manipulation can register, and every factorial built there is uninformative by construction. One archived overnight run spent three factorial iterations — about six hours of eight — on cells at 0/30 that this survey would have caught in half an hour, and it chose its second and third evals from published rates on older models after its first iteration had shown those rates did not transfer. Published rates are a prior, not a measurement.
 
@@ -560,6 +560,8 @@ A **suspended** investigation does not reach this phase and writes no findings r
    - *Mixed routes across the model set*: if some models were reached directly and others via OpenRouter, say so. This is benign when model is the manipulated variable and worth flagging when it is not.
    - *Re-pinning mid-investigation*: if a pinned provider became unavailable and the route changed, state which iterations ran on which provider and which comparisons are therefore not clean.
 
+   **Prism version (required).** One line under the caveats: the Agreed Scope's *Prism version* line, verbatim. If it says the folder applied its own edits, add that the scaffold's instructions differed from the published Prism's there. If it says *live checkout, not frozen*, add that later Prism changes could have reached the run mid-way.
+
 5. **Artefacts.** Point the user to the investigation log, iteration directories, and analyst scan results for drill-down.
 
 6. **Suggested next steps** (if appropriate). 2-3 concrete options ranked by information value, not a laundry list.
@@ -600,6 +602,7 @@ The orchestrator maintains `INVESTIGATION-LOG.md` at the investigation root (`in
 - Eval environment: <path>
 - Execution parameters: <details>
 - Budget: <spend cap, iteration cap; cost basis observed via `scripts/spend.py`>
+- Prism version: <the line `uv run --no-project python scripts/prism_version.py` prints, verbatim>
 
 ## Headroom Survey
 - Logs: `headroom/logs/` — <evals × models>, <n> per cell; estimated cost <figure>
