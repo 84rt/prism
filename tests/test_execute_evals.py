@@ -439,6 +439,25 @@ def test_structural_failure_is_excluded_at_preflight_with_evidence(tmp_path, fak
     assert "accuracy" not in pf["evidence"]["output_tail"]
 
 
+def test_a_probe_that_exits_cleanly_but_fails_its_log_check_says_why(tmp_path, fake_eval_script, monkeypatch):
+    # The eval runs and exits 0, but the log cannot be confirmed: the
+    # evidence must carry the log's status and error, not just the build output.
+    monkeypatch.setattr(ee, "verify_eval_log", lambda log_dir: {"log_path": None, "status": "verification_error", "error": "No module named 'inspect_ai'"})
+    run_dir, _, _ = run_foreground(tmp_path, fake_eval_script, monkeypatch, conditions={"baseline": {"task": "task.py", "args": {}}})
+    evidence = ee.Status.load(run_dir).data["preflight"]["pairs"]["baseline__openai-gpt-5"]["evidence"]
+    assert evidence["exit_code"] is None or evidence["exit_code"] == "0"
+    assert evidence["log_status"] == "verification_error"
+    assert evidence["log_error"] == "No module named 'inspect_ai'"
+
+
+def test_the_runner_refuses_to_start_without_inspect(tmp_path, monkeypatch):
+    path, _ = make_request(tmp_path)
+    monkeypatch.setattr(ee.importlib.util, "find_spec", lambda name: None)
+    run_dir, problems = ee.prepare_run(path)
+    assert run_dir == ""
+    assert "--no-project" in problems[0]
+
+
 def test_sample_errors_map_to_sample_level(tmp_path, fake_eval_script, monkeypatch):
     run_dir, _, _ = run_foreground(tmp_path, fake_eval_script, monkeypatch, mode="sample_error", overrides={"skip_preflight": True, "epochs": 3}, conditions={"baseline": {"task": "task.py", "args": {}}})
     data = ee.Status.load(run_dir).data

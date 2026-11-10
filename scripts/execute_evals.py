@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import re
@@ -1904,6 +1905,10 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
                 "exit_code": next((e.split("=", 1)[1] for e in r.errors if e.startswith("exit_code=")), None),
                 "command": p.preflight_command,
                 "output_tail": next((e for e in r.errors if e.startswith("[")), "") ,
+                # An eval can exit 0 and still leave a failed log; its own
+                # (already scrubbed) error is then the only account of why.
+                "log_status": r.status,
+                "log_error": next((e for e in r.errors if not e.startswith(("[", "exit_code="))), None),
             }
 
         pf["pairs"][p.id] = entry
@@ -2110,6 +2115,11 @@ def prepare_run(
     problems = validate_request(request)
     if problems:
         return "", problems
+
+    # The worker reads every eval log with Inspect to confirm it succeeded;
+    # without it each eval "fails" after running, and preflight excludes all.
+    if importlib.util.find_spec("inspect_ai") is None:
+        return "", ["inspect_ai is not importable here: launch the runner with `uv run python scripts/execute_evals.py` from the eval's project, not with `--no-project`"]
 
     overrides = request.get("overrides") or {}
     notes: list[str] = []
