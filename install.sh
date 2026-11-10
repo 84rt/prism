@@ -11,7 +11,9 @@
 # only when install is re-run with --pin, which moves the copy forward and
 # refuses while one of the target's investigations is still running (--force
 # skips that check). A plain re-install puts a pinned target back on live
-# links and removes the copy, under the same check.
+# links and removes the copy, under the same check. A target's own edits to
+# the scaffold can live in .prism-local.patch beside the copy: --pin applies
+# it to each new copy and stops if it no longer fits.
 #
 # Usage: ./install.sh /path/to/target_repo [--pin] [--force]
 set -euo pipefail
@@ -108,6 +110,10 @@ esac
 # no devcontainer mount, in either mode.
 PIN_DIR="$TARGET_DIR/.$SCAFFOLD_NAME"
 PIN_MARKER="PINNED_COMMIT"
+LOCAL_PATCH="$TARGET_DIR/.$SCAFFOLD_NAME-local.patch"
+if [ "$PIN" = "0" ] && [ -f "$LOCAL_PATCH" ]; then
+    echo "Warning: ${LOCAL_PATCH#$TARGET_DIR/} is applied only to a pinned copy; without --pin it is ignored."
+fi
 if [ "$PIN" = "1" ]; then
     MODE="pinned"
     if ! git -C "$SCAFFOLD_DIR" rev-parse --verify -q HEAD >/dev/null; then
@@ -149,6 +155,21 @@ if [ "$PIN" = "1" ]; then
     mkdir "$PIN_NEW"
     git -C "$SCAFFOLD_DIR" archive --format=tar HEAD | tar -x -C "$PIN_NEW"
     git -C "$SCAFFOLD_DIR" log -1 --format='%H%n%cI%n%s' HEAD > "$PIN_NEW/$PIN_MARKER"
+
+    # A target may carry its own edits to the scaffold as a patch file beside
+    # the copy (paths relative to the scaffold root), re-applied to every new
+    # copy. No fuzz: a patch that no longer fits exactly stops the install,
+    # leaving the old copy in place, rather than landing in the wrong spot.
+    if [ -f "$LOCAL_PATCH" ]; then
+        if ! patch -p1 -s -N -F 0 -d "$PIN_NEW" -i "$LOCAL_PATCH" >/dev/null; then
+            rm -rf "$PIN_NEW"
+            echo "Error: ${LOCAL_PATCH#$TARGET_DIR/} no longer applies to $SCAFFOLD_NAME at ${PIN_COMMIT:0:7}."
+            echo "  The pinned copy is unchanged. Refresh the patch against the new commit and re-run."
+            exit 1
+        fi
+        echo "Applied this folder's own edits: ${LOCAL_PATCH#$TARGET_DIR/}"
+    fi
+
     if [ -e "$PIN_DIR" ]; then
         mv "$PIN_DIR" "$PIN_DIR.old.$$"
     fi

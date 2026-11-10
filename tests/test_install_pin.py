@@ -10,6 +10,7 @@ directly.
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import subprocess
@@ -125,6 +126,41 @@ def test_uninstall_removes_pinned_links_and_the_copy(pinned):
     assert result.returncode == 0, result.stdout + result.stderr
     assert not (pinned / COPY).exists()
     assert _links(pinned) == []
+
+
+def _local_patch(target: Path, rel: str, old: str, new: str) -> None:
+    """Write a target's own patch replacing one line of a scaffold file."""
+    text = (REPO_ROOT / rel).read_text().splitlines(keepends=True)
+    edited = [new if line == old else line for line in text]
+    assert edited != text, f"{old!r} not in {rel}"
+    diff = difflib.unified_diff(text, edited, fromfile=f"a/{rel}", tofile=f"b/{rel}")
+    (target / f"{COPY}-local.patch").write_text("".join(diff))
+
+
+def test_a_targets_own_patch_is_applied_to_each_new_copy(pinned):
+    rel = ".claude/skills/diagnose/candidate-methodology.md"
+    first = (REPO_ROOT / rel).read_text().splitlines(keepends=True)[0]
+    _local_patch(pinned, rel, first, "# edited for this folder\n")
+
+    result = _run("install.sh", str(pinned), "--pin")
+    assert result.returncode == 0, result.stdout + result.stderr
+    # Read through the target's own link, as a run would
+    assert (pinned / rel).read_text().startswith("# edited for this folder\n")
+    assert (REPO_ROOT / rel).read_text().startswith(first), "the checkout itself was edited"
+
+
+def test_a_patch_that_no_longer_fits_keeps_the_old_copy(pinned):
+    (pinned / f"{COPY}-local.patch").write_text(
+        "--- a/README.md\n+++ b/README.md\n@@ -1,1 +1,1 @@\n-a line that is not there\n+anything\n"
+    )
+    sentinel = pinned / COPY / "sentinel"
+    sentinel.write_text("old copy")
+
+    result = _run("install.sh", str(pinned), "--pin")
+    assert result.returncode == 1
+    assert "no longer applies" in result.stdout
+    assert sentinel.exists(), "the old copy was replaced"
+    assert not list(pinned.glob(f"{COPY}.*")), "a temporary copy was left behind"
 
 
 def test_unknown_options_are_refused(tmp_path):
