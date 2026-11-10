@@ -388,4 +388,7 @@ async def run_transcript_analyst(cwd: str | None = None, **data: Any) -> str:
         thinking=data.get("subagent_thinking"),
         route=data.get("subagent_route"),
         max_turns=data.get("subagent_max_turns"),
+        # Scans and validators often run 5-20 minutes in the foreground: a
+        # 1-hour cache outlives them (see `runner._cache_ttl_env`)
+        cache_ttl="1h",
     )

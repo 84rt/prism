@@ -163,6 +163,10 @@ no `-M` arguments. Never relax or substitute a pin to make a command succeed.
         thinking=data.get("subagent_thinking"),
         route=data.get("subagent_route"),
         max_turns=data.get("subagent_max_turns"),
+        # Each `execute_evals.py wait` idles up to 55 minutes: a 1-hour cache
+        # outlives it, so the next turn re-reads the context instead of
+        # rewriting it (see `runner._cache_ttl_env`)
+        cache_ttl="1h",
     )
 
 

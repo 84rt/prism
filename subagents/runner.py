@@ -278,6 +278,50 @@ def _bash_timeout_env() -> dict[str, str]:
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
     }
 
+
+# --- Prompt cache lifetime ----------------------------------------------------
+#
+# On an API key the CLI caches a sub-agent's context for 5 minutes. An agent
+# that waits longer on its own command — an Analyst on a 5-20 minute scan, an
+# Executor on its 55-minute `execute_evals.py wait` — returns to an expired
+# cache and pays to write its whole context again (150-200k tokens, about $1
+# on Opus 5.5 each time). A 1-hour cache costs 2x the input price per write
+# instead of 1.25x, so it pays only for roles that wait: in the sandbagging
+# rerun it saved an estimated $0.75 per Analyst and $0.90 per Executor, and
+# would have cost the Critic, Designer and Mapper $0.10-0.20 each. Roles opt in
+# through `run_agent`'s `cache_ttl`. The variable name and values were checked
+# against the bundled CLI of the pinned `claude-agent-sdk` (0.2.165); a user's
+# own exported value wins.
+CACHE_TTL_ENV = "CLAUDE_CODE_PROMPT_CACHE_TTL"
+CACHE_TTLS = ("5m", "1h")
+
+
+def _cache_ttl_env(cache_ttl: str | None) -> dict[str, str]:
+    """The prompt-cache lifetime setting for one sub-agent.
+
+    Parameters
+    ----------
+    cache_ttl : str | None
+        ``"5m"`` or ``"1h"``; None leaves the CLI's default (5 minutes on an
+        API key).
+
+    Returns
+    -------
+    dict[str, str]
+        ``{"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h"}`` for ``"1h"``, or ``{}``
+        when unset. A value the user exported takes precedence.
+
+    Raises
+    ------
+    ValueError
+        For a lifetime the CLI does not accept.
+    """
+    if cache_ttl is None:
+        return {}
+    if cache_ttl not in CACHE_TTLS:
+        raise ValueError(f"cache_ttl must be one of {CACHE_TTLS}, not {cache_ttl!r}")
+    return {CACHE_TTL_ENV: os.environ.get(CACHE_TTL_ENV) or cache_ttl}
+
 # The one project setting sub-agents relied on, passed explicitly now that
 # project settings are not loaded: secrets in `.env` files are never read.
 SUBAGENT_SETTINGS: dict[str, Any] = {
@@ -1209,6 +1253,7 @@ async def run_agent(
     thinking: ThinkingConfig | None = None,
     route: str | None = None,
     max_turns: int | None = None,
+    cache_ttl: str | None = None,
 ) -> str:
     """Run an Agent SDK agent and return its output.
 
@@ -1253,6 +1298,10 @@ async def run_agent(
             DEFAULT_MAX_TURNS. Set per-invocation via the `subagent_max_turns`
             input field when a work order is known to need more (or fewer)
             turns than the default.
+        cache_ttl: Prompt-cache lifetime, "5m" or "1h"; None keeps the CLI's
+            default (5 minutes on an API key). Set by roles that wait on long
+            commands, so the wait doesn't expire their cache (see
+            `_cache_ttl_env`).
 
     Returns:
         The agent's output as a string.
@@ -1326,7 +1375,7 @@ async def run_agent(
         permission_mode="bypassPermissions",
         max_turns=max_turns or DEFAULT_MAX_TURNS,
         cwd=working_dir,
-        env={**ISOLATION_ENV, **_bash_timeout_env(), **route_env},
+        env={**ISOLATION_ENV, **_bash_timeout_env(), **_cache_ttl_env(cache_ttl), **route_env},
         **({"hooks": hooks} if hooks else {}),
     )
 
