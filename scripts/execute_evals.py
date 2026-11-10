@@ -659,6 +659,89 @@ def sample_shape(log_path: str) -> dict[str, Any]:
     }
 
 
+# How often the live counter re-reads each running eval's log, in seconds.
+# Inspect saves a running .eval every ten finished samples or fewer, so a
+# faster poll would mostly re-read an unchanged file.
+LIVE_COUNT_INTERVAL = 20
+
+
+def live_samples_completed(log_dir: str, since: float) -> int | None:
+    """Finished samples so far in the eval still writing into a log directory.
+
+    Inspect saves a running ``.eval`` log every few finished samples (at most
+    ten), replacing the file in one step, so its sample summaries can be read
+    mid-run without a lock and without ever seeing a half-written file. Only
+    the ``completed`` flags are read; nothing about scores is kept.
+
+    Parameters
+    ----------
+    log_dir : str
+        The pair's log directory.
+    since : float
+        When this attempt started (seconds since the epoch). An older log in
+        the same directory belongs to an earlier run and is ignored.
+
+    Returns
+    -------
+    int | None
+        The count at the log's last save, or None while this attempt has no
+        log yet or its log can't be read.
+    """
+    path = find_newest_log(log_dir)
+    if path is None or os.path.getmtime(path) < since:
+        return None
+    try:
+        from inspect_ai.log import read_eval_log_sample_summaries
+
+        return sum(1 for s in read_eval_log_sample_summaries(path) if s.completed)
+    except Exception:  # mid-replace or unreadable: try again next round
+        return None
+
+
+def watch_live_counts(status: Status, stop: threading.Event, interval: float = LIVE_COUNT_INTERVAL) -> None:
+    """Keep each running pair's ``samples_completed`` current until stopped.
+
+    Runs on its own thread beside ``execute``, which records a pair's counts
+    only once its eval process exits. The final count from the finished log
+    always replaces the live one, since a pair is touched here only while its
+    state is ``running``.
+
+    Parameters
+    ----------
+    status : Status
+        The run's status file.
+    stop : threading.Event
+        Set when the run is over.
+    interval : float
+        Seconds between rounds.
+    """
+    # Per pair: (attempt number, wall-clock start) of the attempt being watched
+    started: dict[str, tuple[int, float]] = {}
+    while not stop.wait(interval):
+        with status.lock:
+            running = {
+                pid: (e["attempts"], e["log_dir"])
+                for pid, e in status.data["pairs"].items()
+                if e.get("state") == "running" and e.get("log_dir")
+            }
+        # A new attempt restarts its count from its own fresh log
+        for pid, (attempt, _) in running.items():
+            if started.get(pid, (None,))[0] != attempt:
+                started[pid] = (attempt, time.time())
+
+        # Logs are read outside the lock so a slow read never holds up an event
+        counts = {pid: live_samples_completed(log_dir, started[pid][1]) for pid, (_, log_dir) in running.items()}
+        with status.lock:
+            changed = False
+            for pid, done in counts.items():
+                e = status.pair(pid)
+                if done is not None and e.get("state") == "running" and e["attempts"] == running[pid][0]:
+                    changed |= e.get("samples_completed") != done
+                    e["samples_completed"] = done
+            if changed:
+                status.save()
+
+
 # ---------------------------------------------------------------------------
 # Process management
 # ---------------------------------------------------------------------------
@@ -1360,7 +1443,10 @@ class Status:
     def __init__(self, path: str, data: dict[str, Any] | None = None):
         self.path = path
         self.data: dict[str, Any] = data or {}
-        self._lock = threading.Lock()
+        # Held around every change as well as every save once the live sample
+        # counter runs beside the main thread: a save serialises `data`, and a
+        # key added mid-dump would abort it. Re-entrant so a holder can save.
+        self.lock = threading.RLock()
 
     @classmethod
     def load(cls, run_dir: str) -> "Status":
@@ -1369,7 +1455,7 @@ class Status:
             return cls(path, json.load(f))
 
     def save(self) -> None:
-        with self._lock:
+        with self.lock:
             self.data["updated_at"] = _now()
             tmp = self.path + ".tmp"
             with open(tmp, "w") as f:
@@ -1706,6 +1792,10 @@ def run_worker(run_dir: str) -> int:
             Path(p.log_dir).mkdir(parents=True, exist_ok=True)
 
         def on_event(kind: str, payload: Any) -> None:
+            with status.lock:
+                _record_event(kind, payload)
+
+        def _record_event(kind: str, payload: Any) -> None:
             if kind == "batch_start":
                 for pid in payload:
                     e = status.pair(pid)
@@ -1740,7 +1830,16 @@ def run_worker(run_dir: str) -> int:
                 status.data["concurrency"]["reductions"].append(asdict(payload))
             status.save()
 
-        report = execute(commands, config, capture_dir=os.path.join(_quarantine_dir(run_dir), "eval_output"), on_event=on_event)
+        # Samples finished so far, for the lead's status view and the panel's
+        # run tab, which would otherwise see a condition's count only at its end
+        stop_counting = threading.Event()
+        counter = threading.Thread(target=watch_live_counts, args=(status, stop_counting), daemon=True)
+        counter.start()
+        try:
+            report = execute(commands, config, capture_dir=os.path.join(_quarantine_dir(run_dir), "eval_output"), on_event=on_event)
+        finally:
+            stop_counting.set()
+            counter.join()
         status.data["errors"].extend(report.errors)
         status.data["state"] = "interrupted" if report.status == "interrupted" else "completed"
         # Anything still pending (e.g. excluded before launch) keeps its state.

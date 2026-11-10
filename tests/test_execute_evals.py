@@ -554,3 +554,50 @@ def test_rendered_report_passes_check_report(tmp_path, fake_eval_script, monkeyp
         run_dir, _, _ = run_foreground(sub, fake_eval_script, monkeypatch, mode=mode, conditions=conditions)
         defects, _ = cr.check_report("executor", ee.render_report(ee.Status.load(run_dir).data))
         assert defects == [], (mode, defects)
+
+
+# ---------------------------------------------------------------------------
+# Live sample counts while an eval runs
+# ---------------------------------------------------------------------------
+
+
+def test_live_count_reads_the_attempts_own_log(tmp_path):
+    log_dir = tmp_path / "logs"
+    assert ee.live_samples_completed(str(log_dir), since=0) is None  # no log yet
+    write_fixture_log(str(log_dir / "run.eval"), epochs=3)
+    assert ee.live_samples_completed(str(log_dir), since=0) == 3
+    # A log older than the attempt belongs to an earlier run
+    assert ee.live_samples_completed(str(log_dir), since=os.path.getmtime(log_dir / "run.eval") + 60) is None
+
+
+def test_live_counter_updates_running_pairs_only(tmp_path):
+    import threading
+    import time
+
+    running, done = tmp_path / "logs_a", tmp_path / "logs_b"
+    write_fixture_log(str(running / "a.eval"), epochs=3)
+    write_fixture_log(str(done / "b.eval"), epochs=2)
+    # Dated after the counter starts, as an attempt's own log would be
+    for p in (running / "a.eval", done / "b.eval"):
+        os.utime(p, (time.time() + 5, time.time() + 5))
+    status = ee.Status(str(tmp_path / "status.json"), {"pairs": {
+        "a": {"state": "running", "attempts": 1, "log_dir": str(running), "samples_completed": None},
+        "b": {"state": "success", "attempts": 1, "log_dir": str(done), "samples_completed": 7},
+    }})
+
+    stop = threading.Event()
+    counter = threading.Thread(target=ee.watch_live_counts, args=(status, stop, 0.05), daemon=True)
+    counter.start()
+    try:
+        deadline = time.time() + 10
+        while status.pair("a")["samples_completed"] is None and time.time() < deadline:
+            time.sleep(0.05)
+    finally:
+        stop.set()
+        counter.join()
+
+    saved = json.loads((tmp_path / "status.json").read_text())
+    assert saved["pairs"]["a"]["samples_completed"] == 3
+    # A finished pair keeps its final count from the finished log
+    assert saved["pairs"]["b"]["samples_completed"] == 7
+    assert_no_leak(json.dumps(saved), "status.json")

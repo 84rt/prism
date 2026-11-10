@@ -24,9 +24,11 @@ What it reports
 - ``explanation``: the top-ranked live candidate (model forensics) or the
   latest hypothesis (science of evals), trimmed.
 - ``helpers``: one per receipt, with Executor sample counts from its run's
-  ``status.json``, which updates as each condition finishes. Inspect's live
-  sample store would count per sample, but it is an SQLite database in WAL
-  mode that can't be read without taking a lock, so it is not used.
+  ``status.json``. The eval runner keeps a running condition's count current
+  from its log, which Inspect saves every ten finished samples or fewer.
+  Inspect's live sample store would count per sample, but it is an SQLite
+  database in WAL mode that can't be read without taking a lock, so it is
+  not used.
 - ``steps``: one short line per finished phase or round.
 - ``cost``: total dollars (helpers plus the lead, as `spend.py` reports them)
   and eval tokens.
@@ -319,9 +321,10 @@ def executor_samples(receipt: dict[str, Any]) -> dict[str, int] | None:
     dict | None
         ``{"done": n, "total": m}``, or None before the run has a status file
         or when a condition's size can't be known. A condition still running
-        counts 0 done until it finishes, since the status file updates per
-        condition. Its size, before then, is the request's ``epochs`` times
-        its sample ids, when the request names them.
+        counts the samples its log held at Inspect's last save of it (the eval
+        runner updates that every 20 seconds or so). Its size, until it
+        finishes, is the request's ``epochs`` times its sample ids, when the
+        request names them.
     """
     receipt_path = receipt.get("receipt")
     runs_dir = os.path.join(os.path.dirname(receipt_path), "runs") if receipt_path else None
