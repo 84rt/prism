@@ -18,7 +18,8 @@ container-local and never committed.
 
 Every test runs under an autouse spend guard (see `_spend_guard`): the Agent
 SDK's `query` raises and the provider keys are unset, so no test can reach a
-paid provider by accident.
+paid provider by accident. A second autouse fixture (`_no_docker`) keeps the
+eval runner from asking the host's real Docker.
 """
 
 from __future__ import annotations
@@ -121,6 +122,25 @@ def _spend_guard(request, monkeypatch):
         monkeypatch.setattr(runner, "query", _refuse_query)
     except ImportError:  # SDK not installed: nothing can spend through it
         pass
+
+
+@pytest.fixture(autouse=True)
+def _no_docker(monkeypatch):
+    """Answer the eval runner's docker calls with "no containers", per test.
+
+    Every run ends with a leftover-container check and preflight measures its
+    sandboxes, so without this a test would ask the host's real Docker, wait
+    on a slow daemon and see other runs' containers. Tests that need Docker
+    to say something patch ``execute_evals._docker`` (or pass a stand-in) themselves.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Undoes the change after the test.
+    """
+    import execute_evals
+
+    monkeypatch.setattr(execute_evals, "_docker", lambda args, timeout=0: "")
 
 
 # --- Forensics corpus (container-local; see the module docstring) ---
