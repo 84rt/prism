@@ -2236,10 +2236,18 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
     surviving: list[PairPlan] = []
     durations: list[float] = []
 
+    def cut_off(result: EvalResult | None) -> bool:
+        """Whether a stop came before this probe or retest ran, or interrupted it."""
+        return result is None or result.status == "interrupted"
+
     for p in pairs:
         r = probes[p.id]
-        if r is None or (p.id in retests and retests[p.id] is None):
-            continue  # shutting down before this pair's probe or retest ran
+        if cut_off(r) or (p.id in retests and cut_off(retests[p.id])):
+            # A stop says nothing about the eval: record no verdict, so the
+            # pair is neither excluded as broken nor left mid-preflight
+            status.pair(p.id)["state"] = "interrupted"
+            status.save()
+            continue
         entry: dict[str, Any] = {
             "outcome": None,
             "process_retries": r.process_retries,

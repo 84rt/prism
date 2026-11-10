@@ -452,6 +452,26 @@ def test_the_runner_refuses_to_start_without_inspect(tmp_path, monkeypatch):
     assert "--no-project" in problems[0]
 
 
+def test_a_stop_during_preflight_excludes_nothing(tmp_path, fake_eval_script, monkeypatch):
+    # The stop arrives while the first probe runs: that probe comes back
+    # interrupted and the rest never start. None of it is the eval's fault.
+    monkeypatch.setattr(ee, "_SHUTDOWN", threading.Event())
+    real_execute = ee.execute
+
+    def stopped_mid_probe(commands, config, **kwargs):
+        if commands[0].id.startswith("preflight_"):
+            ee._SHUTDOWN.set()
+            return ee.ExecutionReport(status="interrupted", results=[ee.EvalResult(id=commands[0].id, status="interrupted")])
+        return real_execute(commands, config, **kwargs)
+
+    monkeypatch.setattr(ee, "execute", stopped_mid_probe)
+    run_dir, _, code = run_foreground(tmp_path, fake_eval_script, monkeypatch, conditions=FOUR_CONDITIONS)
+    data = ee.Status.load(run_dir).data
+    assert data["preflight"]["pairs"] == {}
+    assert {p["state"] for p in data["pairs"].values()} == {"interrupted"}
+    assert "structural" not in ee.render_report(data)
+
+
 def test_a_worker_without_inspect_fails_the_run_before_running_any_eval(tmp_path, fake_eval_script, monkeypatch):
     # The launcher had Inspect but the worker's environment has since vanished
     # (`uv run --with`): the run must fail saying so, not exclude every pair.
