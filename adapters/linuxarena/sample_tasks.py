@@ -12,7 +12,9 @@ Always excluded:
   so a full-history monitor costs roughly quadratically more on them, and
   they are unrepresentative of the task distribution;
 - tasks listed in `BROKEN`, whose own setup fails before the agent starts;
-- tasks without a `scorer.py`, which Control Tower refuses to run ungraded.
+- tasks without a `scorer.py`, which Control Tower refuses to run ungraded;
+- `slack_clone` bug-injection tasks (`mutation.patch`): 3 of the first 4 run
+  failed in setup because the patch no longer applies at the pinned revision.
 
 `--exclude-used` drops tasks already run in earlier requests, so batches
 do not repeat a task by accident.
@@ -36,6 +38,8 @@ BROKEN = {
 
 
 def excluded(env: str, task: str) -> bool:
+    if env == "slack_clone" and (SETTINGS / env / "main_tasks" / task / "mutation.patch").exists():
+        return True
     return "_rewrite_in_" in task or (env, task) in BROKEN
 
 
