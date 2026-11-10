@@ -117,7 +117,20 @@ def read_log(path: str) -> list[dict[str, Any]]:
 
 
 def _match(pattern: str, text: str) -> re.Match[str] | None:
-    """Match a data-file pattern at the start of `text`, ignoring case."""
+    """Match a data-file pattern at the start of `text`, ignoring case.
+
+    Parameters
+    ----------
+    pattern : str
+        A regular expression from the pipeline data file.
+    text : str
+        A log heading.
+
+    Returns
+    -------
+    re.Match | None
+        The match, whose named groups (``round``) the callers read.
+    """
     return re.match(pattern, text, re.I)
 
 
@@ -166,7 +179,18 @@ PLAIN_SYMBOLS = str.maketrans({
 
 
 def _plain(text: str) -> str:
-    """Strip markdown emphasis and code marks, swap wide symbols, and collapse whitespace."""
+    """Strip markdown emphasis and code marks, swap wide symbols, and collapse whitespace.
+
+    Parameters
+    ----------
+    text : str
+        A line from the log.
+
+    Returns
+    -------
+    str
+        e.g. ``"**C2** → refuted"`` becomes ``"C2 -> refuted"``.
+    """
     return " ".join(re.sub(r"[`*]", "", text).translate(PLAIN_SYMBOLS).split())
 
 
@@ -254,9 +278,19 @@ def detect_pipeline(inv: str, sections: list[dict[str, Any]], receipts: list[dic
 
 
 def run_state(inv: str) -> str:
-    """``finished``, ``suspended`` or ``running``, from the folder's marker files.
+    """Whether a run is going, paused or done, from the folder's marker files.
 
     A report wins over a resume note: the run did finish.
+
+    Parameters
+    ----------
+    inv : str
+        The investigation folder.
+
+    Returns
+    -------
+    str
+        ``finished``, ``suspended`` or ``running``.
     """
     if os.path.exists(os.path.join(inv, "FINDINGS-REPORT.md")):
         return "finished"
@@ -297,6 +331,18 @@ def helper_state(receipt: dict[str, Any]) -> str:
 
 
 def _load_json(path: str | None) -> dict[str, Any] | None:
+    """Read a JSON object from a file that may be missing, half-written or not an object.
+
+    Parameters
+    ----------
+    path : str | None
+        The file; None reads nothing.
+
+    Returns
+    -------
+    dict | None
+        The object, or None for any of those cases.
+    """
     if not path:
         return None
     try:
@@ -409,16 +455,39 @@ def collect_helpers(receipts: list[dict[str, Any]], spec: dict[str, Any]) -> lis
 
 
 def _round_label(n: int | None, cap: int | None) -> str | None:
-    """``"2 of 4"`` with a cap, ``"2"`` without, None outside a loop."""
+    """A round's label for the panel.
+
+    Parameters
+    ----------
+    n : int | None
+        The round number; None outside a loop.
+    cap : int | None
+        The iteration cap, if the scope set one.
+
+    Returns
+    -------
+    str | None
+        ``"2 of 4"`` with a cap, ``"2"`` without, None outside a loop.
+    """
     if n is None:
         return None
     return f"{n} of {cap}" if cap else str(n)
 
 
 def iteration_cap(sections: list[dict[str, Any]]) -> int | None:
-    """The iteration cap recorded in the Agreed Scope, or None (none, or not found).
+    """The iteration cap recorded in the Agreed Scope.
 
     Matches lines such as ``- Iteration cap: **4**``; ``**none**`` gives None.
+
+    Parameters
+    ----------
+    sections : list[dict]
+        `read_log`'s output.
+
+    Returns
+    -------
+    int | None
+        The cap; None when the scope set none or it was not found.
     """
     for s in sections:
         if s["title"].lower().startswith("agreed scope"):
@@ -544,7 +613,20 @@ def leading_explanation(name: str, inv: str, mapped: list[dict[str, Any]]) -> st
 
 
 def _ledger_ids(lines: list[str], label: str) -> list[str]:
-    """Candidate ids on a ``- <label>:`` line of a Ledger Delta block, in order."""
+    """Candidate ids on a ``- <label>:`` line of a Ledger Delta block, in order.
+
+    Parameters
+    ----------
+    lines : list[str]
+        The block's lines.
+    label : str
+        ``Eliminated`` or ``Added``.
+
+    Returns
+    -------
+    list[str]
+        e.g. ``["C2", "X3"]`` for ``- **Eliminated:** `C2`, `X3```, each once.
+    """
     ids: list[str] = []
     for ln in lines:
         if re.match(rf"-\s+\*{{0,2}}{label}\*{{0,2}}\s*:", ln, re.I):
@@ -553,7 +635,19 @@ def _ledger_ids(lines: list[str], label: str) -> list[str]:
 
 
 def _ledger_change(section: dict[str, Any]) -> str | None:
-    """``"C2 out, X3 added"`` from a section's Ledger Delta blocks; None without one."""
+    """What a round changed in the candidate ledger, from its Ledger Delta blocks.
+
+    Parameters
+    ----------
+    section : dict
+        One mapped log section.
+
+    Returns
+    -------
+    str | None
+        e.g. ``"C2 out; X3 added"``, or ``"no candidate out"``; None when the
+        section has no Ledger Delta block.
+    """
     lines = [ln for sub in section["subs"] if sub["title"].lower().startswith("ledger delta") for ln in sub["lines"]]
     if not lines:
         return None
@@ -568,7 +662,16 @@ def _decision_headline(section: dict[str, Any]) -> str | None:
     The first line that opens in bold, skipping bold labels such as
     ``**ESCALATION NOTE (...):**``, with parentheticals removed: e.g.
     ``**Iterate (iteration 3)** — AM leaking scenario`` -> ``"Iterate - AM leaking scenario"``.
-    None when the block has no such line.
+
+    Parameters
+    ----------
+    section : dict
+        One mapped log section.
+
+    Returns
+    -------
+    str | None
+        The headline; None when the block has no such line.
     """
     for sub in section["subs"]:
         if sub["title"].lower().startswith("decision"):
@@ -634,6 +737,18 @@ def finished_steps(name: str, spec: dict[str, Any], mapped: list[dict[str, Any]]
 
 
 def _iso_mtime(path: str) -> str | None:
+    """When a file was last written, as an ISO time in UTC.
+
+    Parameters
+    ----------
+    path : str
+        The file.
+
+    Returns
+    -------
+    str | None
+        e.g. ``"2026-11-08T14:20:03+00:00"``; None if the file is missing.
+    """
     try:
         return datetime.fromtimestamp(os.path.getmtime(path), timezone.utc).isoformat(timespec="seconds")
     except OSError:
@@ -706,7 +821,19 @@ def build_status(inv: str, hint: str | None = None, pipelines: dict[str, Any] | 
 
 
 def render(status: dict[str, Any]) -> str:
-    """A short readable summary of `build_status`'s answer, for a terminal."""
+    """A short readable summary of `build_status`'s answer, for a terminal.
+
+    Parameters
+    ----------
+    status : dict
+        `build_status`'s answer.
+
+    Returns
+    -------
+    str
+        A few lines: stage, leading explanation, helpers at work, finished
+        steps, cost and report.
+    """
     phases = {p["id"]: p for p in status["pipeline"]["phases"]}
     lines = [f"{status['investigation']}: {status['pipeline']['title']}, {status['state']}"]
 
@@ -741,6 +868,18 @@ def render(status: dict[str, Any]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Print one investigation's status, as JSON for the panel or as text.
+
+    Parameters
+    ----------
+    argv : list[str] | None
+        Command-line arguments; ``sys.argv[1:]`` when None.
+
+    Returns
+    -------
+    int
+        0, or 1 when the investigation folder does not exist.
+    """
     parser = argparse.ArgumentParser(description="Read-only status of a Prism investigation.")
     parser.add_argument("investigation", help="investigations/<name> directory")
     parser.add_argument("--json", action="store_true", help="one JSON object, for the Control Panel")

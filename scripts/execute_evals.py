@@ -854,7 +854,20 @@ _PS_FORMAT = "{{.Label \"%s\"}}\t{{.Label \"%s\"}}\t{{.Label \"%s\"}}" % (_PROJE
 
 
 def _docker(args: list[str], timeout: int = DOCKER_TIMEOUT) -> str | None:
-    """Run a docker command; its stdout, or None if docker is missing or it failed."""
+    """Run a docker command.
+
+    Parameters
+    ----------
+    args : list[str]
+        The arguments after ``docker``, e.g. ``["ps", "-a"]``.
+    timeout : int
+        Seconds before giving up on a slow daemon.
+
+    Returns
+    -------
+    str | None
+        Its stdout; None if docker is missing, timed out or failed.
+    """
     try:
         out = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
@@ -990,6 +1003,16 @@ def _other_live_run(run_dir: str) -> str | None:
 
     Its containers sit under the same experiment directory, so removing
     leftovers then could remove its live sandboxes.
+
+    Parameters
+    ----------
+    run_dir : str
+        This run's directory; its siblings are the other runs.
+
+    Returns
+    -------
+    str | None
+        The other run's id, e.g. ``"iter_02_20261108T211422Z"``; None if none is going.
     """
     parent = os.path.dirname(os.path.abspath(run_dir))
     for other in sorted(glob.glob(os.path.join(parent, "*", "status.json"))):
@@ -1127,6 +1150,7 @@ class SandboxSampler:
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def _sample(self) -> None:
+        """Take one reading: each container's memory peak and the machine's lowest free memory."""
         memory = experiment_sandbox_memory(self.exp_dir, self.docker)
         if memory is None:
             self.docker_ok = False
@@ -1137,12 +1161,20 @@ class SandboxSampler:
             self.min_free_mb = free if self.min_free_mb is None else min(free, self.min_free_mb)
 
     def _run(self) -> None:
+        """The background thread: sample every ``interval`` seconds until stopped."""
         while True:
             self._sample()
             if self._stop.wait(self.interval):
                 return
 
     def start(self) -> "SandboxSampler":
+        """Begin sampling in the background.
+
+        Returns
+        -------
+        SandboxSampler
+            This sampler, so it can be made and started in one line.
+        """
         self._thread.start()
         return self
 
@@ -1258,6 +1290,13 @@ def with_connections(command: str, connections: int) -> str:
 
 
 def _run_registry() -> str:
+    """The folder where each live run on this machine leaves an entry.
+
+    Returns
+    -------
+    str
+        ``$PRISM_RUN_REGISTRY`` when set, else ``~/.cache/prism/live_runs``.
+    """
     return os.environ.get(RUN_REGISTRY_ENV) or os.path.expanduser("~/.cache/prism/live_runs")
 
 
@@ -1282,6 +1321,13 @@ def register_live_run(run_dir: str) -> str:
 
 
 def unregister_live_run(path: str) -> None:
+    """Remove this run's registry entry; one already gone is fine.
+
+    Parameters
+    ----------
+    path : str
+        The entry `register_live_run` returned.
+    """
     try:
         os.remove(path)
     except OSError:
@@ -2865,7 +2911,19 @@ def wait_for(run_dir: str, timeout: float, interval: float = 15.0) -> dict[str, 
 
 
 def _cleanup_notes(cleanup: dict[str, Any]) -> list[str]:
-    """Report notes for `remove_leftover_sandboxes`'s result; none when nothing was left."""
+    """Report notes for `remove_leftover_sandboxes`'s result.
+
+    Parameters
+    ----------
+    cleanup : dict
+        ``{"removed": [...], "failed": [...], "skipped": reason | None}``.
+
+    Returns
+    -------
+    list[str]
+        One line each for what was removed, what could not be, and why the
+        check was skipped; empty when nothing was left behind.
+    """
     notes = []
     if cleanup.get("removed"):
         notes.append(f"Removed {len(cleanup['removed'])} sandbox container set(s) left running by killed evals: {', '.join(cleanup['removed'])}.")

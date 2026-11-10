@@ -40,7 +40,22 @@ LOCAL_EDITS_PREFIX = "local-edits "
 
 
 def _describe(commit: str, date: str, subject: str) -> str:
-    """``Prism <short id> (<day>, "<subject>")``, the subject trimmed for one line."""
+    """One commit as the version line names it.
+
+    Parameters
+    ----------
+    commit : str
+        The full commit id.
+    date : str
+        Its ISO commit date; only the day is kept.
+    subject : str
+        Its message, trimmed to fit one line.
+
+    Returns
+    -------
+    str
+        e.g. ``Prism 9350a91 (2026-11-10, "recorded that twenty episodes ...")``.
+    """
     short = subject if len(subject) <= 60 else subject[:57].rstrip() + "..."
     return f'Prism {commit[:7]} ({date[:10]}, "{short}")'
 

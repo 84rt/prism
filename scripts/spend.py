@@ -277,6 +277,16 @@ def _normalise_id(model: str) -> str:
     Lower-cased, dots as dashes, and any trailing release date dropped, so
     ``claude-sonnet-5.5``, ``claude-sonnet-5-5`` and ``gpt-5.2-2025-12-11``
     match the catalogue's ``claude-sonnet-5-5`` and ``gpt-5-2``.
+
+    Parameters
+    ----------
+    model : str
+        A model id as some provider or log spells it.
+
+    Returns
+    -------
+    str
+        The normalised id.
     """
     m = model.lower().replace(".", "-")
     return re.sub(r"-(\d{4}-\d{2}-\d{2}|\d{8})$", "", m)
@@ -287,6 +297,16 @@ def _openrouter_prices(pricing: dict[str, Any]) -> dict[str, float] | None:
 
     A missing cache price falls back to the input price, which over- rather
     than under-states spend.
+
+    Parameters
+    ----------
+    pricing : dict
+        The block's string prices: ``prompt``, ``completion`` and the cache ones.
+
+    Returns
+    -------
+    dict | None
+        USD per token for each of `TOKEN_KINDS`; None without both main prices.
     """
     try:
         inp = float(pricing["prompt"])
@@ -348,7 +368,18 @@ class PriceBook:
         return cached[0] if cached is not None else None
 
     def claude(self, model: str) -> dict[str, float] | None:
-        """Prism's own table, keyed by the bare Claude id."""
+        """A Claude model's price from Prism's own table.
+
+        Parameters
+        ----------
+        model : str
+            The bare Claude id in any spelling, e.g. ``claude-opus-5.5``.
+
+        Returns
+        -------
+        dict | None
+            Per-token prices; None for a model missing from `CLAUDE_PRICES_PER_MTOK`.
+        """
         p = CLAUDE_PRICES_PER_MTOK.get(_normalise_id(model))
         if p is None:
             return None
@@ -362,7 +393,18 @@ class PriceBook:
         }
 
     def catalogue(self, slug: str) -> dict[str, float] | None:
-        """OpenRouter's listed price for ``vendor/model``, matched on the normalised id."""
+        """OpenRouter's listed price for a model, matched on the normalised id.
+
+        Parameters
+        ----------
+        slug : str
+            ``vendor/model``, e.g. ``openai/gpt-5.2``.
+
+        Returns
+        -------
+        dict | None
+            Per-token prices; None when the list lacks the model or could not be had.
+        """
         if self._catalogue is None:
             data = self._get(OPENROUTER_MODELS_URL)
             self._catalogue = {}
@@ -373,7 +415,21 @@ class PriceBook:
         return self._catalogue.get(_normalise_id(slug))
 
     def endpoint(self, slug: str, provider: str) -> dict[str, float] | None:
-        """One OpenRouter provider's own price for ``slug``, e.g. ``siliconflow``."""
+        """One OpenRouter provider's own price for a model.
+
+        Parameters
+        ----------
+        slug : str
+            OpenRouter's model id, e.g. ``deepseek/deepseek-r1-0528``.
+        provider : str
+            The pinned provider, e.g. ``siliconflow``.
+
+        Returns
+        -------
+        dict | None
+            Per-token prices; None when the provider does not serve the model
+            or the list could not be had.
+        """
         if slug not in self._endpoints:
             data = self._get(OPENROUTER_ENDPOINTS_URL.format(slug=slug))
             self._endpoints[slug] = ((data or {}).get("data") or {}).get("endpoints") or []
@@ -415,7 +471,21 @@ class PriceBook:
         return self.catalogue(model)
 
     def for_call(self, host: str, model: str) -> dict[str, float] | None:
-        """Price for one logged API call, from the host it went to and the model it reports."""
+        """Price for one logged API call, from the host it went to and the model it reports.
+
+        Parameters
+        ----------
+        host : str
+            The API's host, e.g. ``api.anthropic.com`` or ``openrouter.ai``.
+        model : str
+            The model the response names, e.g. ``claude-haiku-5-5`` or
+            ``anthropic/claude-haiku-5.5``.
+
+        Returns
+        -------
+        dict | None
+            Per-token prices, or None when no source knows the model.
+        """
         if "/" in model:
             # OpenRouter reports the vendor-prefixed id
             return self.claude(model.partition("/")[2]) or self.catalogue(model)
@@ -424,7 +494,19 @@ class PriceBook:
 
 
 def _tokens_from_inspect(mu: dict[str, Any]) -> dict[str, int]:
-    """Inspect's ``ModelUsage`` as `TOKEN_KINDS`; its input count already excludes cached tokens."""
+    """Inspect's ``ModelUsage`` as `TOKEN_KINDS`; its input count already excludes cached tokens.
+
+    Parameters
+    ----------
+    mu : dict
+        One model's usage from an eval log's stats.
+
+    Returns
+    -------
+    dict[str, int]
+        Tokens of each of `TOKEN_KINDS`; Inspect does not split cache writes
+        by lifetime, so all count as 5-minute.
+    """
     return {
         "input": int(mu.get("input_tokens") or 0),
         "output": int(mu.get("output_tokens") or 0),
@@ -440,6 +522,18 @@ def _tokens_from_call(usage: dict[str, Any]) -> dict[str, int]:
     OpenAI's chat (``prompt_tokens``) and Responses (``input_tokens_details``)
     shapes count cached tokens inside the input total, so they are subtracted;
     Anthropic's shape counts them separately and may split writes by lifetime.
+
+    Parameters
+    ----------
+    usage : dict
+        The ``usage`` block of one API response.
+
+    Returns
+    -------
+    dict[str, int]
+        e.g. ``{"input": 900, "output": 50, "cache_read": 100, "cache_write_5m": 0,
+        "cache_write_1h": 0}`` for ``{"prompt_tokens": 1000, "completion_tokens": 50,
+        "prompt_tokens_details": {"cached_tokens": 100}}``.
     """
     def n(d: Any, key: str) -> int:
         return int((d or {}).get(key) or 0) if isinstance(d, dict) else 0
@@ -470,7 +564,20 @@ def _tokens_from_call(usage: dict[str, Any]) -> dict[str, int]:
 
 
 def _cost(prices: dict[str, float], tokens: dict[str, int]) -> float:
-    """USD for a token count at per-token prices."""
+    """USD for a token count at per-token prices.
+
+    Parameters
+    ----------
+    prices : dict[str, float]
+        USD per token for each of `TOKEN_KINDS`.
+    tokens : dict[str, int]
+        Tokens of each of `TOKEN_KINDS`.
+
+    Returns
+    -------
+    float
+        e.g. 4.0 for a million input tokens at ``{"input": 4e-6, ...}``.
+    """
     return sum(tokens[k] * prices[k] for k in TOKEN_KINDS)
 
 

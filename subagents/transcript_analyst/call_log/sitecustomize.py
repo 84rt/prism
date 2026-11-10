@@ -59,7 +59,19 @@ def _find_usage(event: Any) -> tuple[str | None, dict[str, Any] | None]:
 
 
 def _write(path: str, host: str, model: str, usage: dict[str, Any]) -> None:
-    """Append one call's record; a single ``O_APPEND`` write keeps lines whole across processes."""
+    """Append one call's record; a single ``O_APPEND`` write keeps lines whole across processes.
+
+    Parameters
+    ----------
+    path : str
+        The call log, ``$PRISM_MODEL_CALLS_FILE``.
+    host : str
+        The API's host, e.g. ``api.anthropic.com``.
+    model : str
+        The model the response names.
+    usage : dict
+        The response's usage block, as the API sent it.
+    """
     record = {"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "host": host, "model": model, "usage": usage}
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
     try:
@@ -69,7 +81,17 @@ def _write(path: str, host: str, model: str, usage: dict[str, Any]) -> None:
 
 
 def _record_body(path: str, host: str, body: bytes) -> None:
-    """Log a complete JSON response body that carries usage."""
+    """Log a complete JSON response body that carries usage.
+
+    Parameters
+    ----------
+    path : str
+        The call log.
+    host : str
+        The API's host.
+    body : bytes
+        The whole response body.
+    """
     model, usage = _find_usage(json.loads(body))
     if model and usage:
         _write(path, host, model, usage)
@@ -82,6 +104,15 @@ def _record_stream(path: str, host: str, text: str) -> None:
     output count in ``message_delta``; OpenAI sends one usage block on the last
     chunk. Merging every block in order covers both: a later count replaces an
     earlier one, and a null never overwrites a number.
+
+    Parameters
+    ----------
+    path : str
+        The call log.
+    host : str
+        The API's host.
+    text : str
+        The whole stream, ``data:`` lines and all.
     """
     model: str | None = None
     usage: dict[str, Any] = {}
