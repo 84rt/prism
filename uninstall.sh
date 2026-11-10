@@ -30,19 +30,25 @@ echo "  Target:   $TARGET_DIR"
 echo ""
 
 # --- Helper: remove a symlink only if it points into the scaffold ---
-# Accepts symlinks created in either install mode: host-mode symlinks point
-# at $CONTAINER_SCAFFOLD/<rel_path>, in_container-mode symlinks point at
-# $SCAFFOLD_DIR/<rel_path>. Any other target is left alone to avoid removing
-# user-managed symlinks that happen to share a relative path.
+# Accepts symlinks created in any install mode: host-mode symlinks point at
+# $CONTAINER_SCAFFOLD/<rel_path>, in_container-mode symlinks at
+# $SCAFFOLD_DIR/<rel_path>, and --pin symlinks at the target's own pinned
+# copy by a relative path (scripts/spend.py -> ../.prism/scripts/spend.py).
+# Any other target is left alone to avoid removing user-managed symlinks
+# that happen to share a relative path.
+PIN_DIR="$TARGET_DIR/.$SCAFFOLD_NAME"
 unlink_file() {
     local rel_path="$1"
     local dst="$TARGET_DIR/$rel_path"
+    local up="" slashes="${rel_path//[^\/]/}" i
+    for ((i = 0; i < ${#slashes}; i++)); do up="../$up"; done
 
     if [ -L "$dst" ]; then
         local link_target
         link_target="$(readlink "$dst")"
         if [ "$link_target" = "$CONTAINER_SCAFFOLD/$rel_path" ] \
-           || [ "$link_target" = "$SCAFFOLD_DIR/$rel_path" ]; then
+           || [ "$link_target" = "$SCAFFOLD_DIR/$rel_path" ] \
+           || [ "$link_target" = "$up.$SCAFFOLD_NAME/$rel_path" ]; then
             rm "$dst"
             echo "  Removed: $rel_path"
         else
@@ -188,6 +194,14 @@ unlink_file ".claude/skills/diagnose/perturbation-design-patterns.md"
 
 # .claude/settings.json
 unlink_file ".claude/settings.json"
+
+# --- Remove the pinned copy (install.sh --pin) ---
+# Only a folder carrying install's marker file, so a user's own folder of the
+# same name is never deleted.
+if [ -f "$PIN_DIR/PINNED_COMMIT" ]; then
+    rm -rf "$PIN_DIR"
+    echo "  Removed pinned copy: .$SCAFFOLD_NAME/"
+fi
 
 # --- Restore devcontainer.json from backup ---
 DEVCONTAINER="$TARGET_DIR/.devcontainer/devcontainer.json"

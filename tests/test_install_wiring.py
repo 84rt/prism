@@ -18,9 +18,9 @@ import pytest
 
 from conftest import REPO_ROOT
 
-# `_patch_devcontainer.py` is install-time plumbing run from the scaffold
-# checkout; it is never linked into a target.
-SCRIPTS = sorted(p.name for p in (REPO_ROOT / "scripts").glob("*.py") if p.name != "_patch_devcontainer.py")
+# Underscored scripts (`_patch_devcontainer.py`, `_live_runs.py`) are
+# install-time plumbing run from the scaffold checkout; never linked into a target.
+SCRIPTS = sorted(p.name for p in (REPO_ROOT / "scripts").glob("*.py") if not p.name.startswith("_"))
 
 
 def _gitignore_entries(install: str) -> str:
