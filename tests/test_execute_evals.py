@@ -458,6 +458,21 @@ def test_the_runner_refuses_to_start_without_inspect(tmp_path, monkeypatch):
     assert "--no-project" in problems[0]
 
 
+def test_a_worker_without_inspect_fails_the_run_before_running_any_eval(tmp_path, fake_eval_script, monkeypatch):
+    # The launcher had Inspect but the worker's environment has since vanished
+    # (`uv run --with`): the run must fail saying so, not exclude every pair.
+    path, _ = make_request(tmp_path)
+    run_dir, problems = ee.prepare_run(path)
+    assert not problems, problems
+    substitute_fake_eval(run_dir, fake_eval_script)
+    monkeypatch.setattr(ee.importlib.util, "find_spec", lambda name: None)
+    assert ee.run_worker(run_dir) == 1
+    data = ee.Status.load(run_dir).data
+    assert data["state"] == "failed"
+    assert any("not importable in the worker" in e for e in data["errors"])
+    assert all(p["state"] == "pending" for p in data["pairs"].values())
+
+
 def test_sample_errors_map_to_sample_level(tmp_path, fake_eval_script, monkeypatch):
     run_dir, _, _ = run_foreground(tmp_path, fake_eval_script, monkeypatch, mode="sample_error", overrides={"skip_preflight": True, "epochs": 3}, conditions={"baseline": {"task": "task.py", "args": {}}})
     data = ee.Status.load(run_dir).data

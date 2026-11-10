@@ -1969,6 +1969,17 @@ def run_worker(run_dir: str) -> int:
     start = time.monotonic()
 
     try:
+        # The launcher checked for Inspect, but the worker can still lack it: a
+        # runner started under `uv run --with inspect_ai` hands the worker a
+        # temporary environment that uv deletes as soon as the launcher exits.
+        # Without this, every eval would run and then "fail" its log check.
+        if importlib.util.find_spec("inspect_ai") is None:
+            raise RuntimeError(
+                "inspect_ai is not importable in the worker: launch the runner with "
+                "`uv run python scripts/execute_evals.py` from the eval's project, "
+                "not from a temporary `uv run --with` environment"
+            )
+
         # --- Preflight -----------------------------------------------------
         if status.data["preflight"]["skipped"]:
             status.data["state"] = "running"
