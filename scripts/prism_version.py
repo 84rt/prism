@@ -10,14 +10,16 @@ it, and an installed folder reaches Prism one of two ways:
 - **live**: its links point at a Prism checkout, which may have moved on, or
   carry uncommitted edits, by the time anyone reads the report.
 
-Usage::
+The line ends with the folder's Python packages (see `packages_version`).
+
+Usage, from the folder the investigation runs in::
 
     uv run --no-project python scripts/prism_version.py
 
 Prints, for example::
 
-    Prism 503a9d0 (2026-11-10, "let a pinned demo folder keep its own edits ..."), frozen copy, with this folder's own edits (.prism-local.patch)
-    Prism 7bfb151 (2026-11-10, "had the eval runner count ..."), live checkout, not frozen: later Prism changes reach this folder mid-run
+    Prism 503a9d0 (2026-11-10, "let a pinned demo folder keep its own edits ..."), frozen copy, with this folder's own edits (.prism-local.patch); packages: Inspect 0.3.285, uv.lock 3f9a21c0
+    Prism 7bfb151 (2026-11-10, "had the eval runner count ..."), live checkout, not frozen: later Prism changes reach this folder mid-run; packages: Inspect 0.3.285, uv.lock 3f9a21c0
 
 Standard library only; exits 0 even when the version can't be read (it says
 so), since a missing provenance line is a caveat, not a reason to stop.
@@ -25,7 +27,9 @@ so), since a missing provenance line is a caveat, not a reason to stop.
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import subprocess
 import sys
 
@@ -98,6 +102,35 @@ def live_version(root: str) -> str:
     return line
 
 
+def packages_version(folder: str) -> str:
+    """The folder's Python packages: Inspect's locked version and the lock's fingerprint.
+
+    The folder's ``uv.lock`` fixes every package to an exact version, so its
+    hash changes whenever any package does; comparing the line at the start
+    and end of a run shows whether one changed in between.
+
+    Parameters
+    ----------
+    folder : str
+        The folder the investigation runs in (its ``uv.lock`` is read).
+
+    Returns
+    -------
+    str
+        e.g. ``packages: Inspect 0.3.285, uv.lock 3f9a21c0``, or a note that
+        there is no lock file.
+    """
+    try:
+        with open(os.path.join(folder, "uv.lock"), "rb") as f:
+            raw = f.read()
+    except OSError:
+        return "packages: no uv.lock in this folder, so versions are not fixed"
+    # The lock lists each package as a `name = "..."` line followed by its version
+    m = re.search(rb'^name = "inspect-ai"\s*\nversion = "([^"]+)"', raw, re.MULTILINE)
+    inspect = f"Inspect {m.group(1).decode()}" if m else "Inspect not in uv.lock"
+    return f"packages: {inspect}, uv.lock {hashlib.sha256(raw).hexdigest()[:8]}"
+
+
 def main() -> int:
     """Print this folder's Prism version line.
 
@@ -106,7 +139,8 @@ def main() -> int:
     int
         Always 0.
     """
-    print(frozen_version(SCAFFOLD_ROOT) or live_version(SCAFFOLD_ROOT))
+    prism = frozen_version(SCAFFOLD_ROOT) or live_version(SCAFFOLD_ROOT)
+    print(f"{prism}; {packages_version(os.getcwd())}")
     return 0
 
 

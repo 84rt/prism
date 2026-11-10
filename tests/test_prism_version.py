@@ -27,9 +27,11 @@ def _installed(tmp_path: Path, *flags: str) -> Path:
 
 
 def _line(target: Path) -> str:
-    """What the folder's own linked copy of the script prints."""
-    out = subprocess.run(["python3", str(target / "scripts" / "prism_version.py")], capture_output=True, text=True, check=True)
-    return out.stdout.strip()
+    """The Prism part of what the folder's own linked copy of the script prints, run from the folder."""
+    out = subprocess.run(["python3", str(target / "scripts" / "prism_version.py")], capture_output=True, text=True, check=True, cwd=target)
+    prism, sep, packages = out.stdout.strip().rpartition("; packages: ")
+    assert sep, out.stdout
+    return prism
 
 
 def _head() -> str:
@@ -62,6 +64,17 @@ def test_an_incomplete_marker_or_missing_checkout_says_so(tmp_path):
     assert "unreadable" in pv.frozen_version(str(tmp_path))
     assert pv.frozen_version(str(tmp_path / "nowhere")) is None
     assert "unknown" in pv.live_version(str(tmp_path / "nowhere"))
+
+
+def test_packages_name_inspect_and_fingerprint_the_lock(tmp_path):
+    lock = '[[package]]\nname = "anyio"\nversion = "4.9.0"\n\n[[package]]\nname = "inspect-ai"\nversion = "0.3.285"\n'
+    (tmp_path / "uv.lock").write_text(lock)
+    first = pv.packages_version(str(tmp_path))
+    assert first.startswith("packages: Inspect 0.3.285, uv.lock ")
+    # Any package change moves the fingerprint
+    (tmp_path / "uv.lock").write_text(lock.replace("4.9.0", "4.9.1"))
+    assert pv.packages_version(str(tmp_path)) != first
+    assert "no uv.lock" in pv.packages_version(str(tmp_path / "nowhere"))
 
 
 def test_long_subjects_are_trimmed_to_one_line():

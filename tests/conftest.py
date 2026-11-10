@@ -186,6 +186,7 @@ def write_fixture_log(
     task_args: dict | None = None,
     dataset_name: str | None = None,
     created: str | None = None,
+    served_model: str | None = None,
 ) -> str:
     """Write a small **scored** .eval log so the blackout tests have something to leak.
 
@@ -221,6 +222,9 @@ def write_fixture_log(
     created : str | None
         The header's ``created`` timestamp (defaults to now); the blinding
         tests use an older one to stand in for a log from another run.
+    served_model : str | None
+        The model name each sample's output reports, as a provider's reply
+        would; none by default.
 
     Returns
     -------
@@ -240,7 +244,7 @@ def write_fixture_log(
         write_eval_log,
     )
     from inspect_ai.log._log import EvalError
-    from inspect_ai.model import ChatMessageAssistant, ChatMessageUser, ModelUsage
+    from inspect_ai.model import ChatMessageAssistant, ChatMessageUser, ModelOutput, ModelUsage
     from inspect_ai.scorer import Score
 
     metrics = metrics or {"accuracy": 0.7317, "stderr": 0.0912}
@@ -277,6 +281,7 @@ def write_fixture_log(
                 scores={"grader": Score(value=0.9871)},
                 error=err,
                 model_usage={"mockllm/model": ModelUsage(input_tokens=10, output_tokens=5, total_tokens=15)},
+                **({"output": ModelOutput(model=served_model)} if served_model else {}),
             )
         )
     results = EvalResults(

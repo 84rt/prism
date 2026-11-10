@@ -662,6 +662,35 @@ def sample_shape(log_path: str) -> dict[str, Any]:
     }
 
 
+def served_models(log_path: str) -> list[str]:
+    """The model names the provider's replies reported, across a log's samples.
+
+    A request names a model such as ``openai/gpt-5`` or an OpenRouter model at
+    one provider, but what answers can be a dated version of it, or a
+    different build once a provider swaps it. Inspect keeps the name each
+    reply reported as the sample output's ``model``; only that field is read.
+
+    Parameters
+    ----------
+    log_path : str
+        Path to a ``.eval`` file.
+
+    Returns
+    -------
+    list[str]
+        Distinct names, sorted, e.g. ``["gpt-5-2025-08-07"]``; empty when no
+        sample recorded one.
+    """
+    from inspect_ai.log import read_eval_log_samples
+
+    names = set()
+    for sample in read_eval_log_samples(log_path, all_samples_required=False):
+        model = getattr(sample.output, "model", None)
+        if model:
+            names.add(str(model))
+    return sorted(names)
+
+
 # How often the live counter re-reads each running eval's log, in seconds.
 # Inspect saves a running .eval every ten finished samples or fewer, so a
 # faster poll would mostly re-read an unchanged file.
@@ -1576,6 +1605,10 @@ def _apply_shape(entry: dict[str, Any], log_path: str | None) -> None:
     entry["credential_sample_errors"] = shape["credential_sample_errors"]
     entry["sample_retries"] = shape["sample_retries"]
     entry["termination"] = shape["termination"]
+    try:
+        entry["served_models"] = served_models(log_path)
+    except Exception as e:
+        entry["errors"].append(f"served model names unreadable: {type(e).__name__}: {e}")
 
 
 def _final_pair_state(result: EvalResult, entry: dict[str, Any]) -> str:
@@ -2482,6 +2515,24 @@ def render_report(data: dict[str, Any]) -> str:
         out.append(f"| {e['condition']} | {e['model']} | {t['no_assistant_msg']} | {t['limit_hit']} | {t['error_terminated']} |")
     if not any_rows:
         out.append("| — | — | — | — | — |")
+        out.append("")
+        out.append("None. (No pair produced a readable log.)")
+    out.append("")
+
+    # --- Models as Served --------------------------------------------------
+    out.append("### Models as Served")
+    out.append("")
+    out.append("| Condition | Model | Served as |")
+    out.append("|---|---|---|")
+    any_rows = False
+    for e in ran:
+        if "served_models" not in e:
+            continue
+        any_rows = True
+        served = ", ".join(f"`{m}`" for m in e["served_models"]) or "not reported by the provider"
+        out.append(f"| {e['condition']} | {e['model']} | {served} |")
+    if not any_rows:
+        out.append("| — | — | — |")
         out.append("")
         out.append("None. (No pair produced a readable log.)")
     out.append("")

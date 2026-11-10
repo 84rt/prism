@@ -260,6 +260,15 @@ Per condition-model pair that reached full execution, a breakdown of transcript 
 
 These are counts of transcript *shape*, not *quality*. A transcript with assistant messages present, no limit hit, and no termination error is reported as unremarkable here regardless of content — that judgement belongs to the Analyst.
 
+### Models as Served
+
+Per condition-model pair that reached full execution, every distinct model name the provider's replies reported (each sample output's `model` field), e.g. a dated version behind an undated request.
+
+| Condition | Model | Served as |
+|---|---|---|
+
+`not reported by the provider` when no reply named one. The names go into the lead's report beside the Prism version, so a reader knows exactly what answered.
+
 ### Concurrency Decision
 
 Structured fields documenting how the full-execution concurrency level was set. The runner fixes it: its default ceiling (`max_parallel: 2`, `max_connections: 5`, sized for a shared host with one sandbox per sample) applies unless the request's `overrides` set it, or the Executor raised it at launch with a recorded rationale (`execute_evals.py run … --max-parallel N --max-connections M --rationale "…"`). The runner then halves `max_parallel` on resource contention; `max_connections` is never changed mid-run.

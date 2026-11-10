@@ -82,6 +82,12 @@ def test_verify_eval_log_has_no_metrics(fixture_log):
     assert info["model_usage"]["mockllm/model"]["total_tokens"] == 60
 
 
+def test_served_models_lists_the_names_replies_reported(tmp_path):
+    named = write_fixture_log(str(tmp_path / "a.eval"), epochs=3, served_model="gpt-5-2025-08-07")
+    assert ee.served_models(named) == ["gpt-5-2025-08-07"]
+    assert ee.served_models(write_fixture_log(str(tmp_path / "b.eval"))) == []
+
+
 def test_sample_shape_reads_shape_only(tmp_path):
     p = write_fixture_log(str(tmp_path / "a.eval"), epochs=3, with_error=True, no_assistant=1)
     shape = ee.sample_shape(p)
@@ -378,6 +384,7 @@ def test_draft_report_has_contract_headings_in_order(tmp_path, fake_eval_script,
         "#### Transient, recovered (0 condition-model pair(s))",
         "#### Pinned provider unavailable (0 condition-model pair(s))",
         "### Transcript Termination Metadata",
+        "### Models as Served",
         "### Concurrency Decision",
         "### Execution Summary",
         "### Additional Notes",
@@ -390,6 +397,7 @@ def test_draft_report_has_contract_headings_in_order(tmp_path, fake_eval_script,
     assert f"- **Chosen `max_parallel`**: {ee.DEFAULT_MAX_PARALLEL}" in report
     assert "| baseline | openai/gpt-5 | direct |" in report
     assert "| treatment | openai/gpt-5 | 0 | 0 | 0 |" in report
+    assert "| treatment | openai/gpt-5 | not reported by the provider |" in report
 
 
 def test_zero_sample_pair_is_flagged_distinctly(tmp_path, fake_eval_script, monkeypatch):

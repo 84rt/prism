@@ -131,6 +131,8 @@ if [ -f "$PIN_DIR/$PIN_MARKER" ] && [ "$FORCE" = "0" ]; then
         echo ""
         echo "Error: not changing $SCAFFOLD_NAME's pinned copy while a run is going."
         echo "  Re-run once it has finished, or add --force if it is not really running."
+        echo "  To start another run on a newer $SCAFFOLD_NAME now, install it with --pin into a"
+        echo "  second copy of this repo (e.g. git worktree add ../$(basename "$TARGET_DIR")-2) and run there."
         exit 1
     fi
 fi

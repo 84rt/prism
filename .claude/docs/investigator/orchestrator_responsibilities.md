@@ -545,7 +545,7 @@ A **suspended** investigation does not reach this phase and writes no findings r
    - *Mixed routes across the model set*: if some models were reached directly and others via OpenRouter, say so. This is benign when model is the manipulated variable and worth flagging when it is not.
    - *Re-pinning mid-investigation*: if a pinned provider became unavailable and the route changed, state which iterations ran on which provider and which comparisons are therefore not clean.
 
-   **Prism version (required).** One line under the caveats: the Agreed Scope's *Prism version* line, verbatim. If it says the folder applied its own edits, add that the scaffold's instructions differed from the published Prism's there. If it says *live checkout, not frozen*, add that later Prism changes could have reached the run mid-way.
+   **Prism version (required).** One line under the caveats: the Agreed Scope's *Prism version* line, verbatim. If it says the folder applied its own edits, add that the scaffold's instructions differed from the published Prism's there. If it says *live checkout, not frozen*, add that later Prism changes could have reached the run mid-way. Run the command again now: if its line differs from the Agreed Scope's (a new Prism commit, a different Inspect version or `uv.lock` fingerprint), give both and say the run's software changed part-way. Then add the models as served: every distinct name in the Executor reports' *Models as Served* tables, per requested model.
 
 5. **Artefacts.** Point the user to the investigation log, iteration directories, and analyst scan results for drill-down.
 
