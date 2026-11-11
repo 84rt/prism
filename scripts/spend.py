@@ -596,13 +596,15 @@ def collect_model_calls(root: str, prices: PriceBook) -> dict[str, Any]:
     dict
         ``{"total_cost_usd": x, "calls": n, "files": k, "unpriced_calls": u,
         "unpriced_models": [...], "by_model": {model: {"calls": n,
-        "cost_usd": x, "input": ..., "output": ...}}}``. A call whose usage
-        carries its own ``cost`` (OpenRouter) is taken at that figure.
+        "cost_usd": x, "input": ..., "output": ...}}, "by_file": {path: x}}``,
+        ``by_file`` keyed by each call log's absolute path. A call whose
+        usage carries its own ``cost`` (OpenRouter) is taken at that figure.
     """
     by_model: dict[str, dict[str, Any]] = defaultdict(lambda: {"calls": 0, "cost_usd": 0.0, **{k: 0 for k in TOKEN_KINDS}})
     total = 0.0
     calls = files = unpriced_calls = 0
     unpriced: set[str] = set()
+    by_file: dict[str, float] = defaultdict(float)
     for dirpath, _dirs, names in os.walk(os.path.abspath(root)):
         for fn in names:
             if not (fn.startswith("model_calls_") and fn.endswith(".jsonl")):
@@ -636,6 +638,7 @@ def collect_model_calls(root: str, prices: PriceBook) -> dict[str, Any]:
                     cost = _cost(p, tokens)
                 m["cost_usd"] += cost
                 total += cost
+                by_file[os.path.join(dirpath, fn)] += cost
     return {
         "total_cost_usd": round(total, 4),
         "calls": calls,
@@ -643,6 +646,7 @@ def collect_model_calls(root: str, prices: PriceBook) -> dict[str, Any]:
         "unpriced_calls": unpriced_calls,
         "unpriced_models": sorted(unpriced),
         "by_model": {k: {**v, "cost_usd": round(v["cost_usd"], 4)} for k, v in sorted(by_model.items())},
+        "by_file": {k: round(v, 4) for k, v in sorted(by_file.items())},
     }
 
 
@@ -729,12 +733,14 @@ def _read_lead_session(path: str, investigation: str, seen: set[str] | None = No
     dict | None
         ``{"session": id, "path": path, "calls": n, "cost_usd": x,
         "unpriced_calls": k, "tokens_by_model": {...}, "first_at": t,
-        "log_headings": {title: t}}``, where ``cost_usd`` covers the priced
-        calls only, ``first_at`` is the time of the session's first line
-        that worked for this investigation (for a run's own session, its
-        start) and ``log_headings`` gives when each ``## `` heading of the
-        investigation's log was first written; or None when the session is
-        not a lead session that wrote into the investigation.
+        "log_headings": {title: t}, "call_costs": [(t, usd), ...]}``, where
+        ``cost_usd`` covers the priced calls only, ``first_at`` is the time
+        of the session's first line that worked for this investigation (for
+        a run's own session, its start), ``log_headings`` gives when each
+        ``## `` heading of the investigation's log was first written, and
+        ``call_costs`` gives each priced call's time and dollars (for the
+        status command's per-box costs); or None when the session is not a
+        lead session that wrote into the investigation.
     """
     try:
         with open(path) as f:
@@ -757,7 +763,7 @@ def _read_lead_session(path: str, investigation: str, seen: set[str] | None = No
     # ---------- Which investigation each call worked for ----------
     # Claude Code writes one line per content block, each carrying the whole
     # message's usage, so calls are keyed by message id
-    calls: dict[str, tuple[str, dict[str, Any], str | None]] = {}
+    calls: dict[str, tuple[str, dict[str, Any], str | None, str | None]] = {}
     current = None
     first_written = None
     # When each line happened and which investigation it worked for, and when
@@ -775,12 +781,14 @@ def _read_lead_session(path: str, investigation: str, seen: set[str] | None = No
         # Claude Code's own placeholder replies (an error, an interrupted
         # turn) carry a usage block but were never an API call
         if e.get("type") == "assistant" and msg.get("usage") and msg.get("id") and msg.get("model") != "<synthetic>":
-            calls[msg["id"]] = (msg.get("model") or "?", msg["usage"], current)
+            # The message's first line gives its time; later blocks repeat it
+            at = calls[msg["id"]][3] if msg["id"] in calls else e.get("timestamp")
+            calls[msg["id"]] = (msg.get("model") or "?", msg["usage"], current, at)
     if first_written is None:
         return None
     calls = {
-        mid: (model, usage)
-        for mid, (model, usage, inv) in calls.items()
+        mid: (model, usage, at)
+        for mid, (model, usage, inv, at) in calls.items()
         if (inv or first_written) == name and (seen is None or mid not in seen)
     }
     if not calls:
@@ -791,7 +799,8 @@ def _read_lead_session(path: str, investigation: str, seen: set[str] | None = No
     tokens: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     cost = 0.0
     unpriced_calls = 0
-    for model, usage in calls.values():
+    call_costs: list[tuple[str, float]] = []
+    for model, usage, at in calls.values():
         t = tokens[model]
         for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
             t[k] += int(usage.get(k) or 0)
@@ -800,6 +809,8 @@ def _read_lead_session(path: str, investigation: str, seen: set[str] | None = No
             unpriced_calls += 1
         else:
             cost += c
+            if isinstance(at, str):
+                call_costs.append((at, c))
     return {
         "session": os.path.splitext(os.path.basename(path))[0],
         "path": path,
@@ -809,6 +820,7 @@ def _read_lead_session(path: str, investigation: str, seen: set[str] | None = No
         "tokens_by_model": {m: dict(v) for m, v in sorted(tokens.items())},
         "first_at": next((t for t, inv in times if (inv or first_written) == name), None),
         "log_headings": headings,
+        "call_costs": call_costs,
     }
 
 
@@ -939,7 +951,7 @@ def collect(root: str, projects_dir: str | None = None, prices: PriceBook | None
                     c = _cost(p, _tokens_from_inspect(mu))
                     cost_by_model[model] += c
                     run_cost += c
-        run_summaries.append({"run_id": r.get("run_id"), "state": r.get("state"), "pairs": len(r.get("pairs", {})), "total_tokens": run_tokens, "cost_usd": round(run_cost, 4), "path": r["_path"]})
+        run_summaries.append({"run_id": r.get("run_id"), "state": r.get("state"), "pairs": len(r.get("pairs", {})), "total_tokens": run_tokens, "cost_usd": round(run_cost, 4), "path": r["_path"], "started_at": r.get("started_at")})
     eval_total = sum(cost_by_model.values())
 
     lead = collect_lead(root, projects_dir)
@@ -1009,6 +1021,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"not a directory: {args.investigation}", file=sys.stderr)
         return 1
     summary = collect(args.investigation, prices=PriceBook(offline=args.offline))
+    # One entry per call is for the status command, not for reading
+    for s in summary["lead"]["sessions"]:
+        s.pop("call_costs", None)
     print(json.dumps(summary, indent=2) if args.json else render(summary))
     return 0
 

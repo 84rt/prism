@@ -184,7 +184,8 @@ def _status(inv: Path, tmp_path: Path, hint: str | None = None) -> dict:
     return rs.build_status(str(inv), hint, projects_dir=str(projects))
 
 
-def _lead_session(inv: Path, tmp_path: Path, started: str, writes: list[tuple[str, str]], skill: str = "diagnose") -> None:
+def _lead_session(inv: Path, tmp_path: Path, started: str, writes: list[tuple[str, str]], skill: str = "diagnose",
+                  usage: dict | None = None) -> None:
     """Write the lead's Claude Code session file: its start, then each log write.
 
     Parameters
@@ -199,6 +200,8 @@ def _lead_session(inv: Path, tmp_path: Path, started: str, writes: list[tuple[st
         ``(time, text)`` per Edit of the log, e.g. ``("…T09:30:00Z", "## Iteration 2\\n")``.
     skill : str
         ``diagnose`` or ``orchestrate``.
+    usage : dict | None
+        Each write's API usage; one input token when None.
     """
     import spend
 
@@ -207,7 +210,7 @@ def _lead_session(inv: Path, tmp_path: Path, started: str, writes: list[tuple[st
     for n, (at, text) in enumerate(writes):
         edit = {"type": "tool_use", "name": "Edit", "input": {"file_path": str(inv / "INVESTIGATION-LOG.md"), "new_string": text}}
         lines.append({"type": "assistant", "entrypoint": "cli", "timestamp": at,
-                      "message": {"id": f"m{n}", "model": "claude-opus-5-5", "usage": {"input_tokens": 1}, "content": [edit]}})
+                      "message": {"id": f"m{n}", "model": "claude-opus-5-5", "usage": usage or {"input_tokens": 1}, "content": [edit]}})
     _write(folder / "lead.jsonl", "".join(json.dumps(x) + "\n" for x in lines))
 
 
@@ -347,16 +350,20 @@ def test_an_empty_folder_takes_the_hint_and_claims_no_stage(tmp_path):
 def test_orchestrate_lead_between_helpers(orchestrate, tmp_path):
     s = _status(orchestrate, tmp_path)
     assert s["pipeline"]["name"] == "orchestrate"
-    assert s["current"] == {"phase": "2", "box": "explore", "round": "2"}
+    # Round 2's Explorer has finished and no Executor has started: between the two
+    assert s["current"] == {"phase": "2", "box": "explore", "round": "2", "between": {"from": "explore", "to": "execute"}}
     assert [h["role"] for h in s["helpers"]] == ["Environment Explorer", "Environment Explorer"]
     assert s["startedAt"] == "2026-11-08T10:00:00+00:00"
+    assert "stage: phase 2 Iterate, between Explore and Execute, round 2" in rs.render(s)
 
 
 def test_orchestrate_explanation_and_steps(orchestrate, tmp_path):
     s = _status(orchestrate, tmp_path)
     assert s["explanation"] == "Framing the sabotage as preventing weapons use raises concealment."
-    # Asides dropped and wide symbols swapped for plain ones
-    assert s["steps"] == ["Discussion: scope agreed", "Round 1: Iterate - switch environment to agentic_misalignment."]
+    # Asides dropped and wide symbols swapped for plain ones; round 2's
+    # finished Explorer counts before the round is written up
+    assert s["steps"] == ["Discussion: scope agreed", "Round 1: Iterate - switch environment to agentic_misalignment.",
+                          "Round 2, Explore done"]
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +411,13 @@ def test_no_receipts_and_no_session_gives_no_timings(tmp_path):
     assert "timings" not in _status(inv, tmp_path)
 
 
+def _spans(v):
+    """`v` without its cost fields, to compare times alone."""
+    if isinstance(v, dict):
+        return {k: _spans(x) for k, x in v.items() if k not in ("usd", "leadApprox")}
+    return [_spans(x) for x in v] if isinstance(v, list) else v
+
+
 def test_timings_of_a_running_loop_in_its_second_round(forensics, tmp_path):
     _lead_session(forensics, tmp_path, "2026-11-08T07:45:00Z", [
         ("2026-11-08T07:50:00Z", "## Agreed Scope\n- ...\n"),
@@ -415,7 +429,7 @@ def test_timings_of_a_running_loop_in_its_second_round(forensics, tmp_path):
     # Mapper 08:00-08:05 (phase 1); Analyst 09:00-09:00:01 (round 1); Executor from 10:00, running (round 2)
     s = _status(forensics, tmp_path)
     _check_contract(s)
-    phases = s["timings"]["phases"]
+    phases = _spans(s["timings"]["phases"])
     t = "2026-11-08T{}+00:00".format
     assert phases[:3] == [
         {"id": "0", "startedAt": t("07:45:00"), "finishedAt": t("07:55:00")},
@@ -443,7 +457,7 @@ def test_a_log_skeleton_written_at_once_times_only_its_first_heading(forensics, 
     _lead_session(forensics, tmp_path, "2026-11-08T07:45:00Z", [
         ("2026-11-08T07:50:00Z", "## Agreed Scope\n\n## Phase 1: Initial Scoping\n\n## Iteration 1\n"),
     ])
-    phases = _status(forensics, tmp_path)["timings"]["phases"]
+    phases = _spans(_status(forensics, tmp_path)["timings"]["phases"])
     # Phase 1 starts with its Mapper, not with the skeleton
     assert phases[1]["startedAt"] == "2026-11-08T08:00:00+00:00"
     assert phases[0] == {"id": "0", "startedAt": "2026-11-08T07:45:00+00:00", "finishedAt": "2026-11-08T08:00:00+00:00"}
@@ -454,7 +468,7 @@ def test_orchestrate_timings_put_round_boxes_under_rounds(orchestrate, tmp_path)
         ("2026-11-08T09:20:00Z", "## Iteration 1\n"),
         ("2026-11-08T11:50:00Z", "## Iteration 2\n"),
     ], skill="orchestrate")
-    phases = _status(orchestrate, tmp_path)["timings"]["phases"]
+    phases = _spans(_status(orchestrate, tmp_path)["timings"]["phases"])
     t = "2026-11-08T{}+00:00".format
     assert phases[0] == {"id": "1", "startedAt": t("09:00:00"), "finishedAt": t("09:20:00")}
     r1, r2 = phases[1]["rounds"]
@@ -462,6 +476,146 @@ def test_orchestrate_timings_put_round_boxes_under_rounds(orchestrate, tmp_path)
     assert r1["boxes"][:2] == [{"id": "hypothesis", "startedAt": t("09:20:00"), "finishedAt": t("10:00:00")},
                                {"id": "explore", "startedAt": t("10:00:00"), "finishedAt": t("10:07:00")}]
     assert r2["startedAt"] == t("11:50:00") and "finishedAt" not in r2
+
+
+# ---------------------------------------------------------------------------
+# The run tab's third round: places, side helpers, between boxes, box steps,
+# costs and one box's material
+# ---------------------------------------------------------------------------
+
+
+def test_helpers_say_which_box_they_belong_to(forensics, tmp_path):
+    _receipt(forensics, "iterations/02_round2/artefacts", "critic", "iter_02", 1, "finished", exit_code=0,
+             started="2026-11-08T09:40:00+00:00", finished="2026-11-08T09:50:00+00:00", request={"mode": "diff_review"})
+    by_tag = {(h["role"], h["tag"]): h for h in _status(forensics, tmp_path)["helpers"]}
+    assert {k: by_tag[("Mapper", "iter_00")][k] for k in ("phase", "box")} == {"phase": "1", "box": "triage"}
+    assert "round" not in by_tag[("Mapper", "iter_00")]
+    assert {k: by_tag[("Executor", "iter_02")].get(k) for k in ("phase", "round", "box", "side")} == \
+        {"phase": "3", "round": "2", "box": "run", "side": None}
+    # A pipeline side box keeps its own id and is not "side" work
+    critic = by_tag[("Critic", "iter_02")]
+    assert critic["box"] == "diff-review" and "side" not in critic
+
+
+def test_a_concurrent_side_helper_never_moves_the_lit_box(orchestrate, tmp_path):
+    _lead_session(orchestrate, tmp_path, "2026-11-08T09:00:00Z", [
+        ("2026-11-08T09:20:00Z", "## Iteration 1\n"),
+        ("2026-11-08T11:50:00Z", "## Iteration 2\n"),
+    ], skill="orchestrate")
+    _receipt(orchestrate, "iter_02/artefacts", "executor", "iter_02", 1, "running", alive=True, started="2026-11-08T12:10:00+00:00")
+    # The newest helper at work is an Analyst on a construal pilot, off the pipeline
+    _receipt(orchestrate, "construal_pilot/artefacts", "analyst", "pilot", 1, "running", alive=True,
+             started="2026-11-08T12:15:00+00:00", request={"topic": "How the model reads its workspace files."})
+    s = _status(orchestrate, tmp_path)
+    _check_contract(s)
+    assert s["current"] == {"phase": "2", "box": "execute", "round": "2"}
+    pilot = next(h for h in s["helpers"] if h["tag"] == "pilot")
+    assert pilot == {**pilot, "side": True, "purpose": "construal pilot", "phase": "2", "round": "2"}
+    assert "box" not in pilot
+    assert "working: Transcript Analyst pilot (side: construal pilot)" in rs.render(s)
+
+
+def test_a_side_helper_alone_leaves_the_lead_between_boxes(orchestrate, tmp_path):
+    _receipt(orchestrate, "construal_pilot/artefacts", "analyst", "pilot", 1, "running", alive=True, started="2026-11-08T12:15:00+00:00")
+    assert _status(orchestrate, tmp_path)["current"]["between"] == {"from": "explore", "to": "execute"}
+
+
+def test_between_two_helper_boxes_in_a_forensics_round(forensics, tmp_path):
+    _receipt(forensics, "iterations/02_round2/artefacts", "executor", "iter_02", 1, "finished", exit_code=0, finished="2026-11-08T11:00:00+00:00")
+    assert _status(forensics, tmp_path)["current"] == {
+        "phase": "3", "box": "run", "round": "2 of 4", "between": {"from": "run", "to": "measure"}}
+    # Once the Analyst starts there is nothing between; and before a box of
+    # the lead's own (here, updating) the lead is in that box, not between
+    _receipt(forensics, "iterations/02_round2/artefacts", "analyst", "iter_02", 1, "finished", exit_code=0,
+             started="2026-11-08T11:10:00+00:00", finished="2026-11-08T11:20:00+00:00")
+    assert "between" not in _status(forensics, tmp_path)["current"]
+
+
+def test_a_box_counts_as_a_step_before_the_lead_writes_it_up(forensics, tmp_path):
+    ex = _receipt(forensics, "iterations/02_round2/artefacts", "executor", "iter_02", 1, "finished", exit_code=0, finished="2026-11-08T11:00:00+00:00")
+    _write(ex.parent / "report_iter_02_executor_1.md",
+           "### Summary\n\n11 condition-model pairs were submitted: all **completed**. Ran at width 2.\n\n### Matrix\n")
+    s = _status(forensics, tmp_path)
+    assert s["stepDetails"][-1] == {"title": "Round 2, Run", "detail": "11 condition-model pairs were submitted: all completed."}
+    assert s["steps"][-1].startswith("Round 2, Run: 11 condition-model pairs")
+    # The lead's write-up of the round replaces it
+    _write(forensics / "INVESTIGATION-LOG.md", FORENSICS_LOG + "### Executor Results\n- ok\n### Decision\n- **Continue**.\n")
+    titles = [d["title"] for d in _status(forensics, tmp_path)["stepDetails"]]
+    assert titles[-1] == "Round 2" and "Round 2, Run" not in titles
+
+
+def test_a_failed_box_counts_as_a_failed_step(forensics, tmp_path):
+    _receipt(forensics, "iterations/02_round2/artefacts", "executor", "iter_02", 1, "finished", exit_code=2, finished="2026-11-08T11:00:00+00:00")
+    assert _status(forensics, tmp_path)["stepDetails"][-1] == {"title": "Round 2, Run", "detail": "failed"}
+
+
+def test_an_older_run_without_receipts_has_none_of_the_new_fields(tmp_path):
+    inv = tmp_path / "investigations" / "old"
+    _write(inv / "INVESTIGATION-LOG.md", FORENSICS_LOG)
+    s = _status(inv, tmp_path)
+    assert s["helpers"] == [] and "between" not in (s["current"] or {})
+    assert [d["title"] for d in s["stepDetails"]] == ["Input", "Scoping", "Read the reasoning", "Round 1"]
+    assert "timings" not in s
+
+
+def test_costs_sit_where_they_were_spent(forensics, tmp_path):
+    import spend
+
+    usage = {"input_tokens": 1_000_000}
+    per_call = spend._price_call("claude-opus-5-5", usage)
+    # One lead call per log write: 07:55 (phase 1), 08:40 (round 1), 09:30 and 10:30 (round 2)
+    _lead_session(forensics, tmp_path, "2026-11-08T07:45:00Z", [
+        ("2026-11-08T07:55:00Z", "## Phase 1: Initial Scoping\n"),
+        ("2026-11-08T08:40:00Z", "## Iteration 1\n"),
+        ("2026-11-08T09:30:00Z", "## Iteration 2\n"),
+        ("2026-11-08T10:30:00Z", "- note\n"),
+    ], usage=usage)
+    # The Mapper's own session cost $2
+    mapper = forensics / "artefacts" / "mapper"
+    _write(mapper / "cost_iter_00_mapper_1.json", json.dumps({"prism_cost": 1, "agent": "Mapper", "total_cost_usd": 2.0}))
+    s = _status(forensics, tmp_path)
+    phases = {t["id"]: t for t in s["timings"]["phases"]}
+    triage = next(b for b in phases["1"]["boxes"] if b["id"] == "triage")
+    assert triage["usd"] == 2.0 and "leadApprox" not in triage
+    assert phases["1"]["usd"] == round(2.0 + per_call, 2) and phases["1"]["leadApprox"]
+    r2 = phases["3"]["rounds"][1]
+    # The 10:30 call falls inside the running Executor's box; 09:30 before any box
+    run = next(b for b in r2["boxes"] if b["id"] == "run")
+    assert run["usd"] == round(per_call, 2) and run["leadApprox"]
+    assert r2["usd"] == round(2 * per_call, 2)
+    # The phases add up to the total, near enough
+    assert abs(sum(t.get("usd", 0) for t in phases.values()) - s["cost"]["usd"]) < 0.05
+
+
+def test_box_material_for_a_helper_box(forensics, tmp_path):
+    ex = _receipt(forensics, "iterations/02_round2/artefacts", "executor", "iter_02", 1, "finished", exit_code=0,
+                  finished="2026-11-08T11:00:00+00:00", request={"overrides": {"epochs": 3}})
+    _write(ex.parent / "report_iter_02_executor_1.md", "### Summary\n\n" + "All done. " * 400)
+    _write(forensics / "INVESTIGATION-LOG.md", FORENSICS_LOG + "### Executor Results\n- 11 pairs completed\n### Analyst Results\n- other box\n")
+    m = rs.box_material(str(forensics), "3:2:run")
+    assert m["version"] == 1 and m["box"] == {"phase": "3", "round": "2", "box": "run"}
+    (h,) = m["helpers"]
+    assert h["role"] == "Executor" and h["tag"] == "iter_02"
+    assert json.loads(h["task"]) == {"overrides": {"epochs": 3}}
+    assert h["result"].startswith("### Summary") and len(h["result"]) <= rs.MAX_MATERIAL
+    # Only the log blocks that map onto this box
+    assert m["log"] == "### Executor Results\n- 11 pairs completed"
+
+
+def test_box_material_for_a_lead_box_and_a_phase_without_boxes(forensics, orchestrate, tmp_path):
+    m = rs.box_material(str(forensics), "3:1:pre-register")
+    assert m["helpers"] == [] and m["log"].startswith("### Pre-registered Predictions")
+    d = rs.box_material(str(orchestrate), "1:discussion")
+    assert "box" in d and d["box"] == {"phase": "1", "box": "discussion"}
+    assert "Research question" in d["log"]
+
+
+@pytest.mark.parametrize("which", ["3:run", "1:2:triage", "3:2:nope", "9:x", "run", "2:1:discussion"])
+def test_an_unknown_box_is_an_error(forensics, which, capsys):
+    with pytest.raises(ValueError):
+        rs.box_material(str(forensics), which)
+    assert rs.main([str(forensics), "--box", which, "--json"]) == 2
+    assert capsys.readouterr().err.strip()
 
 
 def test_plain_text_summary_shows_phase_times(forensics, tmp_path):
@@ -526,6 +680,21 @@ def _check_contract(s: dict) -> None:
         for b in t.get("boxes", []) + [b for r in t.get("rounds", []) for b in r.get("boxes", [])]:
             assert b["id"] in box_ids
             check_span(b)
+        for x in [t] + t.get("boxes", []) + [y for r in t.get("rounds", []) for y in [r] + r.get("boxes", [])]:
+            assert "usd" not in x or isinstance(x["usd"], (int, float))
+            assert x.get("leadApprox", True) is True
+
+    # ---- The third round's fields ----
+    if cur is not None and "between" in cur:
+        phase = next(ph for ph in p["phases"] if ph["id"] == cur["phase"])
+        assert cur["between"]["from"] == cur["box"]
+        assert cur["between"]["to"] in [b["id"] for b in phase["boxes"]]
+    for h in s["helpers"]:
+        if h.get("side"):
+            assert h["side"] is True and isinstance(h["purpose"], str) and len(h["purpose"]) < 80 and "box" not in h
+        elif "box" in h:
+            assert h["box"] in {b["id"] for b in ids[h["phase"]]["boxes"]} | {b["side"]["id"] for b in ids[h["phase"]]["boxes"] if b.get("side")}
+        assert all(isinstance(h.get(k, ""), str) for k in ("phase", "round", "box"))
 
     def keys(v):
         if isinstance(v, dict):
