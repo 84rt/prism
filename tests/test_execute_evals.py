@@ -343,6 +343,24 @@ def test_errored_probes_are_retested_a_third_as_wide(tmp_path, fake_eval_script,
     assert seen == {"preflight": 3, "retest": 1}
 
 
+def test_probes_of_several_pinned_ids_run_fewer_at_once(tmp_path, fake_eval_script, monkeypatch):
+    seen = _spy_on_execute(monkeypatch)
+    run_foreground(
+        tmp_path, fake_eval_script, monkeypatch, conditions=FOUR_CONDITIONS,
+        overrides={"max_parallel": 2, "max_connections": 3, "sample_id": "e1,e2", "epochs": 5},
+    )
+    # Six samples in flight; each probe runs both pinned ids at once, so three
+    # probes fit, not six
+    assert seen["preflight"] == 3
+
+
+def test_a_probe_counts_its_pinned_ids():
+    assert ee.pinned_id_count("e1, e2,e3") == 3
+    assert ee.pinned_id_count(["a", "b"]) == 2
+    assert ee.pinned_id_count("episode") == 1
+    assert ee.pinned_id_count(7) == 1
+
+
 def test_foreground_run_with_preflight_is_score_free(tmp_path, fake_eval_script, monkeypatch):
     run_dir, req, code = run_foreground(tmp_path, fake_eval_script, monkeypatch, overrides={"epochs": 2})
     assert code == 0

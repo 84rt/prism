@@ -1874,6 +1874,10 @@ class PairPlan:
     # file's own directory (see `task_location`). None only in a plan written
     # before this field existed, which then runs from experiment_dir.
     cwd: str | None = None
+    # Samples the probe and the retest each run: 1 and 3, or, when the request
+    # pins sample ids, one per id and three per id
+    probe_samples: int = 1
+    retest_samples: int = 3
 
 
 def task_location(exp_dir: str, task: str) -> tuple[str, str]:
@@ -2006,9 +2010,11 @@ def build_pairs(
             if sample_id is not None:
                 probe = render(preflight_log_dir, limit=None, sample_id=sample_id, epochs=None)
                 retest = render(preflight_log_dir, limit=None, sample_id=sample_id, epochs=3)
+                n_ids = pinned_id_count(sample_id)
             else:
                 probe = render(preflight_log_dir, limit=1, sample_id=None, epochs=None)
                 retest = render(preflight_log_dir, limit=3, sample_id=None, epochs=None)
+                n_ids = 1
 
             pairs.append(
                 PairPlan(
@@ -2022,9 +2028,31 @@ def build_pairs(
                     preflight_log_dir=preflight_log_dir,
                     retest_command=retest,
                     cwd=cwd,
+                    probe_samples=n_ids,
+                    retest_samples=3 * n_ids,
                 )
             )
     return pairs
+
+
+def pinned_id_count(sample_id: Any) -> int:
+    """How many sample ids a request's ``sample_id`` override pins.
+
+    Parameters
+    ----------
+    sample_id : Any
+        The override: one id, a comma-separated string of them, or a list.
+
+    Returns
+    -------
+    int
+        e.g. 3 for ``"e1,e2,e3"`` or ``["e1", "e2", "e3"]``, 1 for ``"episode"`` or 7; at least 1.
+    """
+    if isinstance(sample_id, list):
+        return max(1, len(sample_id))
+    if isinstance(sample_id, str):
+        return max(1, len([i for i in sample_id.split(",") if i.strip()]))
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -2295,16 +2323,24 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
         return execute([cmd], probe_config, capture_dir=capture, on_event=_usage_recorder(status, p.id)).results[0]
 
     # --- Probes and retests, side by side ----------------------------------
-    # Run as many probes at once as the batch keeps samples in flight
-    # (max_parallel × max_connections): a probe is one sample, so preflight
-    # never holds more sandboxes than the main run will. One at a time, a
-    # round's eleven probes once took 75 minutes. A retest is three samples,
-    # so retests run a third as wide, after every probe has finished.
+    # Run probes side by side up to the samples the batch keeps in flight
+    # (max_parallel × max_connections), so preflight never holds more
+    # sandboxes than the main run will. One at a time, a round's eleven probes
+    # once took 75 minutes. A probe is one sample, or one per pinned id; a
+    # retest three times that; each holds at most max_connections at once.
+    # Retests run after every probe has finished.
     conc = status.data["concurrency"]
     in_flight = max(1, conc["max_parallel"] * conc["max_connections"])
+
+    def width(samples_each: int) -> int:
+        """How many probes (or retests) of this many samples fit in flight at once."""
+        return max(1, in_flight // max(1, min(samples_each, conc["max_connections"])))
+
+    probe_width = width(max((p.probe_samples for p in pairs), default=1))
+    retest_width = width(max((p.retest_samples for p in pairs), default=3))
     # The probes are real samples in real sandboxes: measure them for sizing
     sampler = SandboxSampler(exp_dir).start()
-    with ThreadPoolExecutor(max_workers=min(in_flight, max(1, len(pairs)))) as pool:
+    with ThreadPoolExecutor(max_workers=min(probe_width, max(1, len(pairs)))) as pool:
         probes = dict(zip([p.id for p in pairs], pool.map(lambda p: run_probe(p, "preflight"), pairs)))
 
     # Read each successful probe's log now: a retest overwrites it.
@@ -2319,7 +2355,7 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
 
     # A sample error on the single probe earns the --limit 3 retest.
     to_retest = [p for p in pairs if isinstance(shapes.get(p.id), dict) and shapes[p.id]["sample_errors"] > 0]
-    with ThreadPoolExecutor(max_workers=max(1, min(in_flight // 3, len(to_retest)))) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, min(retest_width, len(to_retest)))) as pool:
         retests = dict(zip([p.id for p in to_retest], pool.map(lambda p: run_probe(p, "retest"), to_retest)))
     with status.lock:
         conc["measured"] = sampler.stop()
