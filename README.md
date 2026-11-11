@@ -89,7 +89,7 @@ echo "ANTHROPIC_API_KEY=sk-..." >> .env
 #   /diagnose [transcript path + research question]
 
 # To uninstall later (removes symlinks and reverts target repo changes):
-#   /path/to/prism/uninstall.sh .
+#   /path/to/prism/uninstall.sh .   (refuses while a run is going; --force skips that)
 ```
 
 `install.sh` prints the next steps for your setup. If you installed from the host, reopen the eval repo in its devcontainer so the scaffold mount takes effect. The first time you open the repo in Claude Code, accept the workspace-trust prompt: Claude Code only applies Prism's permission allow-list in a trusted workspace.

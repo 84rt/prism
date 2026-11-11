@@ -3,13 +3,32 @@
 #
 # Only removes symlinks that point into this scaffold repo (either via the
 # in-container mount path or via $SCAFFOLD_DIR directly, matching install.sh's
-# two modes). Non-symlink files are never touched.
+# two modes). Non-symlink files are never touched. Refuses while one of the
+# target's investigations is still running, since removing the links (and a
+# pinned copy) pulls the scaffold out from under its lead and helpers;
+# --force skips that check, as for install.sh.
 #
-# Usage: ./uninstall.sh /path/to/target_repo
+# Usage: ./uninstall.sh /path/to/target_repo [--force]
 set -euo pipefail
 
 SCAFFOLD_DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET_DIR="${1:?Usage: ./uninstall.sh /path/to/target_repo}"
+USAGE="Usage: ./uninstall.sh /path/to/target_repo [--force]"
+TARGET_DIR=""
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --force) FORCE=1 ;;
+        -*)      echo "Error: unknown option $arg"; echo "$USAGE"; exit 1 ;;
+        *)
+            if [ -n "$TARGET_DIR" ]; then echo "$USAGE"; exit 1; fi
+            TARGET_DIR="$arg"
+            ;;
+    esac
+done
+if [ -z "$TARGET_DIR" ]; then
+    echo "$USAGE"
+    exit 1
+fi
 
 # Derive scaffold name and in-container mount path the same way install.sh
 # does, so uninstall recognises symlinks created by either mode without
@@ -23,6 +42,13 @@ if [ ! -d "$TARGET_DIR" ]; then
 fi
 
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
+
+if [ "$FORCE" = "0" ] && ! python3 "$SCAFFOLD_DIR/scripts/_live_runs.py" "$TARGET_DIR"; then
+    echo ""
+    echo "Error: not uninstalling $SCAFFOLD_NAME while a run is going."
+    echo "  Re-run once it has finished, or add --force if it is not really running."
+    exit 1
+fi
 
 echo "Uninstalling $SCAFFOLD_NAME scaffold"
 echo "  Scaffold: $SCAFFOLD_DIR"

@@ -124,6 +124,14 @@ if [ "$PIN" = "1" ]; then
     SCAFFOLD_SRC="$PIN_DIR (commit ${PIN_COMMIT:0:7})"
 fi
 
+# A folder of the copy's name without install's marker is the target's own:
+# never replace it (uninstall and a plain re-install already leave it alone)
+if [ "$PIN" = "1" ] && [ -e "$PIN_DIR" ] && [ ! -f "$PIN_DIR/$PIN_MARKER" ]; then
+    echo "Error: ${PIN_DIR#$TARGET_DIR/} already exists and is not a pinned copy made by this installer."
+    echo "  Move or rename it, then re-run with --pin."
+    exit 1
+fi
+
 # Replacing or removing an existing copy changes the files a running lead and
 # its helpers read next, which is exactly what pinning exists to prevent.
 if [ -f "$PIN_DIR/$PIN_MARKER" ] && [ "$FORCE" = "0" ]; then

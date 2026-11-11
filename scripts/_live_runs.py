@@ -1,7 +1,7 @@
 """Is any Prism investigation in a target folder still running?
 
-Install-time plumbing for ``install.sh --pin``: before the installer replaces
-or removes a target's pinned copy of the scaffold, it asks this script whether
+Install-time plumbing for ``install.sh --pin`` and ``uninstall.sh``: before either replaces
+or removes a target's scaffold links or pinned copy, it asks this script whether
 doing so would change files under a live run. Run from the scaffold checkout,
 never linked into a target::
 

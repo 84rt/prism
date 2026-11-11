@@ -128,6 +128,30 @@ def test_uninstall_removes_pinned_links_and_the_copy(pinned):
     assert _links(pinned) == []
 
 
+def test_uninstall_is_refused_while_a_run_is_going_unless_forced(pinned):
+    _fresh_log(pinned)
+    refused = _run("uninstall.sh", str(pinned))
+    assert refused.returncode == 1
+    assert "investigations/demo" in refused.stdout
+    assert (pinned / COPY).exists() and _links(pinned), "uninstall removed files despite the refusal"
+
+    forced = _run("uninstall.sh", str(pinned), "--force")
+    assert forced.returncode == 0, forced.stdout + forced.stderr
+    assert not (pinned / COPY).exists()
+
+
+def test_pinning_never_replaces_a_folder_that_is_not_a_pinned_copy(tmp_path):
+    target = tmp_path / "target"
+    own = target / COPY
+    own.mkdir(parents=True)
+    (own / "notes.md").write_text("the target's own")
+    refused = _run("install.sh", str(target), "--pin")
+    assert refused.returncode == 1
+    assert "not a pinned copy" in refused.stdout
+    assert (own / "notes.md").read_text() == "the target's own"
+    assert _links(target) == [], "links were made despite the refusal"
+
+
 def _local_patch(target: Path, rel: str, old: str, new: str) -> None:
     """Write a target's own patch replacing one line of a scaffold file."""
     text = (REPO_ROOT / rel).read_text().splitlines(keepends=True)
@@ -165,6 +189,7 @@ def test_a_patch_that_no_longer_fits_keeps_the_old_copy(pinned):
 
 def test_unknown_options_are_refused(tmp_path):
     assert _run("install.sh", str(tmp_path), "--pinn").returncode == 1
+    assert _run("uninstall.sh", str(tmp_path), "--forse").returncode == 1
 
 
 # ---------------------------------------------------------------------------
