@@ -86,6 +86,7 @@ A mapping of execution-parameter overrides. Supported keys:
 | `max_parallel` | int | Concurrent eval subprocesses. **Unset: automatic sizing** (starting value 2) |
 | `max_connections` | int | Maps to `--max-connections` (concurrent API calls within an eval). **Unset: automatic sizing** (starting value 5) |
 | `command_timeout_seconds` | int | Wall-clock limit per `inspect eval` subprocess. Default 14400 (4 h) |
+| `preflight_timeout_seconds` | int | Wall-clock limit per preflight probe or retest. Default 900 (15 min). A probe still running then is stopped without retries and its pair excluded as stalled |
 
 Unrecognised keys are ignored with a note in **Additional Notes**. Other flags (`--retry-on-error 3`, `--no-fail-on-error`, `--display plain`, and `--with "openai>=…"` on `openrouter/…` models) are applied to every invocation by the runner without being in overrides — these are policy, not configuration.
 
@@ -334,8 +335,9 @@ Preflight (run via `--limit 1` unless `skip_preflight=true`) is a structural pro
 | Exit 0, single sample errored → `--limit 3` retest, 3 of 3 error | All-samples deterministic | **Exclude**; record in Preflight Exclusions with all 3 error traces |
 | All process-level retries exhausted, no usable log | Structural | **Exclude**; record in Preflight Exclusions with structural evidence |
 | Pinned OpenRouter provider unavailable (routing error, no usable log) | Pinned provider unavailable | **Exclude**; record in Preflight Exclusions naming the pinned slug. Do **not** relax the pin to get the model through preflight — an unpinned run measures with a different instrument, and the orchestrator needs to decide whether to wait, re-pin, or drop the model |
+| Probe or retest still running at `preflight_timeout_seconds`, stopped without retries | Provider not responding (stalled) | **Exclude**; record in Preflight Exclusions as `provider-not-responding`. One sample normally takes minutes, so the provider has most likely stopped answering (a sandbox that never starts looks the same). The orchestrator decides whether to wait, re-pin, drop the model, or lengthen the limit for a genuinely slow one |
 
-Only the last two outcomes cause exclusion. Transient and sample-specific preflight outcomes are informational — they do not gate execution.
+Only the last four outcomes cause exclusion. Transient and sample-specific preflight outcomes are informational — they do not gate execution.
 
 After preflight, the runner moves the `_preflight/` log subdirectory to the run directory's `private/preflight_logs/`. Preflight logs must not appear when the Analyst later ingests the experiment's log directory; they are quarantined rather than deleted so the evidence behind an exclusion survives.
 

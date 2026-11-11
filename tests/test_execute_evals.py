@@ -490,6 +490,72 @@ def test_a_stop_during_preflight_excludes_nothing(tmp_path, fake_eval_script, mo
     assert "structural" not in ee.render_report(data)
 
 
+def _stall_probes(monkeypatch, kind="preflight_"):
+    """Make every probe (or retest) of ``kind`` outlive its limit; return the limits each was given."""
+    real_run_single = ee.run_single
+    limits: list[int] = []
+
+    def stalled(command, timeout=ee.DEFAULT_COMMAND_TIMEOUT, cwd=None, capture_dir=None, capture_name=None):
+        if capture_name and capture_name.startswith(kind):
+            limits.append(timeout)
+            return -1, float(timeout), "", f"{ee.TIMED_OUT} {timeout}s"
+        return real_run_single(command, timeout, cwd, capture_dir, capture_name)
+
+    monkeypatch.setattr(ee, "run_single", stalled)
+    return limits
+
+
+def test_a_stalled_probe_is_stopped_at_the_short_limit_and_excluded_as_not_responding(tmp_path, fake_eval_script, monkeypatch):
+    # A provider that never answers once held a probe for the full 4 hours,
+    # retried thrice. Now: one try, at the preflight limit, and a plain reason.
+    limits = _stall_probes(monkeypatch)
+    run_dir, _, _ = run_foreground(tmp_path, fake_eval_script, monkeypatch, conditions={"baseline": {"task": "task.py", "args": {}}})
+    data = ee.Status.load(run_dir).data
+    assert limits == [ee.DEFAULT_PREFLIGHT_TIMEOUT]
+    pf = data["preflight"]["pairs"]["baseline__openai-gpt-5"]
+    assert pf["outcome"] == "excluded-stalled"
+    assert pf["evidence"]["error_class"] == "stalled"
+    assert data["pairs"]["baseline__openai-gpt-5"]["state"] == "excluded-at-preflight"
+    # Its duration is the limit, not a measurement of the model's speed
+    assert "slowest preflight probe" not in (data["concurrency"].get("sandbox_evidence") or "")
+    report = ee.render_report(data)
+    assert "- **Reason**: `provider-not-responding (stalled)`" in report
+    assert "after its 15-minute limit" in report
+
+
+def test_the_preflight_limit_can_be_lengthened_and_never_exceeds_the_command_limit(tmp_path, fake_eval_script, monkeypatch):
+    limits = _stall_probes(monkeypatch)
+    run_foreground(tmp_path, fake_eval_script, monkeypatch, overrides={"preflight_timeout_seconds": 3600, "command_timeout_seconds": 1800}, conditions={"baseline": {"task": "task.py", "args": {}}})
+    assert limits == [1800]
+
+
+def test_a_stalled_retest_excludes_the_pair_too(tmp_path, fake_eval_script, monkeypatch):
+    # The probe answers with a sample error, then the provider goes quiet
+    limits = _stall_probes(monkeypatch, kind="retest_")
+    run_dir, _, _ = run_foreground(tmp_path, fake_eval_script, monkeypatch, mode="sample_error", conditions={"baseline": {"task": "task.py", "args": {}}})
+    data = ee.Status.load(run_dir).data
+    assert limits == [ee.DEFAULT_PREFLIGHT_TIMEOUT]
+    assert data["preflight"]["pairs"]["baseline__openai-gpt-5"]["outcome"] == "excluded-stalled"
+    assert "provider-not-responding" in ee.render_report(data)
+
+
+def test_a_stalled_full_run_command_is_still_retried():
+    # Outside preflight a long eval may just be long: the old retries stand
+    calls = []
+
+    def stalled(command, timeout, cwd=None, capture_dir=None, capture_name=None):
+        calls.append(command)
+        return -1, float(timeout), "", f"{ee.TIMED_OUT} {timeout}s"
+
+    config = ee.ExecutionConfig(max_parallel=1, max_retries=1, retry_backoff_seconds=[0], command_timeout=1)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ee, "run_single", stalled)
+        mp.setattr(ee, "EXECUTE_POLL", 0.01)
+        report = ee.execute([ee.CommandSpec(id="c", command="true", log_dir="/nonexistent")], config)
+    assert len(calls) == 2
+    assert report.results[0].error_class == "stalled"
+
+
 def test_a_worker_without_inspect_fails_the_run_before_running_any_eval(tmp_path, fake_eval_script, monkeypatch):
     # The launcher had Inspect but the worker's environment has since vanished
     # (`uv run --with`): the run must fail saying so, not exclude every pair.

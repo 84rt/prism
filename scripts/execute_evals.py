@@ -121,6 +121,15 @@ EXECUTE_POLL = 5  # seconds between checks for a finished command or a due retry
 # detached so nothing above it is waiting.
 DEFAULT_COMMAND_TIMEOUT = 4 * 3600
 
+# Per-probe limit for preflight. A probe is one sample (or one per pinned id):
+# the slowest seen took a few minutes (a reasoning model, or a first sandbox
+# image build), so a probe still going after this is stalled, most likely on
+# a provider that is not answering. Under the full limit it once sat 4 hours.
+DEFAULT_PREFLIGHT_TIMEOUT = 15 * 60
+
+# What run_single reports when a command outlives its limit.
+TIMED_OUT = "Process timed out after"
+
 # `openai` floor Inspect's OpenRouter provider needs; see the contract.
 OPENROUTER_OPENAI_PIN = "openai>=2.45.0"
 
@@ -133,6 +142,7 @@ RECOGNISED_OVERRIDES = {
     "max_parallel",
     "max_connections",
     "command_timeout_seconds",
+    "preflight_timeout_seconds",
 }
 
 PREFLIGHT_DIRNAME = "_preflight"
@@ -163,6 +173,10 @@ class ExecutionConfig:
     max_retries: int = 3
     retry_backoff_seconds: list[int] = field(default_factory=lambda: [10, 30, 60])
     command_timeout: int = DEFAULT_COMMAND_TIMEOUT
+    # Whether a command that outlived command_timeout is tried again. Preflight
+    # turns this off: a stalled probe would just stall again, once per retry.
+    retry_stalled: bool = True
+    preflight_timeout: int = DEFAULT_PREFLIGHT_TIMEOUT
 
 
 @dataclass
@@ -1458,7 +1472,7 @@ def run_single(
                     return -1, time.monotonic() - start, "", "Interrupted by shutdown signal"
                 if time.monotonic() > deadline:
                     _kill_group(proc)
-                    return -1, time.monotonic() - start, "", f"Process timed out after {timeout}s"
+                    return -1, time.monotonic() - start, "", f"{TIMED_OUT} {timeout}s"
 
         duration = time.monotonic() - start
         stdout = stdout_bytes.decode("utf-8", errors="replace")
@@ -1639,6 +1653,11 @@ def execute(
                 # Both streams: Inspect reports prerequisite failures on stdout.
                 diagnostic = combine_output(stdout, stderr)
                 error_class = classify_error(returncode, diagnostic)
+                # Outliving the time limit is its own class: the command was
+                # killed with nothing to show, which reads as a stall, not a
+                # crash. Its output went with it, so the patterns cannot tell.
+                if stderr.startswith(TIMED_OUT):
+                    error_class = "stalled"
                 result.error_class = error_class
                 recent.append(error_class)
                 if diagnostic:
@@ -1679,7 +1698,8 @@ def execute(
                     ceiling = reduction.new_level
                     last_reduction = launches
 
-                if should_retry(error_class, retry_counts[cmd.id], config.max_retries):
+                stall_stops = error_class == "stalled" and not config.retry_stalled
+                if not stall_stops and should_retry(error_class, retry_counts[cmd.id], config.max_retries):
                     # A failed attempt may have left a partial .eval behind.
                     # Move it out before retrying: a second log in the pair's
                     # directory would double the Analyst's pool.
@@ -1854,7 +1874,7 @@ def validate_request(request: dict[str, Any]) -> list[str]:
                 "overrides: runs_per_condition was removed (it was never applied); "
                 "use epochs, with sample_id, for repeated sampling"
             )
-        for k in ("sample_limit", "epochs", "max_parallel", "max_connections", "command_timeout_seconds"):
+        for k in ("sample_limit", "epochs", "max_parallel", "max_connections", "command_timeout_seconds", "preflight_timeout_seconds"):
             if k in overrides and (not isinstance(overrides[k], int) or overrides[k] < 1):
                 problems.append(f"overrides.{k} must be a positive integer")
     return problems
@@ -2308,7 +2328,10 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
         max_parallel=1,
         max_retries=config.max_retries,
         retry_backoff_seconds=config.retry_backoff_seconds,
-        command_timeout=config.command_timeout,
+        # A probe is a sample or two: one still going after the short limit
+        # is stalled, and trying it again would only stall again.
+        command_timeout=min(config.preflight_timeout, config.command_timeout),
+        retry_stalled=False,
     )
     exp_dir = status.data["experiment_dir"]
 
@@ -2386,7 +2409,8 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
             "retest": None,
             "evidence": None,
         }
-        if r.duration_seconds:
+        # A stalled probe's duration is just the time limit, not its speed
+        if r.duration_seconds and r.error_class != "stalled":
             durations.append(float(r.duration_seconds))
 
         if r.status == "success":
@@ -2407,7 +2431,16 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
                     "credential_sample_errors": creds,
                     "process_retries": rr.process_retries,
                 }
-                if n and errs >= n:
+                if rr.error_class == "stalled":
+                    # The probe answered but its retest did not: the provider
+                    # stopped answering in between, which no sample count shows
+                    entry["outcome"] = "excluded-stalled"
+                    entry["evidence"] = {
+                        "error_class": "stalled",
+                        "command": p.retest_command,
+                        "limit_seconds": probe_config.command_timeout,
+                    }
+                elif n and errs >= n:
                     entry["outcome"] = "excluded-all-samples-deterministic"
                     # A cap hit during preflight looks "deterministic" too;
                     # the tag stops it being read as a task bug.
@@ -2421,7 +2454,7 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
                 entry["outcome"] = "passed-after-retries" if r.process_retries else "passed"
         else:
             cls = r.error_class or "structural"
-            entry["outcome"] = "excluded-routing" if cls == "routing" else "excluded-structural"
+            entry["outcome"] = {"routing": "excluded-routing", "stalled": "excluded-stalled"}.get(cls, "excluded-structural")
             entry["evidence"] = {
                 "error_class": cls,
                 "exit_code": next((e.split("=", 1)[1] for e in r.errors if e.startswith("exit_code=")), None),
@@ -2432,6 +2465,8 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
                 "log_status": r.status,
                 "log_error": next((e for e in r.errors if not e.startswith(("[", "exit_code="))), None),
             }
+            if cls == "stalled":
+                entry["evidence"]["limit_seconds"] = probe_config.command_timeout
 
         pf["pairs"][p.id] = entry
         if entry["outcome"].startswith("excluded"):
@@ -2732,6 +2767,7 @@ def prepare_run(
         max_retries=3,
         retry_backoff_seconds=[10, 30, 60],
         command_timeout=int(overrides.get("command_timeout_seconds", DEFAULT_COMMAND_TIMEOUT)),
+        preflight_timeout=int(overrides.get("preflight_timeout_seconds", DEFAULT_PREFLIGHT_TIMEOUT)),
     )
     shutil.copy(request_path, os.path.join(run_dir, "request.json"))
     with open(os.path.join(run_dir, "plan.json"), "w") as f:
@@ -3131,7 +3167,7 @@ def render_report(data: dict[str, Any]) -> str:
     sample_err = [e for e in ran if e["state"] == "sample-level-errors"]
     failed = [e for e in ran if e["state"] == "failed"]
     other = [e for e in ran if e["state"] in ("aborted", "interrupted", "not_run", "pending", "running", "retrying", "preflight")]
-    structural = [e for e in failed if e.get("error_class") in ("structural", "unknown", "resource_contention", "transient", None)]
+    structural = [e for e in failed if e.get("error_class") in ("structural", "unknown", "resource_contention", "transient", "stalled", None)]
     routing = [e for e in failed if e.get("error_class") == "routing"]
     transient_recovered = [e for e in ran if e["state"] in ("success", "sample-level-errors") and e.get("process_retries", 0) > 0]
 
@@ -3213,6 +3249,17 @@ def render_report(data: dict[str, Any]) -> str:
                 if (entry.get("retest") or {}).get("credential_sample_errors"):
                     out.append(f"  - **{CREDENTIALS_TAG} Credentials exhausted**: {_CREDENTIALS_NOTE}")
                 out.append(f"  - **Evidence**: {ev.get('retest_errors')}; sample error traces are in the quarantined preflight logs under the run directory's `private/preflight_logs/`.")
+            elif outcome == "excluded-stalled":
+                minutes = round((ev.get("limit_seconds") or DEFAULT_PREFLIGHT_TIMEOUT) / 60)
+                out.append("  - **Reason**: `provider-not-responding (stalled)`")
+                out.append(
+                    f"  - **Evidence**: the preflight probe was still running after its {minutes}-minute limit "
+                    "and was stopped, without retries. A single sample normally takes a few minutes at most, "
+                    "so the model's provider is most likely not responding (a sandbox that never starts looks "
+                    "the same). Try again later, re-pin the provider, or drop the model; "
+                    "`preflight_timeout_seconds` in `overrides` lengthens the limit if this model is genuinely slow."
+                )
+                out.append(f"  - **Command**: `{ev.get('command')}`")
             else:
                 reason = "pinned-provider-unavailable (routing)" if outcome == "excluded-routing" else "structural"
                 out.append(f"  - **Reason**: `{reason}`")
