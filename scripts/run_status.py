@@ -369,8 +369,10 @@ def executor_samples(receipt: dict[str, Any]) -> dict[str, int] | None:
         or when a condition's size can't be known. A condition still running
         counts the samples its log held at Inspect's last save of it (the eval
         runner updates that every 20 seconds or so). Its size, until it
-        finishes, is the request's ``epochs`` times its sample ids, when the
-        request names them.
+        finishes, is the plan its log's header names, or before that the
+        request's ``epochs`` times its sample ids (a list, or a comma-separated
+        string), when the request names them. Conditions excluded at preflight,
+        and conditions a finished run never got to, count for nothing.
     """
     receipt_path = receipt.get("receipt")
     runs_dir = os.path.join(os.path.dirname(receipt_path), "runs") if receipt_path else None
@@ -395,11 +397,19 @@ def executor_samples(receipt: dict[str, Any]) -> dict[str, int] | None:
     # ---- Each condition's size: recorded once run, else estimated from the request ----
     overrides = (_load_json(receipt.get("request")) or {}).get("overrides") or {}
     ids = overrides.get("sample_id")
-    n_ids = 1 if isinstance(ids, (str, int)) else len(ids) if isinstance(ids, list) else None
+    if isinstance(ids, str):
+        n_ids = len([i for i in ids.split(",") if i.strip()]) or None
+    else:
+        n_ids = 1 if isinstance(ids, int) else len(ids) if isinstance(ids, list) else None
     estimate = overrides["epochs"] * n_ids if n_ids and isinstance(overrides.get("epochs"), int) else None
+    finished_run = best.get("state") in ("completed", "interrupted", "failed")
     done = total = 0
     for pair in best["pairs"].values():
         size = pair.get("samples_total")
+        if size is None:
+            size = pair.get("samples_planned")
+        if size is None and (pair.get("state") == "excluded-at-preflight" or finished_run):
+            continue  # will never run any more samples
         if size is None:
             size = estimate
         if size is None:

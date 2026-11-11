@@ -755,13 +755,47 @@ def live_samples_completed(log_dir: str, since: float) -> int | None:
         return None
 
 
+def live_samples_planned(log_dir: str, since: float) -> int | None:
+    """How many samples the eval still writing into a log directory will run.
+
+    Inspect writes the plan into the log's header when the eval starts: the
+    sample ids left after ``--limit`` or ``--sample-id``, run ``epochs`` times
+    each. Only the header is read.
+
+    Parameters
+    ----------
+    log_dir : str
+        The pair's log directory.
+    since : float
+        When this attempt started (seconds since the epoch); an older log is ignored.
+
+    Returns
+    -------
+    int | None
+        e.g. 300 for three pinned ids at 100 epochs; None while this attempt
+        has no log yet or its header can't be read.
+    """
+    path = find_newest_log(log_dir)
+    if path is None or os.path.getmtime(path) < since:
+        return None
+    try:
+        from inspect_ai.log import read_eval_log
+
+        spec = read_eval_log(path, header_only=True).eval
+        return len(spec.dataset.sample_ids or []) * (spec.config.epochs or 1) or None
+    except Exception:  # mid-replace or unreadable: try again next round
+        return None
+
+
 def watch_live_counts(status: Status, stop: threading.Event, interval: float = LIVE_COUNT_INTERVAL) -> None:
     """Keep each running pair's ``samples_completed`` current until stopped.
 
     Runs on its own thread beside ``execute``, which records a pair's counts
     only once its eval process exits. The final count from the finished log
     always replaces the live one, since a pair is touched here only while its
-    state is ``running``.
+    state is ``running``. Each attempt's planned size goes in
+    ``samples_planned`` as soon as its log header names it, so the panel can
+    show a total before ``samples_total`` is known at the end.
 
     Parameters
     ----------
@@ -774,6 +808,8 @@ def watch_live_counts(status: Status, stop: threading.Event, interval: float = L
     """
     # Per pair: (attempt number, wall-clock start) of the attempt being watched
     started: dict[str, tuple[int, float]] = {}
+    # Per pair: (attempt number, planned samples or None until its header is read)
+    planned: dict[str, tuple[int, int | None]] = {}
     while not stop.wait(interval):
         with status.lock:
             running = {
@@ -786,15 +822,25 @@ def watch_live_counts(status: Status, stop: threading.Event, interval: float = L
             if started.get(pid, (None,))[0] != attempt:
                 started[pid] = (attempt, time.time())
 
-        # Logs are read outside the lock so a slow read never holds up an event
+        # Logs are read outside the lock so a slow read never holds up an event;
+        # an attempt's plan is read until found, then kept
         counts = {pid: live_samples_completed(log_dir, started[pid][1]) for pid, (_, log_dir) in running.items()}
+        for pid, (attempt, log_dir) in running.items():
+            if planned.get(pid, (None, None))[0] != attempt or planned[pid][1] is None:
+                planned[pid] = (attempt, live_samples_planned(log_dir, started[pid][1]))
         with status.lock:
             changed = False
             for pid, done in counts.items():
                 e = status.pair(pid)
-                if done is not None and e.get("state") == "running" and e["attempts"] == running[pid][0]:
+                if e.get("state") != "running" or e["attempts"] != running[pid][0]:
+                    continue
+                if done is not None:
                     changed |= e.get("samples_completed") != done
                     e["samples_completed"] = done
+                size = planned[pid][1]
+                if size is not None and e.get("samples_planned") != size:
+                    e["samples_planned"] = size
+                    changed = True
             if changed:
                 status.save()
 

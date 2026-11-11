@@ -142,10 +142,10 @@ def _receipt(inv: Path, where: str, role: str, tag: str, n: int, state: str, *, 
     return _write(path, json.dumps(body))
 
 
-def _executor_status(receipt: Path, pairs: dict, started: str = "2026-11-08T10:01:00+00:00") -> None:
+def _executor_status(receipt: Path, pairs: dict, started: str = "2026-11-08T10:01:00+00:00", state: str = "running") -> None:
     """Write the batch run's `status.json` under the Executor's `runs/` folder."""
     _write(receipt.parent / "runs" / "iter_02_x" / "status.json",
-           json.dumps({"schema": 1, "run_id": "iter_02_x", "started_at": started, "state": "running", "pairs": pairs}))
+           json.dumps({"schema": 1, "run_id": "iter_02_x", "started_at": started, "state": state, "pairs": pairs}))
 
 
 @pytest.fixture
@@ -198,6 +198,36 @@ def test_forensics_executor_samples_count_finished_conditions(forensics, tmp_pat
     ex = [h for h in _status(forensics, tmp_path)["helpers"] if h["role"] == "Executor"]
     # The running condition counts 0 until it finishes; its size comes from the request
     assert ex[0]["samples"] == {"done": 100, "total": 200}
+
+
+def _executor_counts(inv: Path, tmp_path: Path, pairs: dict, overrides: dict, state: str = "running") -> dict | None:
+    """The Executor's episode count for a batch run with these pairs and request overrides."""
+    ex = _receipt(inv, "iterations/02_round2/artefacts", "executor", "iter_02", 1, "running", alive=True,
+                  request={"overrides": overrides})
+    _executor_status(ex, pairs, state=state)
+    return next(h for h in _status(inv, tmp_path)["helpers"] if h["role"] == "Executor").get("samples")
+
+
+def test_several_pinned_episodes_multiply_the_estimate(forensics, tmp_path):
+    pairs = {"c_a": {"state": "running", "samples_completed": 50}}
+    assert _executor_counts(forensics, tmp_path, pairs, {"sample_id": "e1,e2, e3", "epochs": 100}) == {"done": 50, "total": 300}
+
+
+def test_a_running_conditions_planned_size_beats_the_estimate(forensics, tmp_path):
+    # No sample ids or epochs in the request, but the log header named the plan
+    pairs = {"c_a": {"state": "running", "samples_completed": 4, "samples_planned": 40}}
+    assert _executor_counts(forensics, tmp_path, pairs, {}) == {"done": 4, "total": 40}
+
+
+def test_conditions_that_will_never_run_count_for_nothing(forensics, tmp_path):
+    overrides = {"sample_id": "episode", "epochs": 100}
+    excluded = {"c_a": {"state": "success", "samples_completed": 100, "samples_total": 100},
+                "c_b": {"state": "excluded-at-preflight", "samples_completed": None, "samples_total": None}}
+    assert _executor_counts(forensics, tmp_path, excluded, overrides) == {"done": 100, "total": 100}
+    # A stopped run's untouched conditions are not still to come
+    stopped = {"c_a": {"state": "success", "samples_completed": 100, "samples_total": 100},
+               "c_b": {"state": "interrupted", "samples_completed": None, "samples_total": None}}
+    assert _executor_counts(forensics, tmp_path, stopped, {}, state="interrupted") == {"done": 100, "total": 100}
 
 
 def test_helper_states_from_receipts(forensics, tmp_path):

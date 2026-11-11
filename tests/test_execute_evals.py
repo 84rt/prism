@@ -701,6 +701,10 @@ def test_live_count_reads_the_attempts_own_log(tmp_path):
     assert ee.live_samples_completed(str(log_dir), since=0) == 3
     # A log older than the attempt belongs to an earlier run
     assert ee.live_samples_completed(str(log_dir), since=os.path.getmtime(log_dir / "run.eval") + 60) is None
+    # The planned size, from the header: one sample id at three epochs
+    assert ee.live_samples_planned(str(log_dir), since=0) == 3
+    assert ee.live_samples_planned(str(log_dir), since=os.path.getmtime(log_dir / "run.eval") + 60) is None
+    assert ee.live_samples_planned(str(tmp_path / "none"), since=0) is None
 
 
 def test_live_counter_updates_running_pairs_only(tmp_path):
@@ -731,6 +735,9 @@ def test_live_counter_updates_running_pairs_only(tmp_path):
 
     saved = json.loads((tmp_path / "status.json").read_text())
     assert saved["pairs"]["a"]["samples_completed"] == 3
+    # The header's plan, one sample id at three epochs, gives the size early
+    assert saved["pairs"]["a"]["samples_planned"] == 3
     # A finished pair keeps its final count from the finished log
     assert saved["pairs"]["b"]["samples_completed"] == 7
+    assert "samples_planned" not in saved["pairs"]["b"]
     assert_no_leak(json.dumps(saved), "status.json")
