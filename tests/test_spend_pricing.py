@@ -122,6 +122,21 @@ def test_usage_shapes_count_cached_tokens_once():
     assert spend._tokens_from_call(anthropic) == {"input": 10, "output": 5, "cache_read": 700, "cache_write_5m": 300, "cache_write_1h": 0}
 
 
+def test_anthropic_usage_with_thinking_details_keeps_its_cache_tokens():
+    """Anthropic usage now carries ``output_tokens_details``, which OpenAI's Responses shape also has."""
+    # A Haiku scanner call logged by a real tampering run's Analyst
+    scan = {
+        "input_tokens": 4, "cache_creation_input_tokens": 429, "cache_read_input_tokens": 2769,
+        "cache_creation": {"ephemeral_5m_input_tokens": 429, "ephemeral_1h_input_tokens": 0},
+        "output_tokens": 307, "service_tier": "standard", "inference_geo": "global", "speed": "standard",
+        "output_tokens_details": {"thinking_tokens": 134},
+    }
+    assert spend._tokens_from_call(scan) == {"input": 4, "output": 307, "cache_read": 2769, "cache_write_5m": 429, "cache_write_1h": 0}
+    # OpenAI's Responses shape with reasoning details still subtracts its cached tokens
+    responses = {"input_tokens": 1000, "output_tokens": 50, "output_tokens_details": {"reasoning_tokens": 20}}
+    assert spend._tokens_from_call(responses)["input"] == 1000
+
+
 # ---------------------------------------------------------------------------
 # collect / render
 # ---------------------------------------------------------------------------

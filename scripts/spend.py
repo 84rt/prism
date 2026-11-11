@@ -522,6 +522,8 @@ def _tokens_from_call(usage: dict[str, Any]) -> dict[str, int]:
     OpenAI's chat (``prompt_tokens``) and Responses (``input_tokens_details``)
     shapes count cached tokens inside the input total, so they are subtracted;
     Anthropic's shape counts them separately and may split writes by lifetime.
+    Anthropic's is recognised first by its cache fields, since it now also
+    carries ``output_tokens_details`` (thinking tokens).
 
     Parameters
     ----------
@@ -538,7 +540,8 @@ def _tokens_from_call(usage: dict[str, Any]) -> dict[str, int]:
     def n(d: Any, key: str) -> int:
         return int((d or {}).get(key) or 0) if isinstance(d, dict) else 0
 
-    if "prompt_tokens" in usage or "input_tokens_details" in usage or "output_tokens_details" in usage:
+    anthropic = any(k in usage for k in ("cache_creation_input_tokens", "cache_read_input_tokens", "cache_creation"))
+    if not anthropic and ("prompt_tokens" in usage or "input_tokens_details" in usage or "output_tokens_details" in usage):
         chat = "prompt_tokens" in usage
         details = usage.get("prompt_tokens_details" if chat else "input_tokens_details")
         read, write = n(details, "cached_tokens"), n(details, "cache_write_tokens")
