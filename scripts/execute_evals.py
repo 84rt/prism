@@ -1076,10 +1076,10 @@ def _other_live_run(run_dir: str) -> str | None:
 
 
 def remove_leftover_sandboxes(exp_dir: str, run_dir: str, docker: Any = None) -> dict[str, Any]:
-    """Remove the sandbox containers a finished or stopped run left behind.
+    """Remove the sandbox containers a finished or stopped run left behind, and their built images.
 
     Only once every eval of the run has ended: Inspect normally removes its own
-    containers, so any still there from this run's experiment directory are
+    containers and images, so any still there from this run's experiment directory are
     leftovers of an eval that was killed. Skipped while another run beside this
     one is still going.
 
@@ -1108,7 +1108,10 @@ def remove_leftover_sandboxes(exp_dir: str, run_dir: str, docker: Any = None) ->
         result["skipped"] = "docker could not be asked (not installed or not running)"
         return result
     for project in projects:
-        done = docker(["compose", "-p", project, "down", "--volumes", "--remove-orphans"]) is not None
+        # `--rmi local` also removes the image Compose built for the project
+        # (named after it), as Inspect's own clean-up would have; images
+        # pulled by name for an `image:` line are shared and stay
+        done = docker(["compose", "-p", project, "down", "--volumes", "--remove-orphans", "--rmi", "local"]) is not None
         result["removed" if done else "failed"].append(project)
     return result
 

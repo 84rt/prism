@@ -98,7 +98,7 @@ def test_leftovers_removed_only_when_no_other_run_beside_is_going(tmp_path):
     docker = FakeDocker([("inspect-x-i1", str(exp / "c_1"))])
     result = ee.remove_leftover_sandboxes(str(exp), str(run), docker)
     assert result == {"removed": ["inspect-x-i1"], "failed": [], "skipped": None}
-    assert docker.calls[-1] == ["compose", "-p", "inspect-x-i1", "down", "--volumes", "--remove-orphans"]
+    assert docker.calls[-1] == ["compose", "-p", "inspect-x-i1", "down", "--volumes", "--remove-orphans", "--rmi", "local"]
 
     # A second run in the same experiment, still going: its containers look
     # exactly like leftovers, so nothing is touched
