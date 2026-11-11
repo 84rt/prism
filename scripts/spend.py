@@ -673,6 +673,39 @@ def _investigation_written(entry: dict[str, Any]) -> str | None:
     return written
 
 
+def _log_headings_written(entry: dict[str, Any], name: str) -> list[str]:
+    """The ``## `` headings one session line wrote into an investigation's log.
+
+    Parameters
+    ----------
+    entry : dict
+        One parsed line of a Claude Code session file.
+    name : str
+        The investigation's folder name.
+
+    Returns
+    -------
+    list[str]
+        Heading titles in the text a Write, Edit or MultiEdit put into
+        ``investigations/<name>/INVESTIGATION-LOG.md``, e.g. ``["Iteration 2"]``;
+        empty for any other line.
+    """
+    if entry.get("type") != "assistant":
+        return []
+    titles = []
+    for block in (entry.get("message") or {}).get("content") or []:
+        if not (isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") in _WRITE_TOOLS):
+            continue
+        args = block.get("input") or {}
+        if not str(args.get("file_path") or "").endswith(f"investigations/{name}/INVESTIGATION-LOG.md"):
+            continue
+        texts = [args.get("content"), args.get("new_string")] + [e.get("new_string") for e in args.get("edits") or [] if isinstance(e, dict)]
+        for text in texts:
+            if isinstance(text, str):
+                titles += [t.strip() for t in re.findall(r"^## (.+)$", text, flags=re.MULTILINE)]
+    return titles
+
+
 def _read_lead_session(path: str, investigation: str, seen: set[str] | None = None) -> dict[str, Any] | None:
     """Total one session file's usage if it is this investigation's lead.
 
@@ -695,9 +728,13 @@ def _read_lead_session(path: str, investigation: str, seen: set[str] | None = No
     -------
     dict | None
         ``{"session": id, "path": path, "calls": n, "cost_usd": x,
-        "unpriced_calls": k, "tokens_by_model": {...}}``, where ``cost_usd``
-        covers the priced calls only; or None when the session is not a lead
-        session that wrote into the investigation.
+        "unpriced_calls": k, "tokens_by_model": {...}, "first_at": t,
+        "log_headings": {title: t}}``, where ``cost_usd`` covers the priced
+        calls only, ``first_at`` is the time of the session's first line
+        that worked for this investigation (for a run's own session, its
+        start) and ``log_headings`` gives when each ``## `` heading of the
+        investigation's log was first written; or None when the session is
+        not a lead session that wrote into the investigation.
     """
     try:
         with open(path) as f:
@@ -723,9 +760,17 @@ def _read_lead_session(path: str, investigation: str, seen: set[str] | None = No
     calls: dict[str, tuple[str, dict[str, Any], str | None]] = {}
     current = None
     first_written = None
+    # When each line happened and which investigation it worked for, and when
+    # each of this investigation's log headings first appeared
+    times: list[tuple[str, str | None]] = []
+    headings: dict[str, str] = {}
     for e in entries:
         current = _investigation_written(e) or current
         first_written = first_written or current
+        if isinstance(e.get("timestamp"), str):
+            times.append((e["timestamp"], current))
+            for title in _log_headings_written(e, name):
+                headings.setdefault(title, e["timestamp"])
         msg = e.get("message") or {}
         # Claude Code's own placeholder replies (an error, an interrupted
         # turn) carry a usage block but were never an API call
@@ -762,6 +807,8 @@ def _read_lead_session(path: str, investigation: str, seen: set[str] | None = No
         "cost_usd": round(cost, 4),
         "unpriced_calls": unpriced_calls,
         "tokens_by_model": {m: dict(v) for m, v in sorted(tokens.items())},
+        "first_at": next((t for t, inv in times if (inv or first_written) == name), None),
+        "log_headings": headings,
     }
 
 

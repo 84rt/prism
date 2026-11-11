@@ -33,6 +33,16 @@ What it reports
 - ``cost``: total dollars as `spend.py` totals them (helpers, the lead, evals
   and the Analyst's own calls), and the eval tokens already inside that total.
 
+Fuller material for the run tab, all optional (older panels ignore it):
+
+- ``question``: the Agreed Scope's explanandum or research question, in full.
+- ``explanationFull``: the text ``explanation`` is cut from.
+- ``stepDetails``: ``{title, detail}`` per ``steps`` line, uncut.
+- ``timings``: estimated start and finish of each phase reached, with each
+  round and box (see `timings` for the sources and rules). Unknown times are
+  left out rather than guessed.
+- ``task`` on a helper: a short excerpt of its brief, where its request has one.
+
 The JSON contract (camelCase keys, null for absent, ``version`` 1) is set by
 the panel: see the note at the top of the session-tracker mod's
 ``tests/fixtures/prism-status-diagnose.ts`` in the dotfiles repo.
@@ -70,6 +80,10 @@ PIPELINES_PATH = os.path.join(TARGET_ROOT, ".claude", "docs", "pipelines.json")
 # Longest explanation or step text sent, in characters: the panel is narrow
 MAX_EXPLANATION = 200
 MAX_STEP = 70
+
+# A helper's brief, excerpted: its request's first prose field among these
+TASK_FIELDS = ("topic", "hypothesis", "behaviour_description", "evidence_summary")
+MAX_TASK = 300
 
 # A candidate id in a ledger change line, e.g. `C2` or `X13`
 CANDIDATE_ID = re.compile(r"^[A-Z]{1,2}\d{1,3}$")
@@ -419,6 +433,30 @@ def executor_samples(receipt: dict[str, Any]) -> dict[str, int] | None:
     return {"done": done, "total": total}
 
 
+def helper_task(request: dict[str, Any]) -> str | None:
+    """A short excerpt of the brief a helper was given, when its request says it simply.
+
+    Parameters
+    ----------
+    request : dict
+        The helper's request.
+
+    Returns
+    -------
+    str | None
+        The first of its prose fields (`TASK_FIELDS`: an Analyst's ``topic``,
+        an Explorer's ``hypothesis``, a Mapper's ``behaviour_description``, an
+        attacking Critic's ``evidence_summary``), cut to ``MAX_TASK``
+        characters; None for a request with none (an Executor's, a Designer's,
+        a diff-review Critic's).
+    """
+    for key in TASK_FIELDS:
+        text = request.get(key)
+        if isinstance(text, str) and text.strip():
+            return _trim(_plain(text), MAX_TASK)
+    return None
+
+
 def collect_helpers(receipts: list[dict[str, Any]], spec: dict[str, Any]) -> list[dict[str, Any]]:
     """One panel entry per helper receipt, oldest first.
 
@@ -451,6 +489,9 @@ def collect_helpers(receipts: list[dict[str, Any]], spec: dict[str, Any]) -> lis
         }
         if r.get("finished_at"):
             h["finishedAt"] = r["finished_at"]
+        task = helper_task(_load_json(r.get("request")) or {})
+        if task:
+            h["task"] = task
         if role == "executor":
             samples = executor_samples(r)
             if samples is not None:
@@ -507,6 +548,35 @@ def iteration_cap(sections: list[dict[str, Any]]) -> int | None:
     return None
 
 
+def helper_box(spec: dict[str, Any], helper: dict[str, Any]) -> dict[str, Any] | None:
+    """The phase, box and round a helper works in, from its tag, role and mode.
+
+    Parameters
+    ----------
+    spec : dict
+        The run's pipeline from the data file.
+    helper : dict
+        One `collect_helpers` entry.
+
+    Returns
+    -------
+    dict | None
+        ``{"phase", "box", "side", "round"}``, e.g. ``{"phase": "3", "box":
+        "design", "side": True, "round": 2}`` for an ``iter_02`` diff-review
+        Critic; ``round`` is None outside a loop. None when no rule maps it.
+    """
+    phases = {p["id"]: p for p in spec["phases"]}
+    for rule in spec["helperBoxes"]:
+        m = _match(rule["tag"], helper["tag"])
+        if not m or rule.get("role", helper["_role"]) != helper["_role"] or rule.get("mode", helper["_mode"]) != helper["_mode"]:
+            continue
+        rnd = m.groupdict().get("round")
+        loop = phases[rule["phase"]].get("loop")
+        return {"phase": rule["phase"], "box": rule["box"], "side": bool(rule.get("side")),
+                "round": int(rnd) if loop and rnd else None}
+    return None
+
+
 def locate(spec: dict[str, Any], mapped: list[dict[str, Any]], helpers: list[dict[str, Any]], state: str, cap: int | None) -> dict[str, Any] | None:
     """The phase and box the run is at, or None when the files don't settle it.
 
@@ -541,24 +611,19 @@ def locate(spec: dict[str, Any], mapped: list[dict[str, Any]], helpers: list[dic
     # ---- A helper at work: its tag, role and mode name the box ----
     running = [h for h in helpers if h["state"] in ("launching", "running")]
     if running:
-        h = max(running, key=lambda x: x["startedAt"])
-        for rule in spec["helperBoxes"]:
-            m = _match(rule["tag"], h["tag"])
-            if not m or rule.get("role", h["_role"]) != h["_role"] or rule.get("mode", h["_mode"]) != h["_mode"]:
-                continue
-            # The log lags a launch by at most one phase; a bigger gap means a
-            # stale receipt or an unmapped step, so claim nothing
-            gap = order.index(rule["phase"]) - order.index(last["phase"])
-            if gap not in (0, 1):
-                return None
-            rnd = m.groupdict().get("round")
-            out: dict[str, Any] = {"phase": rule["phase"], "box": rule["box"]}
-            if rule.get("side"):
-                out["isSide"] = True
-            if phases[rule["phase"]].get("loop") and rnd:
-                out["round"] = _round_label(int(rnd), cap)
-            return out
-        return None
+        place = helper_box(spec, max(running, key=lambda x: x["startedAt"]))
+        if place is None:
+            return None
+        # The log lags a launch by at most one phase; a bigger gap means a
+        # stale receipt or an unmapped step, so claim nothing
+        if order.index(place["phase"]) - order.index(last["phase"]) not in (0, 1):
+            return None
+        out: dict[str, Any] = {"phase": place["phase"], "box": place["box"]}
+        if place["side"]:
+            out["isSide"] = True
+        if place["round"] is not None:
+            out["round"] = _round_label(place["round"], cap)
+        return out
 
     # ---- The lead at work: its newest log heading that names a box ----
     phase = phases[last["phase"]]
@@ -581,7 +646,24 @@ def locate(spec: dict[str, Any], mapped: list[dict[str, Any]], helpers: list[dic
 
 
 def leading_explanation(name: str, inv: str, mapped: list[dict[str, Any]]) -> str | None:
-    """What the run is currently chasing, in a sentence or two.
+    """What the run is currently chasing, cut to fit the panel's older layout.
+
+    Parameters
+    ----------
+    name, inv, mapped
+        As for `full_explanation`.
+
+    Returns
+    -------
+    str | None
+        `full_explanation`'s text, cut to ``MAX_EXPLANATION`` characters.
+    """
+    text = full_explanation(name, inv, mapped)
+    return _trim(text, MAX_EXPLANATION) if text else None
+
+
+def full_explanation(name: str, inv: str, mapped: list[dict[str, Any]]) -> str | None:
+    """What the run is currently chasing, in full.
 
     Parameters
     ----------
@@ -610,7 +692,7 @@ def leading_explanation(name: str, inv: str, mapped: list[dict[str, Any]]) -> st
             return None
         top = next((c for c in live if re.search(r"\brank\s*1\b", c.trailer, re.I)), live[0])
         statement = _plain(top.fields.get("statement", ""))
-        return _trim(f"{top.id} {top.slug}: {statement}" if statement else f"{top.id} {top.slug}", MAX_EXPLANATION)
+        return f"{top.id} {top.slug}: {statement}" if statement else f"{top.id} {top.slug}"
 
     for s in reversed(mapped):
         for sub in reversed(s["subs"]):
@@ -618,7 +700,33 @@ def leading_explanation(name: str, inv: str, mapped: list[dict[str, Any]]) -> st
                 lines = [ln for ln in sub["lines"] if ln.strip()]
                 stated = next((ln for ln in lines if re.match(r"-\s+\*Statement\*", ln)), lines[0] if lines else "")
                 text = _plain(re.sub(r"^-\s+\*Statement\*\s*:?", "", stated))
-                return _trim(text, MAX_EXPLANATION) or None
+                return text or None
+    return None
+
+
+def agreed_question(sections: list[dict[str, Any]]) -> str | None:
+    """The run's agreed question, or the behaviour it sets out to explain, in full.
+
+    Parameters
+    ----------
+    sections : list[dict]
+        `read_log`'s output.
+
+    Returns
+    -------
+    str | None
+        The Agreed Scope's ``Explanandum`` (model forensics) or ``Research
+        question`` (science of evals) line, without its label, e.g.
+        ``"The model scores 14% rather than 90% on the arithmetic test."``;
+        None before the scope is written or when it names neither.
+    """
+    for s in sections:
+        if s["title"].lower().startswith("agreed scope"):
+            for line in (ln for sub in s["subs"] for ln in sub["lines"]):
+                # e.g. "- Explanandum (contrast form): ..." or "- **Research question**: ..."
+                m = re.match(r"\s*-\s+\**(?:explanandum|research question)\**\s*(?:\([^)]*\))?\s*:\**\s*(.+)", line, re.I)
+                if m:
+                    return _plain(m.group(1)) or None
     return None
 
 
@@ -717,9 +825,45 @@ def finished_steps(name: str, spec: dict[str, Any], mapped: list[dict[str, Any]]
         A loop round counts as finished once it has a Decision block; any
         other section once a later one starts. The report phase adds no step.
     """
+    return [_trim(f"{title}: {detail}" if detail else f"{title} done", MAX_STEP)
+            for title, detail in _step_parts(name, spec, mapped, state)]
+
+
+def step_details(name: str, spec: dict[str, Any], mapped: list[dict[str, Any]], state: str) -> list[dict[str, str]]:
+    """The full text of each `finished_steps` line, uncut.
+
+    Parameters
+    ----------
+    name, spec, mapped, state
+        As for `finished_steps`.
+
+    Returns
+    -------
+    list[dict]
+        ``{"title", "detail"}`` per step, in the same order, e.g.
+        ``{"title": "Round 1", "detail": "C2 out; X3 added"}``; a step with
+        nothing more to say has ``"done"`` as its detail.
+    """
+    return [{"title": title, "detail": detail or "done"} for title, detail in _step_parts(name, spec, mapped, state)]
+
+
+def _step_parts(name: str, spec: dict[str, Any], mapped: list[dict[str, Any]], state: str) -> list[tuple[str, str | None]]:
+    """Each finished phase's or round's name and what it came to.
+
+    Parameters
+    ----------
+    name, spec, mapped, state
+        As for `finished_steps`.
+
+    Returns
+    -------
+    list[tuple[str, str | None]]
+        ``(title, detail)`` per step, e.g. ``("Round 1", "C2 out; X3 added")``
+        or ``("Scoping", None)`` when there is nothing more to say.
+    """
     phases = {p["id"]: p for p in spec["phases"]}
     report_phase = spec["phases"][-1]["id"]
-    steps: list[str] = []
+    parts: list[tuple[str, str | None]] = []
     for i, s in enumerate(mapped):
         phase = phases[s["phase"]]
         has_decision = any(sub["title"].lower().startswith("decision") for sub in s["subs"])
@@ -730,15 +874,288 @@ def finished_steps(name: str, spec: dict[str, Any], mapped: list[dict[str, Any]]
         # ---- A round: what changed, or what was decided ----
         if phase.get("loop") and s["round"] is not None:
             detail = _ledger_change(s) if name == "diagnose" else _decision_headline(s)
-            steps.append(_trim(f"Round {s['round']}: {detail}" if detail else f"Round {s['round']} done", MAX_STEP))
+            parts.append((f"Round {s['round']}", detail))
         # ---- Another phase: once per phase, with any ledger change ----
-        elif not any(st.startswith(phase["title"]) for st in steps):
-            detail = _ledger_change(s) if name == "diagnose" else None
+        elif not any(title == phase["title"] for title, _ in parts):
             if phase["id"] == spec["phases"][0]["id"]:
-                steps.append(f"{phase['title']}: scope agreed")
+                parts.append((phase["title"], "scope agreed"))
             else:
-                steps.append(_trim(f"{phase['title']}: {detail}" if detail else f"{phase['title']} done", MAX_STEP))
-    return steps
+                parts.append((phase["title"], _ledger_change(s) if name == "diagnose" else None))
+    return parts
+
+
+# ---------------------------------------------------------------------------
+# Timings: estimates from the times the run's own records carry
+# ---------------------------------------------------------------------------
+
+
+def _time(text: Any) -> datetime | None:
+    """An ISO time from a receipt or session line, made timezone-aware.
+
+    Parameters
+    ----------
+    text : Any
+        e.g. ``"2026-11-08T21:03:00+00:00"`` or ``"2026-11-08T21:03:00.123Z"``.
+
+    Returns
+    -------
+    datetime | None
+        In UTC; None for anything that is not such a time.
+    """
+    if not isinstance(text, str):
+        return None
+    try:
+        t = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def _iso(t: datetime | None) -> str | None:
+    """A time as the panel's ISO string, e.g. ``"2026-11-08T21:03:00+00:00"``; None stays None.
+
+    Parameters
+    ----------
+    t : datetime | None
+        The time.
+
+    Returns
+    -------
+    str | None
+        The string.
+    """
+    return t.isoformat(timespec="seconds") if t else None
+
+
+def _span(start: datetime | None, finish: datetime | None) -> dict[str, str]:
+    """``startedAt`` and ``finishedAt`` for whichever of the two is known.
+
+    Parameters
+    ----------
+    start, finish : datetime | None
+        The span's ends.
+
+    Returns
+    -------
+    dict[str, str]
+        e.g. ``{"startedAt": "2026-11-08T21:03:00+00:00"}`` while it runs.
+    """
+    out = {}
+    if start:
+        out["startedAt"] = _iso(start)
+    if finish:
+        out["finishedAt"] = _iso(finish)
+    return out
+
+
+def _heading_place(spec: dict[str, Any], title: str) -> tuple[str, int | None] | None:
+    """The phase and round a ``## `` log heading opens, as `map_sections` reads it.
+
+    Parameters
+    ----------
+    spec : dict
+        The run's pipeline from the data file.
+    title : str
+        The heading, e.g. ``"Iteration 2"``.
+
+    Returns
+    -------
+    tuple[str, int | None] | None
+        ``(phase id, round)``, e.g. ``("3", 2)``; None for a heading no rule names.
+    """
+    phases = {p["id"]: p for p in spec["phases"]}
+    for rule in spec["phaseHeadings"]:
+        m = _match(rule["pattern"], title)
+        if m:
+            rnd = m.groupdict().get("round")
+            return rule["phase"], int(rnd) if rnd and phases[rule["phase"]].get("loop") else None
+    return None
+
+
+def _box_times(phase: dict[str, Any], placed: list[tuple[dict[str, Any], dict[str, Any]]], lead_roles: set[str],
+               start: datetime | None, finish: datetime | None) -> list[dict[str, str]]:
+    """Each box's time within one phase, or one round of a loop phase.
+
+    A box run by a helper takes its helpers' times: the first start and the
+    last finish, with no finish while one is still at work. A box the lead
+    does alone runs from the end of the box before it to the start of the box
+    after it (the span's own start or finish at either end), and is left out
+    unless both are known.
+
+    Parameters
+    ----------
+    phase : dict
+        The phase from the data file.
+    placed : list[tuple[dict, dict]]
+        ``(helper, helper_box(...))`` for the helpers working in this span.
+    lead_roles : set[str]
+        Box roles that are the lead's own, e.g. ``{"Diagnostician"}``.
+    start, finish : datetime | None
+        The span's own start and finish, where known.
+
+    Returns
+    -------
+    list[dict]
+        ``{"id", "startedAt"?, "finishedAt"?}`` per box with any time, side
+        boxes under their own ids, in drawing order.
+    """
+    # ---- Helpers' times per box, main or side ----
+    by_box: dict[tuple[str, bool], list[datetime | None]] = {}
+    for h, place in placed:
+        s, f = _time(h["startedAt"]), _time(h.get("finishedAt"))
+        if s is None:
+            continue
+        key = (place["box"], place["side"])
+        first, last = by_box.get(key, [s, f])
+        # Any helper still at work keeps the box open
+        by_box[key] = [min(first, s), None if f is None or last is None else max(last, f)]
+
+    def edge(i: int, end: bool) -> datetime | None:
+        """Where box `i` (with its side box) finishes, or starts; the span's own end beyond the last box."""
+        if i < 0:
+            return start
+        if i >= len(phase["boxes"]):
+            return finish
+        b = phase["boxes"][i]
+        times = [by_box[k][1 if end else 0] for k in ((b["id"], False), (b["id"], True)) if k in by_box]
+        if not times or (end and None in times):
+            return None
+        return max(times) if end else min(times)
+
+    out = []
+    for i, b in enumerate(phase["boxes"]):
+        s = f = None
+        if b["role"] in lead_roles:
+            left, right = edge(i - 1, end=True), edge(i + 1, end=False)
+            if left and right and left <= right:
+                s, f = left, right
+        if s is None and (b["id"], False) in by_box:
+            s, f = by_box[(b["id"], False)]
+        if s:
+            out.append({"id": b["id"], **_span(s, f)})
+        if b.get("side") and (b["id"], True) in by_box:
+            out.append({"id": b["side"]["id"], **_span(*by_box[(b["id"], True)])})
+    return out
+
+
+def timings(spec: dict[str, Any], mapped: list[dict[str, Any]], helpers: list[dict[str, Any]],
+            sessions: list[dict[str, Any]], current: dict[str, Any] | None, state: str) -> dict[str, Any] | None:
+    """Estimated start and finish times for each phase reached, and its rounds and boxes.
+
+    The log's headings carry no times, so the sources are the helpers'
+    receipts and the lead's own session: when it started, and when it first
+    wrote each ``## `` heading. A phase or round starts at its first sign
+    (its heading or its first helper, and the run's start for the first
+    phase) and finishes where the next one starts; the one running has no
+    finish. When one write brings in several phase or round headings at once
+    (a skeleton written ahead), only the first counts. A time that would run
+    backwards is dropped. Unknown times are left out.
+
+    Parameters
+    ----------
+    spec : dict
+        The run's pipeline from the data file.
+    mapped : list[dict]
+        `map_sections`'s output.
+    helpers : list[dict]
+        `collect_helpers`'s output.
+    sessions : list[dict]
+        The lead's sessions as `spend.collect_lead` reads them, with
+        ``first_at`` and ``log_headings``.
+    current : dict | None
+        `locate`'s answer.
+    state : str
+        `run_state`'s answer.
+
+    Returns
+    -------
+    dict | None
+        ``{"phases": [{"id", "startedAt"?, "finishedAt"?, "boxes"?: [...],
+        "rounds"?: [{"round": "2", "startedAt"?, "finishedAt"?, "boxes"?}]}]}``;
+        None when no time is known at all.
+    """
+    order = [p["id"] for p in spec["phases"]]
+    lead_roles = {b["role"] for p in spec["phases"] for b in p["boxes"]} - set(spec["roles"].values())
+
+    # ---- Signs of each phase and round: headings first written, helpers launched ----
+    signs: dict[tuple[str, int | None], list[datetime]] = {}
+    written: dict[str, datetime] = {}
+    for sess in sessions:
+        for title, at in (sess.get("log_headings") or {}).items():
+            t = _time(at)
+            if t and (title not in written or t < written[title]):
+                written[title] = t
+    by_write: dict[datetime, list[tuple[int, int, str, int | None]]] = {}
+    for title, t in written.items():
+        place = _heading_place(spec, title)
+        if place:
+            by_write.setdefault(t, []).append((order.index(place[0]), place[1] or 0, *place))
+    for t, places in by_write.items():
+        *_, phase_id, rnd = min(places)
+        signs.setdefault((phase_id, rnd), []).append(t)
+    run_start = min((t for t in (_time(s.get("first_at")) for s in sessions) if t), default=None)
+    if run_start:
+        signs.setdefault((order[0], None), []).append(run_start)
+    placed = [(h, place) for h in helpers if (place := helper_box(spec, h))]
+    for h, place in placed:
+        t = _time(h["startedAt"])
+        if t:
+            signs.setdefault((place["phase"], place["round"]), []).append(t)
+    if not signs:
+        return None
+
+    # ---- The phases reached: up to the one running ----
+    if state == "finished":
+        last = len(order) - 1
+    elif current:
+        last = order.index(current["phase"])
+    else:
+        reached = [order.index(s["phase"]) for s in mapped] + [order.index(p) for p, _ in signs]
+        last = max(reached)
+    phase_starts: dict[str, datetime | None] = {}
+    floor = None
+    for pid in order[: last + 1]:
+        t = min((x for (p, _), ts in signs.items() if p == pid for x in ts), default=None)
+        if t and floor and t < floor:
+            t = None
+        phase_starts[pid] = t
+        floor = t or floor
+
+    # ---- Each phase: its span, then its rounds or boxes ----
+    out = []
+    for i, pid in enumerate(order[: last + 1]):
+        phase = spec["phases"][i]
+        start = phase_starts[pid]
+        running = i == last and state != "finished"
+        finish = None if running or i == last else phase_starts[order[i + 1]]
+        entry: dict[str, Any] = {"id": pid, **_span(start, finish)}
+        here = [(h, place) for h, place in placed if place["phase"] == pid]
+        if phase.get("loop"):
+            numbers = sorted({r for (p, r) in signs if p == pid and r is not None}
+                             | {s["round"] for s in mapped if s["phase"] == pid and s["round"] is not None})
+            starts, floor = [], start
+            for n in numbers:
+                t = min(signs.get((pid, n), []), default=None)
+                if t and floor and t < floor:
+                    t = None
+                starts.append(t)
+                floor = t or floor
+            rounds = []
+            for j, n in enumerate(numbers):
+                r_finish = starts[j + 1] if j + 1 < len(numbers) else finish
+                r: dict[str, Any] = {"round": str(n), **_span(starts[j], r_finish)}
+                boxes = _box_times(phase, [x for x in here if x[1]["round"] == n], lead_roles, starts[j], r_finish)
+                if boxes:
+                    r["boxes"] = boxes
+                rounds.append(r)
+            if rounds:
+                entry["rounds"] = rounds
+        else:
+            boxes = _box_times(phase, here, lead_roles, start, finish)
+            if boxes:
+                entry["boxes"] = boxes
+        out.append(entry)
+    return {"phases": out}
 
 
 # ---------------------------------------------------------------------------
@@ -790,7 +1207,10 @@ def build_status(inv: str, hint: str | None = None, pipelines: dict[str, Any] | 
              "explanation": "C1 deployment_goal_inference: ...",
              "helpers": [...], "steps": ["Round 1: C2 out; X3 added"],
              "cost": {"usd": 64.42, "evalTokens": 23129877}, "report": null,
-             "startedAt": "2026-11-08T08:02:50+00:00"}
+             "startedAt": "2026-11-08T08:02:50+00:00",
+             "question": "...", "explanationFull": "C1 deployment_goal_inference: ...",
+             "stepDetails": [{"title": "Round 1", "detail": "C2 out; X3 added"}],
+             "timings": {"phases": [{"id": "0", "startedAt": "...", "finishedAt": "..."}, ...]}}
     """
     inv = os.path.abspath(inv)
     pipelines = pipelines or load_pipelines()
@@ -811,13 +1231,15 @@ def build_status(inv: str, hint: str | None = None, pipelines: dict[str, Any] | 
     if eval_tokens:
         cost["evalTokens"] = eval_tokens
 
+    current = locate(spec, mapped, helpers, state, iteration_cap(sections)) if sure else None
+    explanation = full_explanation(name, inv, mapped)
     status: dict[str, Any] = {
         "version": STATUS_VERSION,
         "investigation": os.path.basename(inv),
         "pipeline": {"name": name, "title": spec["title"], "phases": spec["phases"]},
         "state": state,
-        "current": locate(spec, mapped, helpers, state, iteration_cap(sections)) if sure else None,
-        "explanation": leading_explanation(name, inv, mapped),
+        "current": current,
+        "explanation": _trim(explanation, MAX_EXPLANATION) if explanation else None,
         "helpers": [{k: v for k, v in h.items() if not k.startswith("_")} for h in helpers],
         "steps": finished_steps(name, spec, mapped, state),
         "cost": cost,
@@ -827,6 +1249,18 @@ def build_status(inv: str, hint: str | None = None, pipelines: dict[str, Any] | 
         status["startedAt"] = helpers[0]["startedAt"]
     if state == "finished":
         status["finishedAt"] = _iso_mtime(os.path.join(inv, "FINDINGS-REPORT.md"))
+
+    # ---- Fuller material for the run tab (all optional; older panels ignore it) ----
+    question = agreed_question(sections)
+    if question:
+        status["question"] = question
+    if explanation:
+        status["explanationFull"] = explanation
+    status["stepDetails"] = step_details(name, spec, mapped, state)
+    # The stage is only claimed when the files settle the pipeline, and so are times
+    times = timings(spec, mapped, helpers, summary["lead"]["sessions"], current, state) if sure else None
+    if times:
+        status["timings"] = times
     return status
 
 
@@ -872,6 +1306,11 @@ def render(status: dict[str, Any]) -> str:
     lines += [f"  {s}" for s in status["steps"]]
     tokens = status["cost"].get("evalTokens")
     lines.append(f"cost: ${status['cost']['usd']:.2f}" + (f" (including {tokens:,} eval tokens)" if tokens else ""))
+    for t in (status.get("timings") or {}).get("phases", []):
+        if t.get("startedAt"):
+            # Times of day in UTC, e.g. "phase 3 Iterate: from 21:03 to 23:40"
+            ends = f"from {t['startedAt'][11:16]}" + (f" to {t['finishedAt'][11:16]}" if t.get("finishedAt") else "")
+            lines.append(f"  phase {t['id']} {phases[t['id']]['title']}: {ends} UTC")
     if status["report"]:
         lines.append(f"report: {status['report']}")
     return "\n".join(lines)

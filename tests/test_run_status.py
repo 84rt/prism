@@ -30,6 +30,7 @@ FORENSICS_LOG = """# Investigation Log: sample
 <!-- Append-only discipline. -->
 
 ## Agreed Scope
+- Explanandum (contrast form): The model scores **14%** rather than 90% on the arithmetic test.
 - Budget:
   - Iteration cap: **4** (default).
 
@@ -80,6 +81,7 @@ LEDGER = """# Candidate Ledger
 ORCHESTRATE_LOG = """# Investigation Log: sample
 
 ## Agreed Scope
+- Research question: Does framing a sabotage task as preventing harm change how often models conceal it?
 - Iteration cap: none.
 
 ## Iteration 1
@@ -180,6 +182,33 @@ def _status(inv: Path, tmp_path: Path, hint: str | None = None) -> dict:
     projects = tmp_path / "projects"
     projects.mkdir(exist_ok=True)
     return rs.build_status(str(inv), hint, projects_dir=str(projects))
+
+
+def _lead_session(inv: Path, tmp_path: Path, started: str, writes: list[tuple[str, str]], skill: str = "diagnose") -> None:
+    """Write the lead's Claude Code session file: its start, then each log write.
+
+    Parameters
+    ----------
+    inv : Path
+        The investigation folder, under ``<repo>/investigations/``.
+    tmp_path : Path
+        Holds the ``projects`` folder `_status` reads.
+    started : str
+        The time of the skill's command line, the run's start.
+    writes : list[tuple[str, str]]
+        ``(time, text)`` per Edit of the log, e.g. ``("…T09:30:00Z", "## Iteration 2\\n")``.
+    skill : str
+        ``diagnose`` or ``orchestrate``.
+    """
+    import spend
+
+    folder = tmp_path / "projects" / spend._project_slug(str(inv.parent.parent))
+    lines = [{"type": "user", "timestamp": started, "message": {"content": f"<command-name>/{skill}</command-name>"}}]
+    for n, (at, text) in enumerate(writes):
+        edit = {"type": "tool_use", "name": "Edit", "input": {"file_path": str(inv / "INVESTIGATION-LOG.md"), "new_string": text}}
+        lines.append({"type": "assistant", "entrypoint": "cli", "timestamp": at,
+                      "message": {"id": f"m{n}", "model": "claude-opus-5-5", "usage": {"input_tokens": 1}, "content": [edit]}})
+    _write(folder / "lead.jsonl", "".join(json.dumps(x) + "\n" for x in lines))
 
 
 # ---------------------------------------------------------------------------
@@ -331,6 +360,116 @@ def test_orchestrate_explanation_and_steps(orchestrate, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Fuller material for the run tab
+# ---------------------------------------------------------------------------
+
+
+def test_question_and_full_explanation_for_both_pipelines(forensics, orchestrate, tmp_path):
+    s = _status(forensics, tmp_path)
+    assert s["question"] == "The model scores 14% rather than 90% on the arithmetic test."
+    assert s["explanationFull"] == ("C1 deployment_goal: The model takes being deployed as its goal and fails "
+                                    "on purpose to get there. It reads the threshold as the route.")
+    assert s["explanationFull"].startswith(s["explanation"].removesuffix("..."))
+    o = _status(orchestrate, tmp_path)
+    assert o["question"].startswith("Does framing a sabotage task as preventing harm")
+    assert o["explanationFull"] == o["explanation"]
+
+
+def test_step_details_follow_the_steps_in_full(forensics, orchestrate, tmp_path):
+    for inv in (forensics, orchestrate):
+        s = _status(inv, tmp_path)
+        assert [d["title"] for d in s["stepDetails"]] == [re.split(r":| done$", st)[0] for st in s["steps"]]
+    assert _status(forensics, tmp_path)["stepDetails"] == [
+        {"title": "Input", "detail": "scope agreed"},
+        {"title": "Scoping", "detail": "done"},
+        {"title": "Read the reasoning", "detail": "X1, X2 added"},
+        {"title": "Round 1", "detail": "C2 out; X3 added"},
+    ]
+
+
+def test_helpers_carry_an_excerpt_of_their_brief_when_it_has_one(forensics, tmp_path):
+    _receipt(forensics, "iterations/02_round2/artefacts", "analyst", "iter_02", 1, "finished", exit_code=0,
+             started="2026-11-08T11:00:00+00:00", finished="2026-11-08T11:30:00+00:00",
+             request={"topic": "Grade **all** 200 transcripts for deliberate underperformance. " * 20})
+    helpers = _status(forensics, tmp_path)["helpers"]
+    task = next(h for h in helpers if h["role"] == "Analyst" and h["tag"] == "iter_02")["task"]
+    assert task.startswith("Grade all 200 transcripts") and len(task) <= rs.MAX_TASK
+    # The Executor's request has no prose to excerpt
+    assert "task" not in next(h for h in helpers if h["role"] == "Executor")
+
+
+def test_no_receipts_and_no_session_gives_no_timings(tmp_path):
+    inv = tmp_path / "investigations" / "fresh"
+    _write(inv / "INVESTIGATION-LOG.md", "# Investigation Log\n\n## Agreed Scope\n- x\n\n## Phase 1: Initial Scoping\n")
+    assert "timings" not in _status(inv, tmp_path)
+
+
+def test_timings_of_a_running_loop_in_its_second_round(forensics, tmp_path):
+    _lead_session(forensics, tmp_path, "2026-11-08T07:45:00Z", [
+        ("2026-11-08T07:50:00Z", "## Agreed Scope\n- ...\n"),
+        ("2026-11-08T07:55:00Z", "## Phase 1: Initial Scoping\n"),
+        ("2026-11-08T08:30:00Z", "## Phase 2: Read the CoT\n"),
+        ("2026-11-08T08:40:00Z", "## Iteration 1\n"),
+        ("2026-11-08T09:30:00Z", "## Iteration 2\n"),
+    ])
+    # Mapper 08:00-08:05 (phase 1); Analyst 09:00-09:00:01 (round 1); Executor from 10:00, running (round 2)
+    s = _status(forensics, tmp_path)
+    _check_contract(s)
+    phases = s["timings"]["phases"]
+    t = "2026-11-08T{}+00:00".format
+    assert phases[:3] == [
+        {"id": "0", "startedAt": t("07:45:00"), "finishedAt": t("07:55:00")},
+        {"id": "1", "startedAt": t("07:55:00"), "finishedAt": t("08:30:00"),
+         "boxes": [{"id": "triage", "startedAt": t("08:00:00"), "finishedAt": t("08:05:00")}]},
+        # The lead reads alone: the whole phase
+        {"id": "2", "startedAt": t("08:30:00"), "finishedAt": t("08:40:00"),
+         "boxes": [{"id": "read-cot", "startedAt": t("08:30:00"), "finishedAt": t("08:40:00")}]},
+    ]
+    loop = phases[3]
+    # The running phase has no finish, and nothing after it is listed
+    assert len(phases) == 4 and loop == {"id": "3", "startedAt": t("08:40:00"), "rounds": loop["rounds"]}
+    assert loop["rounds"] == [
+        {"round": "1", "startedAt": t("08:40:00"), "finishedAt": t("09:30:00"),
+         # Pre-registering has no known neighbour before it, so it is left out;
+         # updating runs from the Analyst's finish to the round's end
+         "boxes": [{"id": "measure", "startedAt": t("09:00:00"), "finishedAt": t("09:00:01")},
+                   {"id": "update", "startedAt": t("09:00:01"), "finishedAt": t("09:30:00")}]},
+        {"round": "2", "startedAt": t("09:30:00"),
+         "boxes": [{"id": "run", "startedAt": t("10:00:00")}]},
+    ]
+
+
+def test_a_log_skeleton_written_at_once_times_only_its_first_heading(forensics, tmp_path):
+    _lead_session(forensics, tmp_path, "2026-11-08T07:45:00Z", [
+        ("2026-11-08T07:50:00Z", "## Agreed Scope\n\n## Phase 1: Initial Scoping\n\n## Iteration 1\n"),
+    ])
+    phases = _status(forensics, tmp_path)["timings"]["phases"]
+    # Phase 1 starts with its Mapper, not with the skeleton
+    assert phases[1]["startedAt"] == "2026-11-08T08:00:00+00:00"
+    assert phases[0] == {"id": "0", "startedAt": "2026-11-08T07:45:00+00:00", "finishedAt": "2026-11-08T08:00:00+00:00"}
+
+
+def test_orchestrate_timings_put_round_boxes_under_rounds(orchestrate, tmp_path):
+    _lead_session(orchestrate, tmp_path, "2026-11-08T09:00:00Z", [
+        ("2026-11-08T09:20:00Z", "## Iteration 1\n"),
+        ("2026-11-08T11:50:00Z", "## Iteration 2\n"),
+    ], skill="orchestrate")
+    phases = _status(orchestrate, tmp_path)["timings"]["phases"]
+    t = "2026-11-08T{}+00:00".format
+    assert phases[0] == {"id": "1", "startedAt": t("09:00:00"), "finishedAt": t("09:20:00")}
+    r1, r2 = phases[1]["rounds"]
+    # Explorer 10:00-10:07: the hypothesis box runs from the round's start to it
+    assert r1["boxes"][:2] == [{"id": "hypothesis", "startedAt": t("09:20:00"), "finishedAt": t("10:00:00")},
+                               {"id": "explore", "startedAt": t("10:00:00"), "finishedAt": t("10:07:00")}]
+    assert r2["startedAt"] == t("11:50:00") and "finishedAt" not in r2
+
+
+def test_plain_text_summary_shows_phase_times(forensics, tmp_path):
+    _lead_session(forensics, tmp_path, "2026-11-08T07:45:00Z", [("2026-11-08T07:55:00Z", "## Phase 1: Initial Scoping\n")])
+    assert "phase 0 Input: from 07:45 to 07:55 UTC" in rs.render(_status(forensics, tmp_path))
+
+
+# ---------------------------------------------------------------------------
 # Contract, data file and read-only behaviour
 # ---------------------------------------------------------------------------
 
@@ -365,6 +504,28 @@ def _check_contract(s: dict) -> None:
     assert all(isinstance(x, str) for x in s["steps"])
     assert s["explanation"] is None or isinstance(s["explanation"], str)
     assert s["report"] is None or isinstance(s["report"], str)
+
+    # ---- The optional fuller fields ----
+    for key in ("question", "explanationFull"):
+        assert key not in s or isinstance(s[key], str)
+    assert len(s["stepDetails"]) == len(s["steps"])
+    assert all(isinstance(d["title"], str) and isinstance(d["detail"], str) for d in s["stepDetails"])
+    assert all(isinstance(h.get("task", ""), str) for h in s["helpers"])
+
+    def check_span(x: dict) -> None:
+        for k in ("startedAt", "finishedAt"):
+            assert k not in x or isinstance(x[k], str)
+
+    ids = {ph["id"]: ph for ph in p["phases"]}
+    for t in (s.get("timings") or {"phases": []})["phases"]:
+        check_span(t)
+        box_ids = {b["id"] for b in ids[t["id"]]["boxes"]} | {b["side"]["id"] for b in ids[t["id"]]["boxes"] if b.get("side")}
+        for r in t.get("rounds", []):
+            assert isinstance(r["round"], str)
+            check_span(r)
+        for b in t.get("boxes", []) + [b for r in t.get("rounds", []) for b in r.get("boxes", [])]:
+            assert b["id"] in box_ids
+            check_span(b)
 
     def keys(v):
         if isinstance(v, dict):
