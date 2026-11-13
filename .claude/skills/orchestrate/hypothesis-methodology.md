@@ -149,7 +149,7 @@ Supporting findings feel satisfying but require extra scrutiny.
 
 ### When to stop iterating
 
-- **3-iteration guideline.** After 3 iterations without clear findings, escalate to the user. You may be pursuing a dead end, or the hypothesis may need fundamental revision that requires human judgment.
+- **3-iteration guideline.** After 3 iterations without clear findings, escalate to the user; after 2 uninformative iterations in a row, escalate sooner (`orchestrator_responsibilities.md` §2j). You may be pursuing a dead end, or the hypothesis may need fundamental revision that requires human judgment.
 - **Diminishing returns.** If iteration 2 adds little to iteration 1, a third iteration is unlikely to help.
-- **Compute cost.** Each iteration consumes API credits. Check with the user before iteration 3+.
+- **Compute cost.** Each iteration consumes API credits, so 3 is a ceiling, not a target. If spend is already significant, check with the user before the next one.
 - **Clean contradiction or clean support.** If the evidence is clear in either direction, there's no need to iterate further. Report the findings.

@@ -1,0 +1,133 @@
+{
+  "_about": "Both Prism pipelines, for scripts/run_status.py and the Control Panel's run tab. `phases` is what gets drawn: keep its phase and box ids stable, since older panels carry a built-in copy with the same ids. The other keys say how a run's files map onto the picture: `roles` names each launcher role; `phaseHeadings` maps the log's `## ` headings onto phases (first match wins; a `round` group is the iteration number); `helperBoxes` maps a helper's tag, role and (for the Critic) request mode onto a box; `logBoxes` maps the lead's own `### ` log headings onto a box within the phase. Patterns are Python regular expressions, matched case-insensitively from the start of the heading or tag.",
+  "version": 1,
+  "pipelines": {
+    "diagnose": {
+      "title": "Model forensics",
+      "phases": [
+        { "id": "0", "title": "Input", "boxes": [] },
+        {
+          "id": "1",
+          "title": "Scoping",
+          "boxes": [
+            { "id": "triage", "title": "Triage", "role": "Mapper" },
+            { "id": "resample", "title": "Resample", "role": "Executor" },
+            { "id": "operationalise", "title": "Operationalise", "role": "Analyst" }
+          ]
+        },
+        {
+          "id": "2",
+          "title": "Read the reasoning",
+          "boxes": [
+            { "id": "read-cot", "title": "Read the CoT", "role": "Diagnostician", "side": { "id": "attack", "title": "Attack list", "role": "Critic" } }
+          ]
+        },
+        {
+          "id": "3",
+          "title": "Iterate",
+          "loop": true,
+          "boxes": [
+            { "id": "design", "title": "Design", "role": "Designer", "side": { "id": "diff-review", "title": "Diff review", "role": "Critic", "blinded": true } },
+            { "id": "pre-register", "title": "Pre-register", "role": "Diagnostician" },
+            { "id": "run", "title": "Run", "role": "Executor" },
+            { "id": "measure", "title": "Measure", "role": "Analyst", "blinded": true },
+            { "id": "update", "title": "Update", "role": "Diagnostician", "side": { "id": "attack", "title": "Attack list", "role": "Critic" } }
+          ]
+        },
+        {
+          "id": "4",
+          "title": "Predict to test",
+          "boxes": [
+            { "id": "predict", "title": "Predict", "role": "Diagnostician", "side": { "id": "pick-factor", "title": "Pick factor", "role": "Critic" } }
+          ]
+        },
+        { "id": "5", "title": "Report", "boxes": [] }
+      ],
+      "roles": {
+        "mapper": "Mapper",
+        "executor": "Executor",
+        "analyst": "Analyst",
+        "designer": "Designer",
+        "critic": "Critic",
+        "explorer": "Explorer"
+      },
+      "phaseHeadings": [
+        { "pattern": "Agreed Scope|Phase 0\\b", "phase": "0" },
+        { "pattern": "Phase 1\\b", "phase": "1" },
+        { "pattern": "Phase 2\\b", "phase": "2" },
+        { "pattern": "Iteration (?P<round>\\d+)\\b", "phase": "3" },
+        { "pattern": "Phase 4\\b", "phase": "4" },
+        { "pattern": "Phase 5\\b", "phase": "5" }
+      ],
+      "helperBoxes": [
+        { "tag": "iter_0*0$", "role": "mapper", "phase": "1", "box": "triage" },
+        { "tag": "iter_0*0$", "role": "executor", "phase": "1", "box": "resample" },
+        { "tag": "iter_0*0$", "role": "analyst", "phase": "1", "box": "operationalise" },
+        { "tag": "iter_0*0$", "role": "critic", "phase": "2", "box": "read-cot", "side": true },
+        { "tag": "iter_(?P<round>\\d+)$", "role": "designer", "phase": "3", "box": "design" },
+        { "tag": "iter_(?P<round>\\d+)$", "role": "critic", "mode": "diff_review", "phase": "3", "box": "design", "side": true },
+        { "tag": "iter_(?P<round>\\d+)$", "role": "executor", "phase": "3", "box": "run" },
+        { "tag": "iter_(?P<round>\\d+)$", "role": "analyst", "phase": "3", "box": "measure" },
+        { "tag": "iter_(?P<round>\\d+)$", "role": "critic", "phase": "3", "box": "update", "side": true },
+        { "tag": "phase_?4", "role": "critic", "phase": "4", "box": "predict", "side": true },
+        { "tag": "phase_?4", "phase": "4", "box": "predict" }
+      ],
+      "logBoxes": [
+        { "phase": "1", "heading": "Mapper", "box": "triage" },
+        { "phase": "1", "heading": "Resample", "box": "resample" },
+        { "phase": "1", "heading": "Grader|Baseline|Operationalis", "box": "operationalise" },
+        { "phase": "2", "heading": ".", "box": "read-cot" },
+        { "phase": "3", "heading": "Pre-regist", "box": "pre-register" },
+        { "phase": "3", "heading": "Designer|Critic\\W+Diff", "box": "design" },
+        { "phase": "3", "heading": "Executor", "box": "run" },
+        { "phase": "3", "heading": "Analyst", "box": "measure" },
+        { "phase": "3", "heading": "Prediction Scoring|Critic\\W+Candidate|Ledger|Iteration Informative|Decision", "box": "update" },
+        { "phase": "4", "heading": ".", "box": "predict" }
+      ]
+    },
+    "orchestrate": {
+      "title": "Science of evals",
+      "phases": [
+        { "id": "1", "title": "Discussion", "boxes": [] },
+        {
+          "id": "2",
+          "title": "Iterate",
+          "loop": true,
+          "boxes": [
+            { "id": "hypothesis", "title": "Hypothesis and spec", "role": "Orchestrator" },
+            { "id": "explore", "title": "Explore", "role": "Environment Explorer" },
+            { "id": "execute", "title": "Execute", "role": "Experiment Executor" },
+            { "id": "analyse", "title": "Analyse", "role": "Transcript Analyst", "blinded": true },
+            { "id": "interpret", "title": "Interpret", "role": "Orchestrator" }
+          ]
+        },
+        { "id": "3", "title": "Report", "boxes": [] }
+      ],
+      "roles": {
+        "explorer": "Environment Explorer",
+        "executor": "Experiment Executor",
+        "analyst": "Transcript Analyst",
+        "mapper": "Environment Mapper",
+        "designer": "Variant Designer",
+        "critic": "Red-Teaming Critic"
+      },
+      "phaseHeadings": [
+        { "pattern": "Agreed Scope|Phase 1\\b", "phase": "1" },
+        { "pattern": "Iteration (?P<round>\\d+)\\b", "phase": "2" },
+        { "pattern": "Phase 3\\b|Report", "phase": "3" }
+      ],
+      "helperBoxes": [
+        { "tag": "iter_(?P<round>\\d+)$", "role": "explorer", "phase": "2", "box": "explore" },
+        { "tag": "iter_(?P<round>\\d+)$", "role": "executor", "phase": "2", "box": "execute" },
+        { "tag": "iter_(?P<round>\\d+)$", "role": "analyst", "phase": "2", "box": "analyse" }
+      ],
+      "logBoxes": [
+        { "phase": "2", "heading": "Scope|Hypothesis", "box": "hypothesis" },
+        { "phase": "2", "heading": "Explorer|Conditions|Pre-regist|Modifications", "box": "explore" },
+        { "phase": "2", "heading": "Executor", "box": "execute" },
+        { "phase": "2", "heading": "Analyst|Step 2i", "box": "analyse" },
+        { "phase": "2", "heading": "Surprises|Decision|Interpret", "box": "interpret" }
+      ]
+    }
+  }
+}

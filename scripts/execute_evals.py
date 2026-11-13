@@ -45,6 +45,8 @@ diagnostic tail for failed commands.
 from __future__ import annotations
 
 import argparse
+import glob
+import importlib.util
 import json
 import os
 import re
@@ -55,7 +57,7 @@ import subprocess
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,19 +81,54 @@ signal.signal(signal.SIGTERM, _handle_signal)
 # ---------------------------------------------------------------------------
 
 # Default concurrency ceiling. Sized for a shared host running one Docker
-# sandbox per sample: one eval subprocess at a time, four concurrent model
-# connections inside it. These are the values R06 recovered by hand after an
-# unconstrained Executor opened 24 containers on a 10-core box. A request may
-# override them via `overrides`; the Executor agent may raise them only via
-# `--max-parallel` / `--max-connections` with a `--rationale`, which the draft
-# report records verbatim.
-DEFAULT_MAX_PARALLEL = 1
-DEFAULT_MAX_CONNECTIONS = 4
+# sandbox per sample: samples in flight (and so sandboxes) is the product,
+# 2 × 5 = 10. An unconstrained Executor once opened 24 containers on a 10-core,
+# 8 GB box and nearly ran it out of memory; a sandbagging rerun then held 10
+# in flight on a 10-core, 16 GB box for 28 hours with no errors (each idle
+# sandbox used about 2 MB). Two subprocesses rather than one at ten keeps
+# slots busy while a pair's slowest last samples finish. These are the
+# starting values: unless a request or the Executor sets either, automatic
+# sizing (below) replaces them once preflight has measured the sandboxes. A
+# request may override them via `overrides`; the Executor agent may raise them
+# only via `--max-parallel` / `--max-connections` with a `--rationale`, which
+# the draft report records verbatim.
+DEFAULT_MAX_PARALLEL = 2
+DEFAULT_MAX_CONNECTIONS = 5
+
+# Automatic sizing. Samples in flight = the smallest of: the share of free
+# memory it may plan to use over the heaviest sandbox's peak, a few sandboxes
+# per core, and a hard cap; split evenly with other live runs on the machine
+# and re-asked before every condition starts. Measured on a 10-core / 16 GB
+# box: the sandbagging eval at 20 in flight held free memory at ~9.3 GB;
+# at 30 memory stayed fine but load peaked at 41 on 10 cores.
+AUTO_MEMORY_SHARE = 0.5  # the other half is headroom, which also absorbs a newcomer's overlap
+AUTO_PER_CORE = 2  # busy sandboxes compete for the processor
+AUTO_MAX_IN_FLIGHT = 40  # provider limits above ~10 at once are untested
+AUTO_MIN_CONTAINER_MB = 100  # idle sandboxes read ~2 MB; this covers the eval process's share
+AUTO_MIN_ALONE = DEFAULT_MAX_PARALLEL * DEFAULT_MAX_CONNECTIONS  # never below the old default alone
+AUTO_MIN_SHARED = 4  # a run sharing the machine still makes progress
+AUTO_PER_CONDITION = 10  # samples per condition process when splitting across conditions
+MEASURE_INTERVAL = 10  # seconds between sandbox memory samples during preflight
+RUN_REGISTRY_ENV = "PRISM_RUN_REGISTRY"  # where live runs register; default ~/.cache/prism/live_runs
+
+# The engine's thread pool only bounds how many commands *could* run; the
+# width chosen per start decides how many do
+EXECUTE_POOL = 64
+EXECUTE_POLL = 5  # seconds between checks for a finished command or a due retry
 
 # Per-command wall-clock limit. Generous: a 30-epoch sandboxed eval with a
 # 600 s task limit at four connections is over an hour, and the batch runs
 # detached so nothing above it is waiting.
 DEFAULT_COMMAND_TIMEOUT = 4 * 3600
+
+# Per-probe limit for preflight. A probe is one sample (or one per pinned id):
+# the slowest seen took a few minutes (a reasoning model, or a first sandbox
+# image build), so a probe still going after this is stalled, most likely on
+# a provider that is not answering. Under the full limit it once sat 4 hours.
+DEFAULT_PREFLIGHT_TIMEOUT = 15 * 60
+
+# What run_single reports when a command outlives its limit.
+TIMED_OUT = "Process timed out after"
 
 # `openai` floor Inspect's OpenRouter provider needs; see the contract.
 OPENROUTER_OPENAI_PIN = "openai>=2.45.0"
@@ -105,6 +142,7 @@ RECOGNISED_OVERRIDES = {
     "max_parallel",
     "max_connections",
     "command_timeout_seconds",
+    "preflight_timeout_seconds",
 }
 
 PREFLIGHT_DIRNAME = "_preflight"
@@ -135,6 +173,10 @@ class ExecutionConfig:
     max_retries: int = 3
     retry_backoff_seconds: list[int] = field(default_factory=lambda: [10, 30, 60])
     command_timeout: int = DEFAULT_COMMAND_TIMEOUT
+    # Whether a command that outlived command_timeout is tried again. Preflight
+    # turns this off: a stalled probe would just stall again, once per retry.
+    retry_stalled: bool = True
+    preflight_timeout: int = DEFAULT_PREFLIGHT_TIMEOUT
 
 
 @dataclass
@@ -659,25 +701,749 @@ def sample_shape(log_path: str) -> dict[str, Any]:
     }
 
 
+def served_models(log_path: str) -> list[str]:
+    """The model names the provider's replies reported, across a log's samples.
+
+    A request names a model such as ``openai/gpt-5`` or an OpenRouter model at
+    one provider, but what answers can be a dated version of it, or a
+    different build once a provider swaps it. Inspect keeps the name each
+    reply reported as the sample output's ``model``; only that field is read.
+
+    Parameters
+    ----------
+    log_path : str
+        Path to a ``.eval`` file.
+
+    Returns
+    -------
+    list[str]
+        Distinct names, sorted, e.g. ``["gpt-5-2025-08-07"]``; empty when no
+        sample recorded one.
+    """
+    from inspect_ai.log import read_eval_log_samples
+
+    names = set()
+    for sample in read_eval_log_samples(log_path, all_samples_required=False):
+        model = getattr(sample.output, "model", None)
+        if model:
+            names.add(str(model))
+    return sorted(names)
+
+
+# How often the live counter re-reads each running eval's log, in seconds.
+# Inspect saves a running .eval every ten finished samples or fewer, so a
+# faster poll would mostly re-read an unchanged file.
+LIVE_COUNT_INTERVAL = 20
+
+
+def live_samples_completed(log_dir: str, since: float) -> int | None:
+    """Finished samples so far in the eval still writing into a log directory.
+
+    Inspect saves a running ``.eval`` log every few finished samples (at most
+    ten), replacing the file in one step, so its sample summaries can be read
+    mid-run without a lock and without ever seeing a half-written file. Only
+    the ``completed`` flags are read; nothing about scores is kept.
+
+    Parameters
+    ----------
+    log_dir : str
+        The pair's log directory.
+    since : float
+        When this attempt started (seconds since the epoch). An older log in
+        the same directory belongs to an earlier run and is ignored.
+
+    Returns
+    -------
+    int | None
+        The count at the log's last save, or None while this attempt has no
+        log yet or its log can't be read.
+    """
+    path = find_newest_log(log_dir)
+    if path is None or os.path.getmtime(path) < since:
+        return None
+    try:
+        from inspect_ai.log import read_eval_log_sample_summaries
+
+        return sum(1 for s in read_eval_log_sample_summaries(path) if s.completed)
+    except Exception:  # mid-replace or unreadable: try again next round
+        return None
+
+
+def live_samples_planned(log_dir: str, since: float) -> int | None:
+    """How many samples the eval still writing into a log directory will run.
+
+    Inspect writes the plan into the log's header when the eval starts: the
+    sample ids left after ``--limit`` or ``--sample-id``, run ``epochs`` times
+    each. Only the header is read.
+
+    Parameters
+    ----------
+    log_dir : str
+        The pair's log directory.
+    since : float
+        When this attempt started (seconds since the epoch); an older log is ignored.
+
+    Returns
+    -------
+    int | None
+        e.g. 300 for three pinned ids at 100 epochs; None while this attempt
+        has no log yet or its header can't be read.
+    """
+    path = find_newest_log(log_dir)
+    if path is None or os.path.getmtime(path) < since:
+        return None
+    try:
+        from inspect_ai.log import read_eval_log
+
+        spec = read_eval_log(path, header_only=True).eval
+        return len(spec.dataset.sample_ids or []) * (spec.config.epochs or 1) or None
+    except Exception:  # mid-replace or unreadable: try again next round
+        return None
+
+
+def watch_live_counts(status: Status, stop: threading.Event, interval: float = LIVE_COUNT_INTERVAL) -> None:
+    """Keep each running pair's ``samples_completed`` current until stopped.
+
+    Runs on its own thread beside ``execute``, which records a pair's counts
+    only once its eval process exits. The final count from the finished log
+    always replaces the live one, since a pair is touched here only while its
+    state is ``running``. Each attempt's planned size goes in
+    ``samples_planned`` as soon as its log header names it, so the panel can
+    show a total before ``samples_total`` is known at the end.
+
+    Parameters
+    ----------
+    status : Status
+        The run's status file.
+    stop : threading.Event
+        Set when the run is over.
+    interval : float
+        Seconds between rounds.
+    """
+    # Per pair: (attempt number, wall-clock start) of the attempt being watched
+    started: dict[str, tuple[int, float]] = {}
+    # Per pair: (attempt number, planned samples or None until its header is read)
+    planned: dict[str, tuple[int, int | None]] = {}
+    while not stop.wait(interval):
+        with status.lock:
+            running = {
+                pid: (e["attempts"], e["log_dir"])
+                for pid, e in status.data["pairs"].items()
+                if e.get("state") == "running" and e.get("log_dir")
+            }
+        # A new attempt restarts its count from its own fresh log
+        for pid, (attempt, _) in running.items():
+            if started.get(pid, (None,))[0] != attempt:
+                started[pid] = (attempt, time.time())
+
+        # Logs are read outside the lock so a slow read never holds up an event;
+        # an attempt's plan is read until found, then kept
+        counts = {pid: live_samples_completed(log_dir, started[pid][1]) for pid, (_, log_dir) in running.items()}
+        for pid, (attempt, log_dir) in running.items():
+            if planned.get(pid, (None, None))[0] != attempt or planned[pid][1] is None:
+                planned[pid] = (attempt, live_samples_planned(log_dir, started[pid][1]))
+        with status.lock:
+            changed = False
+            for pid, done in counts.items():
+                e = status.pair(pid)
+                if e.get("state") != "running" or e["attempts"] != running[pid][0]:
+                    continue
+                if done is not None:
+                    changed |= e.get("samples_completed") != done
+                    e["samples_completed"] = done
+                size = planned[pid][1]
+                if size is not None and e.get("samples_planned") != size:
+                    e["samples_planned"] = size
+                    changed = True
+            if changed:
+                status.save()
+
+
 # ---------------------------------------------------------------------------
 # Process management
 # ---------------------------------------------------------------------------
 
 
+# How long a stopped eval gets to shut down by itself. Inspect treats SIGINT as
+# a cancel and removes its sandbox containers on the way out, which takes tens
+# of seconds for a batch of them; SIGTERM it does not handle, so it dies at once
+# and leaves every container running.
+STOP_GRACE_SECONDS = 90
+TERM_GRACE_SECONDS = 10
+
+
 def _kill_group(proc: subprocess.Popen) -> None:
-    """Terminate a child and everything in its process group."""
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        proc.communicate(timeout=10)
-    except subprocess.TimeoutExpired:
+    """Stop a child and everything in its process group, gently first.
+
+    SIGINT, so Inspect can cancel and clean up its sandboxes; then SIGTERM;
+    then SIGKILL, each after a grace period.
+    """
+    for sig, grace in ((signal.SIGINT, STOP_GRACE_SECONDS), (signal.SIGTERM, TERM_GRACE_SECONDS)):
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            os.killpg(proc.pid, sig)
         except ProcessLookupError:
-            pass
-        proc.communicate()
+            return
+        try:
+            proc.communicate(timeout=grace)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    proc.communicate()
+
+
+# ---------------------------------------------------------------------------
+# Leftover sandboxes
+# ---------------------------------------------------------------------------
+
+# Labels Docker Compose puts on every container: the project Inspect named it
+# (``inspect-<task>-i<random>``) and the folder its compose file sits in, which
+# for a Prism run is a condition folder inside the run's experiment directory
+_PROJECT_LABEL = "com.docker.compose.project"
+_WORKDIR_LABEL = "com.docker.compose.project.working_dir"
+# The compose files the project was started from, comma-separated. For a task
+# with only a Dockerfile, Inspect writes the compose file into its own data
+# folder, so the working directory above is that folder, not the task's.
+_CONFIG_LABEL = "com.docker.compose.project.config_files"
+DOCKER_TIMEOUT = 120
+# One `docker ps` line per container: project, working directory, compose files
+_PS_FORMAT = "{{.Label \"%s\"}}\t{{.Label \"%s\"}}\t{{.Label \"%s\"}}" % (_PROJECT_LABEL, _WORKDIR_LABEL, _CONFIG_LABEL)
+
+
+def _docker(args: list[str], timeout: int = DOCKER_TIMEOUT) -> str | None:
+    """Run a docker command.
+
+    Parameters
+    ----------
+    args : list[str]
+        The arguments after ``docker``, e.g. ``["ps", "-a"]``.
+    timeout : int
+        Seconds before giving up on a slow daemon.
+
+    Returns
+    -------
+    str | None
+        Its stdout; None if docker is missing, timed out or failed.
+    """
+    try:
+        out = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def _inside(path: str, root: str) -> bool:
+    """Whether ``path`` is ``root`` or somewhere beneath it, symlinks resolved.
+
+    Parameters
+    ----------
+    path, root : str
+        Directories; ``root`` already resolved with ``os.path.realpath``.
+
+    Returns
+    -------
+    bool
+        e.g. True for ``/exp/c_1`` and for ``/exp`` itself; False for ``/exp_copy``.
+    """
+    resolved = os.path.realpath(path)
+    return resolved == root or resolved.startswith(root + os.sep)
+
+
+def _build_contexts(compose_file: str) -> list[str]:
+    """The ``build: context:`` directories a compose file names, made absolute.
+
+    Parameters
+    ----------
+    compose_file : str
+        Path to a compose file.
+
+    Returns
+    -------
+    list[str]
+        e.g. ``["/exp/c_1"]`` for Inspect's generated file for a Dockerfile in
+        ``/exp/c_1``; empty when the file is gone or names no build.
+    """
+    try:
+        with open(compose_file) as f:
+            text = f.read()
+    except OSError:
+        return []
+    base = os.path.dirname(compose_file)
+    contexts = re.findall(r"^\s*context:\s*(.+?)\s*$", text, flags=re.MULTILINE)
+    return [os.path.join(base, c.strip("\"'")) for c in contexts]
+
+
+def _started_inside(exp_dir: str, workdir: str, config_files: str) -> bool:
+    """Whether a compose project was started for a task inside ``exp_dir``.
+
+    Either its working directory is inside (a task with its own compose file),
+    or one of its compose files builds from a folder inside (a task with only a
+    Dockerfile, whose compose file Inspect writes to its own data folder). A
+    sandbox with no Dockerfile or compose file at all names no folder of the
+    task, so it cannot be told apart from another run's and is never matched.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    workdir : str
+        The project's working-directory label.
+    config_files : str
+        The project's comma-separated compose-files label.
+
+    Returns
+    -------
+    bool
+    """
+    root = os.path.realpath(exp_dir)
+    if workdir and _inside(workdir, root):
+        return True
+    return any(_inside(ctx, root)
+               for f in config_files.split(",") if f
+               for ctx in _build_contexts(f))
+
+
+def _our_containers(exp_dir: str, docker: Any, running_only: bool = False) -> list[tuple[str, str]] | None:
+    """The Inspect sandbox containers started for tasks inside ``exp_dir``.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    docker : Callable
+        Runs a docker command.
+    running_only : bool
+        Leave out stopped containers.
+
+    Returns
+    -------
+    list[tuple[str, str]] | None
+        ``(container name, compose project)`` pairs, e.g.
+        ``[("inspect-sandbagging-i6tmri7-default-1", "inspect-sandbagging-i6tmri7")]``;
+        None when docker could not be asked.
+    """
+    all_flag = [] if running_only else ["-a"]
+    out = docker(["ps", *all_flag, "--filter", f"label={_PROJECT_LABEL}", "--format", "{{.Names}}\t" + _PS_FORMAT])
+    if out is None:
+        return None
+    ours = []
+    for line in out.splitlines():
+        name, project, workdir, config_files = (line.split("\t") + ["", "", "", ""])[:4]
+        if project.startswith("inspect-") and _started_inside(exp_dir, workdir, config_files):
+            ours.append((name, project))
+    return ours
+
+
+def leftover_sandboxes(exp_dir: str, docker: Any = None) -> list[str] | None:
+    """Inspect's sandbox projects still present that were started from inside ``exp_dir``.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    docker : Callable
+        Runs a docker command; None for ``_docker``. Tests pass a stand-in.
+
+    Returns
+    -------
+    list[str] | None
+        Project names, sorted, e.g. ``["inspect-sandbagging-i6tmri7"]``; None
+        when docker could not be asked. Containers started anywhere else, by
+        other runs or other folders, are never listed.
+    """
+    ours = _our_containers(exp_dir, docker or _docker)
+    return None if ours is None else sorted({project for _, project in ours})
+
+
+def _other_live_run(run_dir: str) -> str | None:
+    """Another unfinished run beside this one whose worker is alive, if any.
+
+    Its containers sit under the same experiment directory, so removing
+    leftovers then could remove its live sandboxes.
+
+    Parameters
+    ----------
+    run_dir : str
+        This run's directory; its siblings are the other runs.
+
+    Returns
+    -------
+    str | None
+        The other run's id, e.g. ``"iter_02_20261108T211422Z"``; None if none is going.
+    """
+    parent = os.path.dirname(os.path.abspath(run_dir))
+    for other in sorted(glob.glob(os.path.join(parent, "*", "status.json"))):
+        other_dir = os.path.dirname(other)
+        if os.path.samefile(other_dir, run_dir):
+            continue
+        try:
+            with open(other) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("state") not in TERMINAL_STATES and _worker_alive(data):
+            return other_dir
+    return None
+
+
+def remove_leftover_sandboxes(exp_dir: str, run_dir: str, docker: Any = None) -> dict[str, Any]:
+    """Remove the sandbox containers a finished or stopped run left behind, and their built images.
+
+    Only once every eval of the run has ended: Inspect normally removes its own
+    containers and images, so any still there from this run's experiment directory are
+    leftovers of an eval that was killed. Skipped while another run beside this
+    one is still going.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    run_dir : str
+        This run's directory.
+    docker : Callable
+        Runs a docker command; None for ``_docker``. Tests pass a stand-in.
+
+    Returns
+    -------
+    dict
+        ``{"removed": [...], "failed": [...], "skipped": reason | None}``.
+    """
+    docker = docker or _docker
+    result: dict[str, Any] = {"removed": [], "failed": [], "skipped": None}
+    other = _other_live_run(run_dir)
+    if other:
+        result["skipped"] = f"another run in this experiment is still going ({other})"
+        return result
+    projects = leftover_sandboxes(exp_dir, docker)
+    if projects is None:
+        result["skipped"] = "docker could not be asked (not installed or not running)"
+        return result
+    for project in projects:
+        # `--rmi local` also removes the image Compose built for the project
+        # (named after it), as Inspect's own clean-up would have; images
+        # pulled by name for an `image:` line are shared and stay
+        done = docker(["compose", "-p", project, "down", "--volumes", "--remove-orphans", "--rmi", "local"]) is not None
+        result["removed" if done else "failed"].append(project)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Automatic sizing: how many samples to keep in flight
+# ---------------------------------------------------------------------------
+
+_MEM_UNITS = {"b": 1 / 2**20, "kib": 1 / 1024, "kb": 1 / 1000, "mib": 1, "mb": 1, "gib": 1024, "gb": 1000}
+
+
+def parse_mem_mb(text: str) -> float | None:
+    """The used half of a ``docker stats`` memory reading, in MB.
+
+    Parameters
+    ----------
+    text : str
+        E.g. ``"12.3MiB / 15.6GiB"``.
+
+    Returns
+    -------
+    float | None
+        ``12.3`` for the example; None if it cannot be read.
+    """
+    m = re.match(r"\s*([\d.]+)\s*([A-Za-z]+)", text)
+    if not m or m.group(2).lower() not in _MEM_UNITS:
+        return None
+    return float(m.group(1)) * _MEM_UNITS[m.group(2).lower()]
+
+
+def experiment_sandbox_memory(exp_dir: str, docker: Any = None) -> dict[str, float] | None:
+    """Memory used now by each sandbox container started from inside ``exp_dir``.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    docker : Callable
+        Runs a docker command; None for ``_docker``. Tests pass a stand-in.
+
+    Returns
+    -------
+    dict[str, float] | None
+        Container name → MB, e.g. ``{"inspect-sandbagging-i6tmri7-default-1": 41.2}``;
+        None when docker could not be asked. Other runs' containers are left out.
+    """
+    docker = docker or _docker
+    found = _our_containers(exp_dir, docker, running_only=True)
+    if found is None:
+        return None
+    ours = [name for name, _ in found]
+    if not ours:
+        return {}
+    stats = docker(["stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}", *ours])
+    if stats is None:
+        return None
+    memory = {}
+    for line in stats.splitlines():
+        name, _, usage = line.partition("\t")
+        mb = parse_mem_mb(usage)
+        if mb is not None:
+            memory[name] = mb
+    return memory
+
+
+class SandboxSampler:
+    """Sample this experiment's sandbox memory in the background while preflight runs.
+
+    Parameters
+    ----------
+    exp_dir : str
+        The run's experiment directory.
+    interval : float
+        Seconds between samples.
+    docker : Callable
+        Runs a docker command; None for ``_docker``.
+    """
+
+    def __init__(self, exp_dir: str, interval: float = MEASURE_INTERVAL, docker: Any = None):
+        self.exp_dir, self.interval, self.docker = exp_dir, interval, docker
+        self.peaks: dict[str, float] = {}
+        self.min_free_mb: int | None = None
+        self.docker_ok = True
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _sample(self) -> None:
+        """Take one reading: each container's memory peak and the machine's lowest free memory."""
+        memory = experiment_sandbox_memory(self.exp_dir, self.docker)
+        if memory is None:
+            self.docker_ok = False
+        for name, mb in (memory or {}).items():
+            self.peaks[name] = max(mb, self.peaks.get(name, 0.0))
+        free = _host_resources()["free_mem_mb"]
+        if free is not None:
+            self.min_free_mb = free if self.min_free_mb is None else min(free, self.min_free_mb)
+
+    def _run(self) -> None:
+        """The background thread: sample every ``interval`` seconds until stopped."""
+        while True:
+            self._sample()
+            if self._stop.wait(self.interval):
+                return
+
+    def start(self) -> "SandboxSampler":
+        """Begin sampling in the background.
+
+        Returns
+        -------
+        SandboxSampler
+            This sampler, so it can be made and started in one line.
+        """
+        self._thread.start()
+        return self
+
+    def stop(self) -> dict[str, Any]:
+        """Stop sampling and summarise.
+
+        Returns
+        -------
+        dict
+            ``{"containers_seen": 2, "peak_container_mb": 41.2, "min_free_mb": 9304, "docker": True}``.
+        """
+        self._stop.set()
+        self._thread.join()
+        return {
+            "containers_seen": len(self.peaks),
+            "peak_container_mb": round(max(self.peaks.values()), 1) if self.peaks else None,
+            "min_free_mb": self.min_free_mb,
+            "docker": self.docker_ok,
+        }
+
+
+def machine_capacity(measured: dict[str, Any] | None, nproc: int | None, sandboxed: bool) -> tuple[int, str]:
+    """How many samples this machine can keep in flight, from preflight's measurements.
+
+    Parameters
+    ----------
+    measured : dict | None
+        `SandboxSampler.stop`'s summary; None when preflight did not run.
+    nproc : int | None
+        The machine's core count.
+    sandboxed : bool
+        Whether the eval runs one sandbox per sample.
+
+    Returns
+    -------
+    tuple[int, str]
+        The capacity and how it was reached, e.g.
+        ``(30, "cores: 3 x 10 (memory allows 46; heaviest sandbox 100 MB)")``.
+    """
+    if not sandboxed:
+        return AUTO_MAX_IN_FLIGHT, "no sandboxes: the hard cap"
+    if not measured or not measured.get("containers_seen") or not measured.get("min_free_mb"):
+        return AUTO_MIN_ALONE, "sandboxes not measured: the old default"
+    per_sample = max(measured["peak_container_mb"] or 0.0, AUTO_MIN_CONTAINER_MB)
+    by_memory = int(measured["min_free_mb"] * AUTO_MEMORY_SHARE // per_sample)
+    by_cores = AUTO_PER_CORE * (nproc or 1)
+    limits = {"memory": by_memory, "cores": by_cores, "cap": AUTO_MAX_IN_FLIGHT}
+    binding = min(limits, key=limits.get)
+    detail = f"memory allows {by_memory} at {per_sample:.0f} MB each; {AUTO_PER_CORE} per core allows {by_cores}; cap {AUTO_MAX_IN_FLIGHT}"
+    return max(1, limits[binding]), f"{binding} ({detail})"
+
+
+def target_in_flight(capacity: int, live_runs: int, hand_set_in_flight: int = 0) -> int:
+    """This run's share of the machine: an even split of what hand-set runs leave.
+
+    A run never waits for room: arriving beside a run that holds everything,
+    it takes its share at once (the memory headroom covers the overlap) and
+    the older run drops to its share at its next condition start. Runs whose
+    concurrency was set by hand keep their fixed level, so the automatic runs
+    split only what those leave.
+
+    Parameters
+    ----------
+    capacity : int
+        From `machine_capacity`.
+    live_runs : int
+        Live automatically sized runs on the machine, this one included.
+    hand_set_in_flight : int
+        Samples in flight held by live hand-set runs.
+
+    Returns
+    -------
+    int
+        E.g. 20 alone, 10 beside one other automatic run, 5 beside a
+        hand-set run holding 15; never below the floors.
+    """
+    free = capacity - hand_set_in_flight
+    if live_runs <= 1 and hand_set_in_flight <= 0:
+        return max(capacity, AUTO_MIN_ALONE)
+    return max(free // max(live_runs, 1), AUTO_MIN_SHARED)
+
+
+def split_in_flight(in_flight: int, unfinished: int) -> tuple[int, int]:
+    """Spread samples in flight over conditions running at once.
+
+    Parameters
+    ----------
+    in_flight : int
+        Samples to keep in flight.
+    unfinished : int
+        Conditions not yet finished (running or waiting).
+
+    Returns
+    -------
+    tuple[int, int]
+        ``(conditions at once, connections each)``: 30 over eleven → ``(3, 10)``;
+        10 → ``(2, 5)``; 30 with one condition left → ``(1, 30)``.
+    """
+    width = max(1, min(max(unfinished, 1), max(2, round(in_flight / AUTO_PER_CONDITION))))
+    return width, max(1, in_flight // width)
+
+
+def with_connections(command: str, connections: int) -> str:
+    """The command with its ``--max-connections`` value replaced.
+
+    Parameters
+    ----------
+    command : str
+        A rendered ``inspect eval`` command carrying ``--max-connections N``.
+    connections : int
+        The new value.
+
+    Returns
+    -------
+    str
+        The command, changed only in that flag.
+    """
+    return re.sub(r"--max-connections \d+", f"--max-connections {connections}", command)
+
+
+def _run_registry() -> str:
+    """The folder where each live run on this machine leaves an entry.
+
+    Returns
+    -------
+    str
+        ``$PRISM_RUN_REGISTRY`` when set, else ``~/.cache/prism/live_runs``.
+    """
+    return os.environ.get(RUN_REGISTRY_ENV) or os.path.expanduser("~/.cache/prism/live_runs")
+
+
+def register_live_run(run_dir: str, hand_set_in_flight: int | None = None) -> str:
+    """Record this worker as a live run on the machine, for other runs' even split.
+
+    Parameters
+    ----------
+    run_dir : str
+        This run's directory.
+    hand_set_in_flight : int | None
+        Samples in flight for a run whose concurrency was set by hand, which
+        other runs leave alone; None for an automatically sized run.
+
+    Returns
+    -------
+    str
+        The registry entry's path, removed by `unregister_live_run`.
+    """
+    os.makedirs(_run_registry(), exist_ok=True)
+    path = os.path.join(_run_registry(), f"{os.getpid()}.json")
+    with open(path, "w") as f:
+        json.dump({"pid": os.getpid(), "pid_start": _pid_start_time(os.getpid()), "run_dir": run_dir,
+                   "hand_set_in_flight": hand_set_in_flight}, f)
+    return path
+
+
+def unregister_live_run(path: str) -> None:
+    """Remove this run's registry entry; one already gone is fine.
+
+    Parameters
+    ----------
+    path : str
+        The entry `register_live_run` returned.
+    """
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def machine_load() -> tuple[int, int, int]:
+    """The live runs on this machine, split by how they were sized; dead entries are pruned.
+
+    Returns
+    -------
+    tuple[int, int, int]
+        ``(automatic runs, hand-set runs, samples in flight held by hand-set
+        runs)``: e.g. ``(1, 1, 30)`` for an automatic run beside a hand-set
+        run of 3 × 10.
+    """
+    automatic = hand_set_runs = hand_set_in_flight = 0
+    for entry in glob.glob(os.path.join(_run_registry(), "*.json")):
+        try:
+            with open(entry) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not _pid_alive(data.get("pid"), data.get("pid_start")):
+            unregister_live_run(entry)  # a killed run never cleaned up
+        elif data.get("hand_set_in_flight"):
+            hand_set_runs += 1
+            hand_set_in_flight += int(data["hand_set_in_flight"])
+        else:
+            automatic += 1
+    return automatic, hand_set_runs, hand_set_in_flight
+
+
+def count_live_runs() -> int:
+    """Live runs on this machine, this one included, however they were sized.
+
+    Returns
+    -------
+    int
+        E.g. 2 while another Prism run is executing evals; at least 1.
+    """
+    automatic, hand_set_runs, _ = machine_load()
+    return max(automatic + hand_set_runs, 1)
 
 
 def run_single(
@@ -733,7 +1499,7 @@ def run_single(
                     return -1, time.monotonic() - start, "", "Interrupted by shutdown signal"
                 if time.monotonic() > deadline:
                     _kill_group(proc)
-                    return -1, time.monotonic() - start, "", f"Process timed out after {timeout}s"
+                    return -1, time.monotonic() - start, "", f"{TIMED_OUT} {timeout}s"
 
         duration = time.monotonic() - start
         stdout = stdout_bytes.decode("utf-8", errors="replace")
@@ -747,41 +1513,6 @@ def run_single(
         if proc is not None:
             _kill_group(proc)
         return -1, time.monotonic() - start, "", str(e)
-
-
-def run_batch(
-    commands: list[CommandSpec],
-    concurrency: int,
-    timeout: int = DEFAULT_COMMAND_TIMEOUT,
-    capture_dir: str | None = None,
-    attempt_index: dict[str, int] | None = None,
-) -> list[tuple[CommandSpec, int, float, str, str]]:
-    """Run a batch of commands with the given concurrency level.
-
-    Returns list of (command, returncode, duration, stdout, stderr).
-    """
-    results: list[tuple[CommandSpec, int, float, str, str]] = []
-
-    with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        future_to_cmd = {}
-        for cmd in commands:
-            if _SHUTDOWN.is_set():
-                break
-            n = (attempt_index or {}).get(cmd.id, 0)
-            future = executor.submit(
-                run_single, cmd.command, timeout, cmd.cwd, capture_dir, f"{cmd.id}.attempt{n}"
-            )
-            future_to_cmd[future] = cmd
-
-        for future in as_completed(future_to_cmd):
-            cmd = future_to_cmd[future]
-            try:
-                returncode, duration, stdout, stderr = future.result()
-            except Exception as e:
-                returncode, duration, stdout, stderr = -1, 0.0, "", str(e)
-            results.append((cmd, returncode, duration, stdout, stderr))
-
-    return results
 
 
 def _stash_failed_attempt_logs(cmd: CommandSpec, attempt: int, capture_dir: str | None) -> None:
@@ -817,8 +1548,13 @@ def execute(
     config: ExecutionConfig,
     capture_dir: str | None = None,
     on_event: Any = None,
+    size_launch: Any = None,
 ) -> ExecutionReport:
     """Run all commands with error handling, retries, and graceful degradation.
+
+    Commands start as slots free up, not in fixed groups: a condition that
+    finishes early hands its slot straight to the next one instead of idling
+    until its slowest neighbour is done.
 
     Parameters
     ----------
@@ -830,14 +1566,21 @@ def execute(
         Where raw per-attempt stdout/stderr are written (score-bearing; see
         `run_single`).
     on_event : callable | None
-        ``on_event(kind, payload)`` called with ``("batch_start", [ids])``,
-        ``("result", EvalResult)`` and ``("reduction", ConcurrencyReduction)``
-        so a status file can be kept current while the batch runs.
+        ``on_event(kind, payload)`` called with ``("batch_start", [id])`` as
+        each command starts, ``("launch", {...})`` with its sizing when
+        ``size_launch`` is set, ``("result", EvalResult)`` and
+        ``("reduction", ConcurrencyReduction)``, so a status file can be kept
+        current while the run goes.
+    size_launch : callable | None
+        ``size_launch(unfinished) -> (width, connections)``, asked before every
+        start: how many commands may run at once now, and the
+        ``--max-connections`` the next one gets (None keeps its command as
+        built). None runs ``config.max_parallel`` at once with commands as built.
 
     Returns
     -------
     ExecutionReport
-        Per-command results in the original order plus batch-level fields.
+        Per-command results in the original order plus run-level fields.
     """
     report = ExecutionReport(concurrency_used=config.max_parallel)
     total_start = time.monotonic()
@@ -850,64 +1593,100 @@ def execute(
         report.total_wall_clock_seconds = 0.0
         return report
 
-    # Track per-command state
-    pending = list(commands)
+    # --- State ---------------------------------------------------------------
+    # The queue holds (not_before, command); a retry waits out its backoff
+    # there without holding up commands that are ready
+    queue: list[tuple[float, CommandSpec]] = [(0.0, c) for c in commands]
+    running: dict[Any, tuple[CommandSpec, int, int]] = {}  # future -> (command, launch number, width then)
     completed_results: dict[str, EvalResult] = {}
     retry_counts: dict[str, int] = {c.id: 0 for c in commands}
-    current_concurrency = config.max_parallel
-    batch_num = 0
+    ceiling: int | None = None if size_launch else config.max_parallel  # lowered on resource contention
+    recent: list[str | None] = []  # error class of each finished attempt, None for success
+    launches = 0
+    last_reduction = 0  # launch count when the ceiling was last lowered
+    peak = 0
 
-    while pending and not _SHUTDOWN.is_set():
-        batch_num += 1
+    def width_and_connections() -> tuple[int, int | None]:
+        if size_launch is None:
+            return max(1, ceiling or 1), None
+        width, connections = size_launch(len(queue) + len(running))
+        return max(1, min(width, ceiling) if ceiling else width), connections
 
-        # Partition into batches of current_concurrency
-        batch = pending[:current_concurrency]
-        pending = pending[current_concurrency:]
-        emit("batch_start", [c.id for c in batch])
+    with ThreadPoolExecutor(max_workers=EXECUTE_POOL) as pool:
+        while (queue or running) and not _SHUTDOWN.is_set():
 
-        # Run the batch
-        batch_results = run_batch(
-            batch, current_concurrency, config.command_timeout, capture_dir, retry_counts
-        )
+            # --- Start every due command the current width allows ------------
+            while queue and not _SHUTDOWN.is_set():
+                width, connections = width_and_connections()
+                if len(running) >= width:
+                    break
+                now = time.monotonic()
+                due = next((i for i, (not_before, _) in enumerate(queue) if not_before <= now), None)
+                if due is None:
+                    break
+                _, cmd = queue.pop(due)
+                launches += 1
+                command = with_connections(cmd.command, connections) if connections else cmd.command
+                emit("batch_start", [cmd.id])
+                if size_launch is not None:
+                    emit("launch", {"id": cmd.id, "width": width, "connections": connections})
+                future = pool.submit(
+                    run_single, command, config.command_timeout, cmd.cwd, capture_dir,
+                    f"{cmd.id}.attempt{retry_counts[cmd.id]}",
+                )
+                running[future] = (cmd, launches, width)
+                peak = max(peak, len(running))
 
-        # Process results
-        failed_in_batch: list[tuple[CommandSpec, str]] = []  # (cmd, error_class)
-        resource_contention_count = 0
+            # --- Wait for a finish, or for a retry to fall due ----------------
+            if not running:
+                if queue:
+                    _SHUTDOWN.wait(max(0.0, min(nb for nb, _ in queue) - time.monotonic()))
+                continue
+            done, _ = wait(list(running), timeout=EXECUTE_POLL, return_when=FIRST_COMPLETED)
 
-        for cmd, returncode, duration, stdout, stderr in batch_results:
-            # Verify the log
-            log_info = verify_eval_log(cmd.log_dir)
+            for future in done:
+                cmd, launch_no, width_then = running.pop(future)
+                try:
+                    returncode, duration, stdout, stderr = future.result()
+                except Exception as e:
+                    returncode, duration, stdout, stderr = -1, 0.0, "", str(e)
 
-            result = EvalResult(
-                id=cmd.id,
-                log_path=log_info.get("log_path"),
-                status=log_info.get("status", "unknown"),
-                samples_completed=log_info.get("samples_completed"),
-                samples_total=log_info.get("samples_total"),
-                duration_seconds=log_info.get("duration_seconds", duration),
-                process_retries=retry_counts[cmd.id],
-                batch=batch_num,
-                model_usage=log_info.get("model_usage", {}),
-            )
+                # Verify the log
+                log_info = verify_eval_log(cmd.log_dir)
+                result = EvalResult(
+                    id=cmd.id,
+                    log_path=log_info.get("log_path"),
+                    status=log_info.get("status", "unknown"),
+                    samples_completed=log_info.get("samples_completed"),
+                    samples_total=log_info.get("samples_total"),
+                    duration_seconds=log_info.get("duration_seconds", duration),
+                    process_retries=retry_counts[cmd.id],
+                    batch=launch_no,
+                    model_usage=log_info.get("model_usage", {}),
+                )
+                if log_info.get("error"):
+                    # A log's error message is the eval's own text and can quote
+                    # scorer output; it is scrubbed like any captured stream.
+                    result.errors.append(scrub_scores(log_info["error"]))
 
-            if log_info.get("error"):
-                # A log's error message is the eval's own text and can quote
-                # scorer output; it is scrubbed like any captured stream.
-                result.errors.append(scrub_scores(log_info["error"]))
+                # Success
+                if returncode == 0 and log_info.get("status") == "success":
+                    recent.append(None)
+                    completed_results[cmd.id] = result
+                    emit("result", result)
+                    continue
 
-            # Determine success
-            if returncode == 0 and log_info.get("status") == "success":
-                completed_results[cmd.id] = result
-                emit("result", result)
-            else:
+                # Failure: classify and say why
                 # Both streams: Inspect reports prerequisite failures on stdout.
                 diagnostic = combine_output(stdout, stderr)
                 error_class = classify_error(returncode, diagnostic)
+                # Outliving the time limit is its own class: the command was
+                # killed with nothing to show, which reads as a stall, not a
+                # crash. Its output went with it, so the patterns cannot tell.
+                if stderr.startswith(TIMED_OUT):
+                    error_class = "stalled"
                 result.error_class = error_class
-
-                if error_class == "resource_contention":
-                    resource_contention_count += 1
-
+                recent.append(error_class)
                 if diagnostic:
                     # The tag rides on the already-scrubbed tail, so the
                     # blackout holds for credential failures as for any other.
@@ -925,87 +1704,72 @@ def execute(
                     )
                 result.errors.append(f"exit_code={returncode}")
 
-                if should_retry(error_class, retry_counts[cmd.id], config.max_retries):
+                # The attempts that finished around this one, for spotting a
+                # failure shared by the whole run rather than one condition
+                window = recent[-max(2, width_then):]
+                failures = [c for c in window if c is not None]
+                widespread = len(window) > 1 and len(failures) > len(window) / 2
+                uniform = widespread and all(c == failures[0] for c in failures)
+
+                # Resource contention halves how many run at once, once per
+                # generation of starts (simultaneous failures count once)
+                if error_class == "resource_contention" and width_then > 1 and launch_no > last_reduction:
+                    reduction = ConcurrencyReduction(
+                        batch=launch_no,
+                        previous_level=width_then,
+                        new_level=max(1, width_then // 2),
+                        reason=f"Resource contention detected at launch {launch_no}",
+                    )
+                    report.concurrency_reductions.append(reduction)
+                    emit("reduction", reduction)
+                    ceiling = reduction.new_level
+                    last_reduction = launches
+
+                stall_stops = error_class == "stalled" and not config.retry_stalled
+                if not stall_stops and should_retry(error_class, retry_counts[cmd.id], config.max_retries):
                     # A failed attempt may have left a partial .eval behind.
                     # Move it out before retrying: a second log in the pair's
                     # directory would double the Analyst's pool.
                     _stash_failed_attempt_logs(cmd, retry_counts[cmd.id], capture_dir)
                     retry_counts[cmd.id] += 1
-                    failed_in_batch.append((cmd, error_class))
                     result.status = "retrying"
                     emit("result", result)
+                    # A transient error hitting most of the run gets a longer wait
+                    backoff = compute_backoff(retry_counts[cmd.id] - 1, config.retry_backoff_seconds)
+                    if uniform and failures[0] == "transient":
+                        backoff *= 2
+                    # Retries go to the front, so they run as soon as they are due
+                    queue.insert(0, (time.monotonic() + backoff, cmd))
                 else:
                     # Exhausted retries or structural failure
                     result.process_retries = retry_counts[cmd.id]
                     completed_results[cmd.id] = result
                     emit("result", result)
 
-        # Cascading failure detection
-        backoff_multiplier = 1.0
-        if len(batch) > 1 and len(failed_in_batch) > len(batch) / 2:
-            error_classes = [ec for _, ec in failed_in_batch]
-            if all(ec == "resource_contention" for ec in error_classes):
-                new_concurrency = max(1, current_concurrency // 2)
-                if new_concurrency < current_concurrency:
-                    reduction = ConcurrencyReduction(
-                        batch=batch_num,
-                        previous_level=current_concurrency,
-                        new_level=new_concurrency,
-                        reason=f"Resource contention: {resource_contention_count}/{len(batch)} commands failed",
+                # The same unretryable error across the run: systemic, abort
+                # what has not started. A uniform routing failure means the
+                # pinned provider is down for every command.
+                if width_then > 1 and uniform and failures[0] in ("structural", "routing") and queue:
+                    report.errors.append(
+                        f"Launch {launch_no}: all failures are {failures[0]} — aborting remaining commands"
                     )
-                    report.concurrency_reductions.append(reduction)
-                    emit("reduction", reduction)
-                    current_concurrency = new_concurrency
-            elif all(ec == error_classes[0] for ec in error_classes) and error_classes[0] in ("structural", "routing"):
-                # All the same unretryable error — systemic problem, abort
-                # remaining. A uniform routing failure means the pinned provider
-                # is down for every command, so continuing only wastes time.
-                report.errors.append(
-                    f"Batch {batch_num}: all failures are {error_classes[0]} — aborting remaining commands"
-                )
-                for remaining_cmd in pending:
-                    aborted = EvalResult(
-                        id=remaining_cmd.id,
-                        status="aborted",
-                        errors=[f"Aborted due to systemic {error_classes[0]} failure"],
-                    )
-                    completed_results[remaining_cmd.id] = aborted
-                    emit("result", aborted)
-                pending = []
-                break
-            elif all(ec == "transient" for ec in error_classes):
-                # All same transient error — double the backoff for retries
-                backoff_multiplier = 2.0
-        elif resource_contention_count > 0 and current_concurrency > 1:
-            # Even a single resource contention in a batch warrants reduction
-            new_concurrency = max(1, current_concurrency // 2)
-            if new_concurrency < current_concurrency:
-                reduction = ConcurrencyReduction(
-                    batch=batch_num,
-                    previous_level=current_concurrency,
-                    new_level=new_concurrency,
-                    reason=f"Resource contention detected in batch {batch_num}",
-                )
-                report.concurrency_reductions.append(reduction)
-                emit("reduction", reduction)
-                current_concurrency = new_concurrency
+                    for _, remaining_cmd in queue:
+                        if remaining_cmd.id in completed_results:
+                            continue
+                        aborted = EvalResult(
+                            id=remaining_cmd.id,
+                            status="aborted",
+                            errors=[f"Aborted due to systemic {failures[0]} failure"],
+                        )
+                        completed_results[remaining_cmd.id] = aborted
+                        emit("result", aborted)
+                    queue = []
 
-        # Queue retries with backoff
-        if failed_in_batch:
-            max_backoff = max(
-                compute_backoff(retry_counts[cmd.id] - 1, config.retry_backoff_seconds)
-                for cmd, _ in failed_in_batch
-            ) * backoff_multiplier
-            if not _SHUTDOWN.is_set():
-                _SHUTDOWN.wait(max_backoff)
-            # Prepend retries so they run in the next iteration
-            retry_commands = [cmd for cmd, _ in failed_in_batch]
-            pending = retry_commands + pending
-
-    # Handle shutdown
+    # Handle shutdown: anything queued, and anything stopped mid-run
     if _SHUTDOWN.is_set():
         report.status = "interrupted"
-        for remaining_cmd in pending:
+        unfinished = [c for _, c in queue] + [c for c, _, _ in running.values()]
+        for remaining_cmd in unfinished:
             if remaining_cmd.id not in completed_results:
                 interrupted = EvalResult(
                     id=remaining_cmd.id,
@@ -1020,7 +1784,7 @@ def execute(
         completed_results.get(cmd.id, EvalResult(id=cmd.id, status="not_run"))
         for cmd in commands
     ]
-    report.concurrency_used = config.max_parallel
+    report.concurrency_used = peak
     report.total_wall_clock_seconds = round(time.monotonic() - total_start, 1)
 
     return report
@@ -1137,7 +1901,7 @@ def validate_request(request: dict[str, Any]) -> list[str]:
                 "overrides: runs_per_condition was removed (it was never applied); "
                 "use epochs, with sample_id, for repeated sampling"
             )
-        for k in ("sample_limit", "epochs", "max_parallel", "max_connections", "command_timeout_seconds"):
+        for k in ("sample_limit", "epochs", "max_parallel", "max_connections", "command_timeout_seconds", "preflight_timeout_seconds"):
             if k in overrides and (not isinstance(overrides[k], int) or overrides[k] < 1):
                 problems.append(f"overrides.{k} must be a positive integer")
     return problems
@@ -1160,6 +1924,10 @@ class PairPlan:
     # file's own directory (see `task_location`). None only in a plan written
     # before this field existed, which then runs from experiment_dir.
     cwd: str | None = None
+    # Samples the probe and the retest each run: 1 and 3, or, when the request
+    # pins sample ids, one per id and three per id
+    probe_samples: int = 1
+    retest_samples: int = 3
 
 
 def task_location(exp_dir: str, task: str) -> tuple[str, str]:
@@ -1292,9 +2060,11 @@ def build_pairs(
             if sample_id is not None:
                 probe = render(preflight_log_dir, limit=None, sample_id=sample_id, epochs=None)
                 retest = render(preflight_log_dir, limit=None, sample_id=sample_id, epochs=3)
+                n_ids = pinned_id_count(sample_id)
             else:
                 probe = render(preflight_log_dir, limit=1, sample_id=None, epochs=None)
                 retest = render(preflight_log_dir, limit=3, sample_id=None, epochs=None)
+                n_ids = 1
 
             pairs.append(
                 PairPlan(
@@ -1308,9 +2078,31 @@ def build_pairs(
                     preflight_log_dir=preflight_log_dir,
                     retest_command=retest,
                     cwd=cwd,
+                    probe_samples=n_ids,
+                    retest_samples=3 * n_ids,
                 )
             )
     return pairs
+
+
+def pinned_id_count(sample_id: Any) -> int:
+    """How many sample ids a request's ``sample_id`` override pins.
+
+    Parameters
+    ----------
+    sample_id : Any
+        The override: one id, a comma-separated string of them, or a list.
+
+    Returns
+    -------
+    int
+        e.g. 3 for ``"e1,e2,e3"`` or ``["e1", "e2", "e3"]``, 1 for ``"episode"`` or 7; at least 1.
+    """
+    if isinstance(sample_id, list):
+        return max(1, len(sample_id))
+    if isinstance(sample_id, str):
+        return max(1, len([i for i in sample_id.split(",") if i.strip()]))
+    return 1
 
 
 # ---------------------------------------------------------------------------
@@ -1360,7 +2152,10 @@ class Status:
     def __init__(self, path: str, data: dict[str, Any] | None = None):
         self.path = path
         self.data: dict[str, Any] = data or {}
-        self._lock = threading.Lock()
+        # Held around every change as well as every save once the live sample
+        # counter runs beside the main thread: a save serialises `data`, and a
+        # key added mid-dump would abort it. Re-entrant so a holder can save.
+        self.lock = threading.RLock()
 
     @classmethod
     def load(cls, run_dir: str) -> "Status":
@@ -1369,7 +2164,7 @@ class Status:
             return cls(path, json.load(f))
 
     def save(self) -> None:
-        with self._lock:
+        with self.lock:
             self.data["updated_at"] = _now()
             tmp = self.path + ".tmp"
             with open(tmp, "w") as f:
@@ -1487,6 +2282,10 @@ def _apply_shape(entry: dict[str, Any], log_path: str | None) -> None:
     entry["credential_sample_errors"] = shape["credential_sample_errors"]
     entry["sample_retries"] = shape["sample_retries"]
     entry["termination"] = shape["termination"]
+    try:
+        entry["served_models"] = served_models(log_path)
+    except Exception as e:
+        entry["errors"].append(f"served model names unreadable: {type(e).__name__}: {e}")
 
 
 def _final_pair_state(result: EvalResult, entry: dict[str, Any]) -> str:
@@ -1517,7 +2316,9 @@ def _usage_recorder(status: Status, pair: str) -> Any:
     """
     def record(kind: str, payload: Any) -> None:
         if kind == "result" and payload.model_usage:
-            status.pair(pair).setdefault("usage_attempts", []).append(payload.model_usage)
+            # Preflight probes run side by side, so this fires from worker threads.
+            with status.lock:
+                status.pair(pair).setdefault("usage_attempts", []).append(payload.model_usage)
 
     return record
 
@@ -1537,7 +2338,7 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
     pairs : list[PairPlan]
         Pairs to probe.
     config : ExecutionConfig
-        Retry/timeout parameters (concurrency is forced to 1).
+        Retry/timeout parameters (each probe runs as its own one-command batch).
     run_dir : str
         The run directory.
 
@@ -1554,22 +2355,80 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
         max_parallel=1,
         max_retries=config.max_retries,
         retry_backoff_seconds=config.retry_backoff_seconds,
-        command_timeout=config.command_timeout,
+        # A probe is a sample or two: one still going after the short limit
+        # is stalled, and trying it again would only stall again.
+        command_timeout=min(config.preflight_timeout, config.command_timeout),
+        retry_stalled=False,
     )
+    exp_dir = status.data["experiment_dir"]
+
+    def run_probe(p: PairPlan, kind: str) -> EvalResult | None:
+        """Run one pair's probe (``kind="preflight"``) or retest; None once shutting down."""
+        if _SHUTDOWN.is_set():
+            return None
+        with status.lock:
+            status.pair(p.id)["state"] = "preflight"
+            status.save()
+        shutil.rmtree(p.preflight_log_dir, ignore_errors=True)
+        command = p.preflight_command if kind == "preflight" else p.retest_command
+        cmd = CommandSpec(id=f"{kind}_{p.id}", command=command, log_dir=p.preflight_log_dir, cwd=p.cwd or exp_dir)
+        # Every probe/retest attempt spends tokens too; keep them for spend.py.
+        return execute([cmd], probe_config, capture_dir=capture, on_event=_usage_recorder(status, p.id)).results[0]
+
+    # --- Probes and retests, side by side ----------------------------------
+    # Run probes side by side up to the samples the batch keeps in flight
+    # (max_parallel × max_connections), so preflight never holds more
+    # sandboxes than the main run will. One at a time, a round's eleven probes
+    # once took 75 minutes. A probe is one sample, or one per pinned id; a
+    # retest three times that; each holds at most max_connections at once.
+    # Retests run after every probe has finished.
+    conc = status.data["concurrency"]
+    in_flight = max(1, conc["max_parallel"] * conc["max_connections"])
+
+    def width(samples_each: int) -> int:
+        """How many probes (or retests) of this many samples fit in flight at once."""
+        return max(1, in_flight // max(1, min(samples_each, conc["max_connections"])))
+
+    probe_width = width(max((p.probe_samples for p in pairs), default=1))
+    retest_width = width(max((p.retest_samples for p in pairs), default=3))
+    # The probes are real samples in real sandboxes: measure them for sizing
+    sampler = SandboxSampler(exp_dir).start()
+    with ThreadPoolExecutor(max_workers=min(probe_width, max(1, len(pairs)))) as pool:
+        probes = dict(zip([p.id for p in pairs], pool.map(lambda p: run_probe(p, "preflight"), pairs)))
+
+    # Read each successful probe's log now: a retest overwrites it.
+    shapes: dict[str, dict[str, Any] | Exception | None] = {}
+    for p in pairs:
+        r = probes[p.id]
+        if r is not None and r.status == "success" and r.log_path:
+            try:
+                shapes[p.id] = sample_shape(r.log_path)
+            except Exception as e:
+                shapes[p.id] = e
+
+    # A sample error on the single probe earns the --limit 3 retest.
+    to_retest = [p for p in pairs if isinstance(shapes.get(p.id), dict) and shapes[p.id]["sample_errors"] > 0]
+    with ThreadPoolExecutor(max_workers=max(1, min(retest_width, len(to_retest)))) as pool:
+        retests = dict(zip([p.id for p in to_retest], pool.map(lambda p: run_probe(p, "retest"), to_retest)))
+    with status.lock:
+        conc["measured"] = sampler.stop()
+
+    # --- Outcomes, recorded in the pairs' original order --------------------
     surviving: list[PairPlan] = []
     durations: list[float] = []
 
+    def cut_off(result: EvalResult | None) -> bool:
+        """Whether a stop came before this probe or retest ran, or interrupted it."""
+        return result is None or result.status == "interrupted"
+
     for p in pairs:
-        if _SHUTDOWN.is_set():
-            break
-        status.pair(p.id)["state"] = "preflight"
-        status.save()
-        shutil.rmtree(p.preflight_log_dir, ignore_errors=True)
-        cmd = CommandSpec(id=f"preflight_{p.id}", command=p.preflight_command, log_dir=p.preflight_log_dir, cwd=p.cwd or status.data["experiment_dir"])
-        # Every probe/retest attempt spends tokens too; keep them for spend.py.
-        record_usage = _usage_recorder(status, p.id)
-        report = execute([cmd], probe_config, capture_dir=capture, on_event=record_usage)
-        r = report.results[0]
+        r = probes[p.id]
+        if cut_off(r) or (p.id in retests and cut_off(retests[p.id])):
+            # A stop says nothing about the eval: record no verdict, so the
+            # pair is neither excluded as broken nor left mid-preflight
+            status.pair(p.id)["state"] = "interrupted"
+            status.save()
+            continue
         entry: dict[str, Any] = {
             "outcome": None,
             "process_retries": r.process_retries,
@@ -1577,20 +2436,16 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
             "retest": None,
             "evidence": None,
         }
-        if r.duration_seconds:
+        # A stalled probe's duration is just the time limit, not its speed
+        if r.duration_seconds and r.error_class != "stalled":
             durations.append(float(r.duration_seconds))
 
         if r.status == "success":
-            # Sample error on the single probe → --limit 3 retest.
-            shape = None
-            try:
-                shape = sample_shape(r.log_path) if r.log_path else None
-            except Exception as e:
-                entry["evidence"] = {"note": f"probe log unreadable: {e}"}
-            if shape and shape["sample_errors"] > 0:
-                shutil.rmtree(p.preflight_log_dir, ignore_errors=True)
-                retest_cmd = CommandSpec(id=f"retest_{p.id}", command=p.retest_command, log_dir=p.preflight_log_dir, cwd=p.cwd or status.data["experiment_dir"])
-                rr = execute([retest_cmd], probe_config, capture_dir=capture, on_event=record_usage).results[0]
+            shape = shapes.get(p.id)
+            if isinstance(shape, Exception):
+                entry["evidence"] = {"note": f"probe log unreadable: {shape}"}
+            if p.id in retests:
+                rr = retests[p.id]
                 try:
                     rshape = sample_shape(rr.log_path) if rr.log_path else {"samples": 0, "sample_errors": 0}
                 except Exception:
@@ -1603,7 +2458,16 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
                     "credential_sample_errors": creds,
                     "process_retries": rr.process_retries,
                 }
-                if n and errs >= n:
+                if rr.error_class == "stalled":
+                    # The probe answered but its retest did not: the provider
+                    # stopped answering in between, which no sample count shows
+                    entry["outcome"] = "excluded-stalled"
+                    entry["evidence"] = {
+                        "error_class": "stalled",
+                        "command": p.retest_command,
+                        "limit_seconds": probe_config.command_timeout,
+                    }
+                elif n and errs >= n:
                     entry["outcome"] = "excluded-all-samples-deterministic"
                     # A cap hit during preflight looks "deterministic" too;
                     # the tag stops it being read as a task bug.
@@ -1617,13 +2481,19 @@ def run_preflight(status: Status, pairs: list[PairPlan], config: ExecutionConfig
                 entry["outcome"] = "passed-after-retries" if r.process_retries else "passed"
         else:
             cls = r.error_class or "structural"
-            entry["outcome"] = "excluded-routing" if cls == "routing" else "excluded-structural"
+            entry["outcome"] = {"routing": "excluded-routing", "stalled": "excluded-stalled"}.get(cls, "excluded-structural")
             entry["evidence"] = {
                 "error_class": cls,
                 "exit_code": next((e.split("=", 1)[1] for e in r.errors if e.startswith("exit_code=")), None),
                 "command": p.preflight_command,
                 "output_tail": next((e for e in r.errors if e.startswith("[")), "") ,
+                # An eval can exit 0 and still leave a failed log; its own
+                # (already scrubbed) error is then the only account of why.
+                "log_status": r.status,
+                "log_error": next((e for e in r.errors if not e.startswith(("[", "exit_code="))), None),
             }
+            if cls == "stalled":
+                entry["evidence"]["limit_seconds"] = probe_config.command_timeout
 
         pf["pairs"][p.id] = entry
         if entry["outcome"].startswith("excluded"):
@@ -1683,6 +2553,17 @@ def run_worker(run_dir: str) -> int:
     start = time.monotonic()
 
     try:
+        # The launcher checked for Inspect, but the worker can still lack it: a
+        # runner started under `uv run --with inspect_ai` hands the worker a
+        # temporary environment that uv deletes as soon as the launcher exits.
+        # Without this, every eval would run and then "fail" its log check.
+        if importlib.util.find_spec("inspect_ai") is None:
+            raise RuntimeError(
+                "inspect_ai is not importable in the worker: launch the runner with "
+                "`uv run python scripts/execute_evals.py` from the eval's project, "
+                "not from a temporary `uv run --with` environment"
+            )
+
         # --- Preflight -----------------------------------------------------
         if status.data["preflight"]["skipped"]:
             status.data["state"] = "running"
@@ -1706,6 +2587,10 @@ def run_worker(run_dir: str) -> int:
             Path(p.log_dir).mkdir(parents=True, exist_ok=True)
 
         def on_event(kind: str, payload: Any) -> None:
+            with status.lock:
+                _record_event(kind, payload)
+
+        def _record_event(kind: str, payload: Any) -> None:
             if kind == "batch_start":
                 for pid in payload:
                     e = status.pair(pid)
@@ -1735,12 +2620,51 @@ def run_worker(run_dir: str) -> int:
                     # log at all, which the Error Summary already covers.
                     e["zero_samples"] = bool(r.log_path) and not (r.samples_completed or 0)
                     if e["zero_samples"] and r.id not in status.data["zero_sample_pairs"]:
-                        status.data["zero_sample_pairs"].append(r.id)
+                        # Sorted, since parallel pairs finish in any order
+                        status.data["zero_sample_pairs"] = sorted(status.data["zero_sample_pairs"] + [r.id])
             elif kind == "reduction":
                 status.data["concurrency"]["reductions"].append(asdict(payload))
+            elif kind == "launch":
+                status.data["concurrency"]["auto"]["launches"].append({"pair": payload["id"], **sizing, "conditions_at_once": payload["width"], "connections": payload["connections"]})
             status.save()
 
-        report = execute(commands, config, capture_dir=os.path.join(_quarantine_dir(run_dir), "eval_output"), on_event=on_event)
+        # --- Automatic sizing ----------------------------------------------
+        # Only when neither knob was set by the request or the Executor: then
+        # every condition start re-asks the machine's capacity and how many
+        # runs share it, so an older run shrinks when a newer one arrives.
+        # A hand-set run registers too, with its fixed level, so automatic
+        # runs split only what it leaves
+        conc = status.data["concurrency"]
+        size_launch = None
+        sizing: dict[str, int] = {}
+        if conc.get("max_parallel_source") == "runner default" and conc.get("max_connections_source") == "runner default":
+            capacity, basis = machine_capacity(conc.get("measured"), (conc.get("resources") or {}).get("nproc"), bool(conc.get("sandbox_detected")))
+            conc["auto"] = {"capacity": capacity, "basis": basis, "launches": []}
+            registry_entry = register_live_run(run_dir)
+
+            def size_launch(unfinished: int) -> tuple[int, int]:
+                automatic, hand_set_runs, hand_set = machine_load()
+                n = target_in_flight(capacity, max(automatic, 1), hand_set)
+                sizing.update(live_runs=max(automatic, 1) + hand_set_runs, in_flight=n)
+                if hand_set:
+                    sizing["hand_set_in_flight"] = hand_set
+                return split_in_flight(n, unfinished)
+        else:
+            # No more conditions run at once than there are to run
+            held = max(1, min(config.max_parallel, len(commands))) * conc["max_connections"]
+            registry_entry = register_live_run(run_dir, hand_set_in_flight=held)
+
+        # Samples finished so far, for the lead's status view and the panel's
+        # run tab, which would otherwise see a condition's count only at its end
+        stop_counting = threading.Event()
+        counter = threading.Thread(target=watch_live_counts, args=(status, stop_counting), daemon=True)
+        counter.start()
+        try:
+            report = execute(commands, config, capture_dir=os.path.join(_quarantine_dir(run_dir), "eval_output"), on_event=on_event, size_launch=size_launch)
+        finally:
+            stop_counting.set()
+            counter.join()
+            unregister_live_run(registry_entry)
         status.data["errors"].extend(report.errors)
         status.data["state"] = "interrupted" if report.status == "interrupted" else "completed"
         # Anything still pending (e.g. excluded before launch) keeps its state.
@@ -1748,6 +2672,12 @@ def run_worker(run_dir: str) -> int:
         status.data["errors"].append(f"runner exception: {type(e).__name__}: {e}")
         status.data["state"] = "failed"
     finally:
+        # Every eval has ended by now, so containers still up from this
+        # experiment are leftovers of one that was killed
+        try:
+            status.data["sandbox_cleanup"] = remove_leftover_sandboxes(exp_dir, run_dir)
+        except Exception as e:
+            status.data["errors"].append(f"leftover sandbox cleanup failed: {type(e).__name__}: {e}")
         status.data["finished_at"] = _now()
         status.data["total_wall_clock_seconds"] = round(time.monotonic() - start, 1)
         status.save()
@@ -1810,6 +2740,11 @@ def prepare_run(
     if problems:
         return "", problems
 
+    # The worker reads every eval log with Inspect to confirm it succeeded;
+    # without it each eval "fails" after running, and preflight excludes all.
+    if importlib.util.find_spec("inspect_ai") is None:
+        return "", ["inspect_ai is not importable here: launch the runner with `uv run python scripts/execute_evals.py` from the eval's project, not with `--no-project`"]
+
     overrides = request.get("overrides") or {}
     notes: list[str] = []
     unrecognised = sorted(k for k in overrides if k not in RECOGNISED_OVERRIDES)
@@ -1866,6 +2801,7 @@ def prepare_run(
         max_retries=3,
         retry_backoff_seconds=[10, 30, 60],
         command_timeout=int(overrides.get("command_timeout_seconds", DEFAULT_COMMAND_TIMEOUT)),
+        preflight_timeout=int(overrides.get("preflight_timeout_seconds", DEFAULT_PREFLIGHT_TIMEOUT)),
     )
     shutil.copy(request_path, os.path.join(run_dir, "request.json"))
     with open(os.path.join(run_dir, "plan.json"), "w") as f:
@@ -2053,7 +2989,7 @@ def render_status(data: dict[str, Any]) -> str:
         Multi-line text. Example::
 
             run: iter_00_20260917T120000Z  state: running  pid: 4242 (alive)
-            concurrency: max_parallel=1 (runner default) max_connections=4 (runner default)
+            concurrency: max_parallel=2 (runner default) max_connections=5 (runner default)
             preflight: done — 2 passed, 0 excluded
             pairs:
               c_0e4d / openai/gpt-5   running   samples -/-   attempts 1
@@ -2067,10 +3003,18 @@ def render_status(data: dict[str, Any]) -> str:
     lines = [f"run: {data.get('run_id')}  state: {state}  pid: {pid} ({'alive' if alive else 'not running'})"]
     lines.append(f"started: {data.get('started_at')}  updated: {data.get('updated_at')}  finished: {data.get('finished_at')}")
     c = data.get("concurrency", {})
-    lines.append(
-        f"concurrency: max_parallel={c.get('max_parallel')} ({c.get('max_parallel_source')}) "
-        f"max_connections={c.get('max_connections')} ({c.get('max_connections_source')})"
-    )
+    last = ((c.get("auto") or {}).get("launches") or [None])[-1]
+    if last:
+        # Automatic sizing: the latest condition start says where it stands
+        lines.append(
+            f"concurrency: automatic, capacity {c['auto']['capacity']}; latest start {last['in_flight']} in flight "
+            f"({last['conditions_at_once']} at once × {last['connections']}, live runs {last['live_runs']})"
+        )
+    else:
+        lines.append(
+            f"concurrency: max_parallel={c.get('max_parallel')} ({c.get('max_parallel_source')}) "
+            f"max_connections={c.get('max_connections')} ({c.get('max_connections_source')})"
+        )
     pf = data.get("preflight", {})
     if pf.get("skipped"):
         lines.append("preflight: skipped (skip_preflight=true)")
@@ -2121,6 +3065,105 @@ def wait_for(run_dir: str, timeout: float, interval: float = 15.0) -> dict[str, 
         _SHUTDOWN.wait(min(interval, max(0.0, deadline - time.monotonic())))
 
 
+def _cleanup_notes(cleanup: dict[str, Any]) -> list[str]:
+    """Report notes for `remove_leftover_sandboxes`'s result.
+
+    Parameters
+    ----------
+    cleanup : dict
+        ``{"removed": [...], "failed": [...], "skipped": reason | None}``.
+
+    Returns
+    -------
+    list[str]
+        One line each for what was removed, what could not be, and why the
+        check was skipped; empty when nothing was left behind.
+    """
+    notes = []
+    if cleanup.get("removed"):
+        notes.append(f"Removed {len(cleanup['removed'])} sandbox container set(s) left running by killed evals: {', '.join(cleanup['removed'])}.")
+    if cleanup.get("failed"):
+        notes.append(f"Could not remove {len(cleanup['failed'])} leftover sandbox container set(s): {', '.join(cleanup['failed'])}; they are still running.")
+    if cleanup.get("skipped"):
+        notes.append(f"Leftover sandbox check skipped: {cleanup['skipped']}.")
+    return notes
+
+
+def _merge_cleanup(earlier: dict[str, Any] | None, again: dict[str, Any]) -> dict[str, Any]:
+    """Combine the worker's clean-up record with a second pass made after it.
+
+    Parameters
+    ----------
+    earlier : dict | None
+        The worker's ``sandbox_cleanup`` record; None when it never wrote one
+        (killed before its ``finally``).
+    again : dict
+        The second pass's record, in the same shape.
+
+    Returns
+    -------
+    dict
+        ``{"removed", "failed", "skipped"}``: everything either pass removed;
+        failures and the skip reason from the latest pass that ran, e.g. a
+        worker that removed two projects followed by a pass that found none
+        gives ``{"removed": ["inspect-a", "inspect-b"], "failed": [], "skipped": None}``.
+    """
+    if not earlier:
+        return again
+    ran_again = again["skipped"] is None
+    return {
+        "removed": sorted(set(earlier.get("removed") or []) | set(again["removed"])),
+        "failed": again["failed"] if ran_again else list(earlier.get("failed") or []),
+        # Skipped only if neither pass got to look
+        "skipped": again["skipped"] if earlier.get("skipped") and not ran_again else None,
+    }
+
+
+def stop_run(run_dir: str, timeout: float = 300.0, docker: Any = None) -> dict[str, Any]:
+    """Stop a run cleanly: its evals get to remove their own containers first.
+
+    Signals the worker, which asks each running eval to cancel (SIGINT, the
+    signal Inspect cleans up on), waits for the run to reach a terminal state,
+    then removes any of this experiment's containers still left. Killing the
+    processes directly instead leaves every sandbox running.
+
+    Parameters
+    ----------
+    run_dir : str
+        The run directory.
+    timeout : float
+        Seconds to wait for the worker to finish stopping.
+    docker : Callable
+        Runs a docker command; None for ``_docker``. Tests pass a stand-in.
+
+    Returns
+    -------
+    dict
+        The run's status data, with ``sandbox_cleanup`` filled in.
+    """
+    data = Status.load(run_dir).data
+    if data.get("state") not in TERMINAL_STATES and _worker_alive(data):
+        try:
+            os.kill(int(_worker_pid(data)), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        data = wait_for(run_dir, timeout, interval=5.0)
+
+    # The worker cleans up as it exits; this catches a worker that was killed
+    # or never got that far. Containers already removed are simply not found,
+    # so the worker's own record of what it removed is kept alongside.
+    if data.get("state") in TERMINAL_STATES or not _worker_alive(data):
+        status = Status.load(run_dir)
+        again = remove_leftover_sandboxes(status.data["experiment_dir"], run_dir, docker)
+        status.data["sandbox_cleanup"] = _merge_cleanup(status.data.get("sandbox_cleanup"), again)
+        if status.data.get("state") not in TERMINAL_STATES:
+            status.data["state"] = "interrupted"
+            status.data["finished_at"] = _now()
+        status.save()
+        data = status.data
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Draft report in the contract's section shape
 # ---------------------------------------------------------------------------
@@ -2158,7 +3201,7 @@ def render_report(data: dict[str, Any]) -> str:
     sample_err = [e for e in ran if e["state"] == "sample-level-errors"]
     failed = [e for e in ran if e["state"] == "failed"]
     other = [e for e in ran if e["state"] in ("aborted", "interrupted", "not_run", "pending", "running", "retrying", "preflight")]
-    structural = [e for e in failed if e.get("error_class") in ("structural", "unknown", "resource_contention", "transient", None)]
+    structural = [e for e in failed if e.get("error_class") in ("structural", "unknown", "resource_contention", "transient", "stalled", None)]
     routing = [e for e in failed if e.get("error_class") == "routing"]
     transient_recovered = [e for e in ran if e["state"] in ("success", "sample-level-errors") and e.get("process_retries", 0) > 0]
 
@@ -2240,6 +3283,17 @@ def render_report(data: dict[str, Any]) -> str:
                 if (entry.get("retest") or {}).get("credential_sample_errors"):
                     out.append(f"  - **{CREDENTIALS_TAG} Credentials exhausted**: {_CREDENTIALS_NOTE}")
                 out.append(f"  - **Evidence**: {ev.get('retest_errors')}; sample error traces are in the quarantined preflight logs under the run directory's `private/preflight_logs/`.")
+            elif outcome == "excluded-stalled":
+                minutes = round((ev.get("limit_seconds") or DEFAULT_PREFLIGHT_TIMEOUT) / 60)
+                out.append("  - **Reason**: `provider-not-responding (stalled)`")
+                out.append(
+                    f"  - **Evidence**: the preflight probe was still running after its {minutes}-minute limit "
+                    "and was stopped, without retries. A single sample normally takes a few minutes at most, "
+                    "so the model's provider is most likely not responding (a sandbox that never starts looks "
+                    "the same). Try again later, re-pin the provider, or drop the model; "
+                    "`preflight_timeout_seconds` in `overrides` lengthens the limit if this model is genuinely slow."
+                )
+                out.append(f"  - **Command**: `{ev.get('command')}`")
             else:
                 reason = "pinned-provider-unavailable (routing)" if outcome == "excluded-routing" else "structural"
                 out.append(f"  - **Reason**: `{reason}`")
@@ -2351,6 +3405,24 @@ def render_report(data: dict[str, Any]) -> str:
         out.append("None. (No pair produced a readable log.)")
     out.append("")
 
+    # --- Models as Served --------------------------------------------------
+    out.append("### Models as Served")
+    out.append("")
+    out.append("| Condition | Model | Served as |")
+    out.append("|---|---|---|")
+    any_rows = False
+    for e in ran:
+        if "served_models" not in e:
+            continue
+        any_rows = True
+        served = ", ".join(f"`{m}`" for m in e["served_models"]) or "not reported by the provider"
+        out.append(f"| {e['condition']} | {e['model']} | {served} |")
+    if not any_rows:
+        out.append("| — | — | — |")
+        out.append("")
+        out.append("None. (No pair produced a readable log.)")
+    out.append("")
+
     # --- Concurrency Decision ----------------------------------------------
     out.append("### Concurrency Decision")
     out.append("")
@@ -2358,21 +3430,39 @@ def render_report(data: dict[str, Any]) -> str:
     if c.get("max_parallel_source") == "request overrides":
         override = f"yes ({c.get('max_parallel')})"
     res = c.get("resources") or {}
-    out.append(f"- **Chosen `max_parallel`**: {c.get('max_parallel')}")
+    auto = c.get("auto")
+    launches = (auto or {}).get("launches") or []
+    if auto:
+        widest = max((l["conditions_at_once"] for l in launches), default=c.get("max_parallel"))
+        out.append(f"- **Chosen `max_parallel`**: {widest} (automatic; at most this many conditions at once)")
+    else:
+        out.append(f"- **Chosen `max_parallel`**: {c.get('max_parallel')}")
     out.append(f"- **Orchestrator override provided**: {override}")
     out.append(f"- **Resources observed**: nproc={res.get('nproc')}, free_mem_mb={res.get('free_mem_mb')}")
     sd = c.get("sandbox_detected")
     out.append(f"- **Sandbox detected**: {'yes' if sd else 'no' if sd is False else 'unknown'} (evidence: {c.get('sandbox_evidence') or 'none recorded'})")
+    if auto:
+        m = c.get("measured") or {}
+        measured = (f"heaviest of {m.get('containers_seen')} preflight sandboxes {m.get('peak_container_mb')} MB, lowest free memory {m.get('min_free_mb')} MB"
+                    if m.get("containers_seen") else "no preflight sandboxes measured")
+        starts = "; ".join(
+            f"{l['pair']}: {l['in_flight']} in flight, {l['conditions_at_once']} at once × {l['connections']} (live runs {l['live_runs']}"
+            + (f", {l['hand_set_in_flight']} held by hand-set runs)" if l.get("hand_set_in_flight") else ")")
+            for l in launches
+        ) or "none"
+        out.append(f"- **Automatic sizing**: capacity {auto['capacity']}, set by {auto['basis']}; {measured}. Condition starts: {starts}")
     if c.get("reductions"):
-        out.append("- **Reductions applied during execution**: " + "; ".join(f"batch {r['batch']}: {r['previous_level']}→{r['new_level']} ({r['reason']})" for r in c["reductions"]))
+        out.append("- **Reductions applied during execution**: " + "; ".join(f"launch {r['batch']}: {r['previous_level']}→{r['new_level']} ({r['reason']})" for r in c["reductions"]))
     else:
         out.append("- **Reductions applied during execution**: none")
-    if c.get("max_parallel_source") == "cli override":
+    if auto:
+        out.append("- **Rationale**: no override was requested, so the runner sized each condition start from preflight's sandbox measurements and the number of live runs on the machine, split evenly between them.")
+    elif c.get("max_parallel_source") == "cli override":
         out.append(f"- **Rationale**: Executor raised the runner ceiling via CLI override — {c.get('rationale')}")
-    elif c.get("max_parallel_source") == "request overrides":
-        out.append(f"- **Rationale**: the request's `overrides.max_parallel` was applied as given; the runner's ceiling (max_parallel={DEFAULT_MAX_PARALLEL}, max_connections={DEFAULT_MAX_CONNECTIONS}) is the default only.")
+    elif "request overrides" in (c.get("max_parallel_source"), c.get("max_connections_source")):
+        out.append(f"- **Rationale**: the request's overrides were applied as given, so automatic sizing was off; any key it left unset kept the runner's starting value (max_parallel={DEFAULT_MAX_PARALLEL}, max_connections={DEFAULT_MAX_CONNECTIONS}).")
     else:
-        out.append(f"- **Rationale**: runner default ceiling for a shared host with one sandbox per sample (max_parallel={DEFAULT_MAX_PARALLEL}, max_connections={DEFAULT_MAX_CONNECTIONS}); no override was requested.")
+        out.append(f"- **Rationale**: the runner's starting values (max_parallel={DEFAULT_MAX_PARALLEL}, max_connections={DEFAULT_MAX_CONNECTIONS}); no override was requested.")
     out.append("")
 
     # --- Execution Summary -------------------------------------------------
@@ -2393,6 +3483,7 @@ def render_report(data: dict[str, Any]) -> str:
     out.append("")
     notes = list(data.get("notes") or [])
     notes.extend(data.get("errors") or [])
+    notes.extend(_cleanup_notes(data.get("sandbox_cleanup") or {}))
     notes.append(f"Run directory: `{data.get('run_dir')}` (status file, plan, worker log; raw eval output is quarantined under `private/` and is score-bearing — do not read it).")
     for n in notes:
         out.append(f"- {n}")
@@ -2432,6 +3523,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p_report = sub.add_parser("report", help="render the draft report from the status file")
     p_report.add_argument("run_dir")
+
+    p_stop = sub.add_parser("stop", help="stop a run cleanly, removing the sandbox containers it leaves")
+    p_stop.add_argument("run_dir")
+    p_stop.add_argument("--timeout", type=float, default=300.0, help="seconds to wait for the evals to stop (default 300)")
 
     p_worker = sub.add_parser("_worker", help=argparse.SUPPRESS)
     p_worker.add_argument("run_dir")
@@ -2485,6 +3580,17 @@ def main(argv: list[str] | None = None) -> int:
             f.write(text)
         print(text)
         return 0
+
+    if args.cmd == "stop":
+        data = stop_run(args.run_dir, args.timeout)
+        cleanup = data.get("sandbox_cleanup") or {}
+        print(f"state: {data.get('state')}")
+        print(f"leftover sandboxes removed: {', '.join(cleanup.get('removed') or []) or 'none'}")
+        if cleanup.get("failed"):
+            print(f"could not remove: {', '.join(cleanup['failed'])}")
+        if cleanup.get("skipped"):
+            print(f"cleanup skipped: {cleanup['skipped']}")
+        return 0 if data.get("state") in TERMINAL_STATES else 3
 
     if args.cmd == "_worker":
         return run_worker(args.run_dir)

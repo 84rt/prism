@@ -12,7 +12,11 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 import check_report as cr
 import execute_evals as ee
@@ -78,6 +82,12 @@ def test_verify_eval_log_has_no_metrics(fixture_log):
     assert_no_leak(json.dumps(info), "verify_eval_log output")
     # Token usage (execution shape, not a scorer output) is retained.
     assert info["model_usage"]["mockllm/model"]["total_tokens"] == 60
+
+
+def test_served_models_lists_the_names_replies_reported(tmp_path):
+    named = write_fixture_log(str(tmp_path / "a.eval"), epochs=3, served_model="gpt-5-2025-08-07")
+    assert ee.served_models(named) == ["gpt-5-2025-08-07"]
+    assert ee.served_models(write_fixture_log(str(tmp_path / "b.eval"))) == []
 
 
 def test_sample_shape_reads_shape_only(tmp_path):
@@ -157,7 +167,7 @@ def test_build_pairs_renders_policy_flags_routing_and_defaults(tmp_path):
     assert "--metadata condition=treatment --metadata model=openrouter/deepseek/deepseek-r1 --metadata route=openrouter:novita" in cmd
     assert "--no-fail-on-error --retry-on-error 3" in cmd
     assert "-T system=alt.txt" in cmd
-    assert "--sample-id blackmail_none-none_replacement --epochs 30 --max-connections 4" in cmd
+    assert f"--sample-id blackmail_none-none_replacement --epochs 30 --max-connections {ee.DEFAULT_MAX_CONNECTIONS}" in cmd
     # JSON (not Python) rendering of the -M object, lowercase false.
     assert "-M 'provider={\"order\": [\"novita\"], \"allow_fallbacks\": false}'" in cmd
     # Pinned sample id: the probe is the pinned invocation without --epochs, no --limit.
@@ -205,8 +215,8 @@ def test_default_ceiling_and_override_sources(tmp_path):
     run_dir, problems = ee.prepare_run(path)
     assert not problems
     c = ee.Status.load(run_dir).data["concurrency"]
-    assert (c["max_parallel"], c["max_parallel_source"]) == (1, "runner default")
-    assert (c["max_connections"], c["max_connections_source"]) == (4, "runner default")
+    assert (c["max_parallel"], c["max_parallel_source"]) == (ee.DEFAULT_MAX_PARALLEL, "runner default")
+    assert (c["max_connections"], c["max_connections_source"]) == (ee.DEFAULT_MAX_CONNECTIONS, "runner default")
 
     path2, _ = make_request(tmp_path / "b", overrides={"max_parallel": 2, "max_connections": 8})
     run_dir2, _ = ee.prepare_run(path2)
@@ -222,6 +232,16 @@ def test_default_ceiling_and_override_sources(tmp_path):
     assert (c3["max_parallel"], c3["max_parallel_source"], c3["rationale"]) == (3, "cli override", "API-only eval, 2 pairs")
     report = ee.render_report(ee.Status.load(run_dir3).data)
     assert "Executor raised the runner ceiling via CLI override — API-only eval, 2 pairs" in report
+
+
+def test_overriding_only_connections_is_reported_as_an_override(tmp_path):
+    # Either key set by the request turns automatic sizing off, so the
+    # rationale must name the override rather than claim none was requested
+    path, _ = make_request(tmp_path, overrides={"max_connections": 8})
+    run_dir, _ = ee.prepare_run(path)
+    report = ee.render_report(ee.Status.load(run_dir).data)
+    assert "no override was requested" not in report
+    assert "automatic sizing was off" in report
 
 
 def test_unrecognised_override_is_noted(tmp_path):
@@ -264,6 +284,91 @@ def run_foreground(tmp_path, fake_eval_script, monkeypatch, *, mode="ok", overri
     substitute_fake_eval(run_dir, fake_eval_script)
     code = ee.run_worker(run_dir)
     return run_dir, req, code
+
+
+FOUR_CONDITIONS = {f"c{i}": {"task": "task.py", "args": {}} for i in range(4)}
+
+
+def _spy_on_execute(monkeypatch):
+    """Wrap ``ee.execute`` to record how many probes, and how many retests, ran at once.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Used to swap in the wrapper.
+
+    Returns
+    -------
+    dict[str, int]
+        Peak concurrency per kind, e.g. ``{"preflight": 3, "retest": 1}``, filled as the run goes.
+    """
+    real = ee.execute
+    active = {"preflight": 0, "retest": 0}
+    peak = {"preflight": 0, "retest": 0}
+    lock = threading.Lock()
+
+    def spy(commands, *args, **kwargs):
+        kind = commands[0].id.split("_", 1)[0]
+        if kind not in active:
+            return real(commands, *args, **kwargs)
+        with lock:
+            active[kind] += 1
+            peak[kind] = max(peak[kind], active[kind])
+        time.sleep(0.3)  # long enough for side-by-side probes to overlap
+        try:
+            return real(commands, *args, **kwargs)
+        finally:
+            with lock:
+                active[kind] -= 1
+
+    monkeypatch.setattr(ee, "execute", spy)
+    return peak
+
+
+def test_preflight_probes_run_side_by_side_up_to_the_batch_width(tmp_path, fake_eval_script, monkeypatch):
+    seen = _spy_on_execute(monkeypatch)
+    run_dir, _, code = run_foreground(
+        tmp_path, fake_eval_script, monkeypatch, conditions=FOUR_CONDITIONS,
+        overrides={"max_parallel": 1, "max_connections": 3},
+    )
+    assert code == 0
+    # Three samples in flight → three probes at once, never all four.
+    assert seen == {"preflight": 3, "retest": 0}
+    data = ee.Status.load(run_dir).data
+    assert list(data["preflight"]["pairs"]) == data["pair_order"]
+    assert {e["outcome"] for e in data["preflight"]["pairs"].values()} == {"passed"}
+
+
+def test_errored_probes_are_retested_a_third_as_wide(tmp_path, fake_eval_script, monkeypatch):
+    seen = _spy_on_execute(monkeypatch)
+    run_dir, _, _ = run_foreground(
+        tmp_path, fake_eval_script, monkeypatch, mode="sample_error", conditions=FOUR_CONDITIONS,
+        overrides={"max_parallel": 1, "max_connections": 3},
+    )
+    pf = ee.Status.load(run_dir).data["preflight"]["pairs"]
+    # Every probe errored, so every pair was retested and judged on the retest.
+    assert all(e["retest"] is not None for e in pf.values())
+    assert {e["outcome"] for e in pf.values()} == {"excluded-all-samples-deterministic"}
+    # Retests are three samples each, so at three in flight they run one at a time.
+    assert seen == {"preflight": 3, "retest": 1}
+
+
+def test_probes_of_several_pinned_ids_run_fewer_at_once(tmp_path, fake_eval_script, monkeypatch):
+    seen = _spy_on_execute(monkeypatch)
+    run_foreground(
+        tmp_path, fake_eval_script, monkeypatch, conditions=FOUR_CONDITIONS,
+        overrides={"max_parallel": 2, "max_connections": 3, "sample_id": "e1,e2", "epochs": 5},
+    )
+    # Six samples in flight; each probe runs both pinned ids at once, so three
+    # probes fit, not six
+    assert seen["preflight"] == 3
+
+
+def test_a_probe_counts_its_pinned_ids():
+    assert ee.pinned_id_count("e1, e2,e3") == 3
+    assert ee.pinned_id_count(["a", "b"]) == 2
+    assert ee.pinned_id_count("episode") == 1
+    assert ee.pinned_id_count(7) == 1
 
 
 def test_foreground_run_with_preflight_is_score_free(tmp_path, fake_eval_script, monkeypatch):
@@ -309,6 +414,7 @@ def test_draft_report_has_contract_headings_in_order(tmp_path, fake_eval_script,
         "#### Transient, recovered (0 condition-model pair(s))",
         "#### Pinned provider unavailable (0 condition-model pair(s))",
         "### Transcript Termination Metadata",
+        "### Models as Served",
         "### Concurrency Decision",
         "### Execution Summary",
         "### Additional Notes",
@@ -318,9 +424,10 @@ def test_draft_report_has_contract_headings_in_order(tmp_path, fake_eval_script,
     assert report.startswith("### Summary")
     assert "Preflight skipped (skip_preflight=true)." in report
     assert "**Zero-sample pairs:** none." in report
-    assert "- **Chosen `max_parallel`**: 1" in report
+    assert f"- **Chosen `max_parallel`**: {ee.DEFAULT_MAX_PARALLEL}" in report
     assert "| baseline | openai/gpt-5 | direct |" in report
     assert "| treatment | openai/gpt-5 | 0 | 0 | 0 |" in report
+    assert "| treatment | openai/gpt-5 | not reported by the provider |" in report
 
 
 def test_zero_sample_pair_is_flagged_distinctly(tmp_path, fake_eval_script, monkeypatch):
@@ -352,6 +459,126 @@ def test_structural_failure_is_excluded_at_preflight_with_evidence(tmp_path, fak
     assert_no_leak(report, "draft report (structural)")
     # The scrubbed tail dropped the score-bearing progress line.
     assert "accuracy" not in pf["evidence"]["output_tail"]
+
+
+def test_a_probe_that_exits_cleanly_but_fails_its_log_check_says_why(tmp_path, fake_eval_script, monkeypatch):
+    # The eval runs and exits 0, but the log cannot be confirmed: the
+    # evidence must carry the log's status and error, not just the build output.
+    monkeypatch.setattr(ee, "verify_eval_log", lambda log_dir: {"log_path": None, "status": "verification_error", "error": "No module named 'inspect_ai'"})
+    run_dir, _, _ = run_foreground(tmp_path, fake_eval_script, monkeypatch, conditions={"baseline": {"task": "task.py", "args": {}}})
+    evidence = ee.Status.load(run_dir).data["preflight"]["pairs"]["baseline__openai-gpt-5"]["evidence"]
+    assert evidence["exit_code"] is None or evidence["exit_code"] == "0"
+    assert evidence["log_status"] == "verification_error"
+    assert evidence["log_error"] == "No module named 'inspect_ai'"
+
+
+def test_the_runner_refuses_to_start_without_inspect(tmp_path, monkeypatch):
+    path, _ = make_request(tmp_path)
+    monkeypatch.setattr(ee.importlib.util, "find_spec", lambda name: None)
+    run_dir, problems = ee.prepare_run(path)
+    assert run_dir == ""
+    assert "--no-project" in problems[0]
+
+
+def test_a_stop_during_preflight_excludes_nothing(tmp_path, fake_eval_script, monkeypatch):
+    # The stop arrives while the first probe runs: that probe comes back
+    # interrupted and the rest never start. None of it is the eval's fault.
+    monkeypatch.setattr(ee, "_SHUTDOWN", threading.Event())
+    real_execute = ee.execute
+
+    def stopped_mid_probe(commands, config, **kwargs):
+        if commands[0].id.startswith("preflight_"):
+            ee._SHUTDOWN.set()
+            return ee.ExecutionReport(status="interrupted", results=[ee.EvalResult(id=commands[0].id, status="interrupted")])
+        return real_execute(commands, config, **kwargs)
+
+    monkeypatch.setattr(ee, "execute", stopped_mid_probe)
+    run_dir, _, code = run_foreground(tmp_path, fake_eval_script, monkeypatch, conditions=FOUR_CONDITIONS)
+    data = ee.Status.load(run_dir).data
+    assert data["preflight"]["pairs"] == {}
+    assert {p["state"] for p in data["pairs"].values()} == {"interrupted"}
+    assert "structural" not in ee.render_report(data)
+
+
+def _stall_probes(monkeypatch, kind="preflight_"):
+    """Make every probe (or retest) of ``kind`` outlive its limit; return the limits each was given."""
+    real_run_single = ee.run_single
+    limits: list[int] = []
+
+    def stalled(command, timeout=ee.DEFAULT_COMMAND_TIMEOUT, cwd=None, capture_dir=None, capture_name=None):
+        if capture_name and capture_name.startswith(kind):
+            limits.append(timeout)
+            return -1, float(timeout), "", f"{ee.TIMED_OUT} {timeout}s"
+        return real_run_single(command, timeout, cwd, capture_dir, capture_name)
+
+    monkeypatch.setattr(ee, "run_single", stalled)
+    return limits
+
+
+def test_a_stalled_probe_is_stopped_at_the_short_limit_and_excluded_as_not_responding(tmp_path, fake_eval_script, monkeypatch):
+    # A provider that never answers once held a probe for the full 4 hours,
+    # retried thrice. Now: one try, at the preflight limit, and a plain reason.
+    limits = _stall_probes(monkeypatch)
+    run_dir, _, _ = run_foreground(tmp_path, fake_eval_script, monkeypatch, conditions={"baseline": {"task": "task.py", "args": {}}})
+    data = ee.Status.load(run_dir).data
+    assert limits == [ee.DEFAULT_PREFLIGHT_TIMEOUT]
+    pf = data["preflight"]["pairs"]["baseline__openai-gpt-5"]
+    assert pf["outcome"] == "excluded-stalled"
+    assert pf["evidence"]["error_class"] == "stalled"
+    assert data["pairs"]["baseline__openai-gpt-5"]["state"] == "excluded-at-preflight"
+    # Its duration is the limit, not a measurement of the model's speed
+    assert "slowest preflight probe" not in (data["concurrency"].get("sandbox_evidence") or "")
+    report = ee.render_report(data)
+    assert "- **Reason**: `provider-not-responding (stalled)`" in report
+    assert "after its 15-minute limit" in report
+
+
+def test_the_preflight_limit_can_be_lengthened_and_never_exceeds_the_command_limit(tmp_path, fake_eval_script, monkeypatch):
+    limits = _stall_probes(monkeypatch)
+    run_foreground(tmp_path, fake_eval_script, monkeypatch, overrides={"preflight_timeout_seconds": 3600, "command_timeout_seconds": 1800}, conditions={"baseline": {"task": "task.py", "args": {}}})
+    assert limits == [1800]
+
+
+def test_a_stalled_retest_excludes_the_pair_too(tmp_path, fake_eval_script, monkeypatch):
+    # The probe answers with a sample error, then the provider goes quiet
+    limits = _stall_probes(monkeypatch, kind="retest_")
+    run_dir, _, _ = run_foreground(tmp_path, fake_eval_script, monkeypatch, mode="sample_error", conditions={"baseline": {"task": "task.py", "args": {}}})
+    data = ee.Status.load(run_dir).data
+    assert limits == [ee.DEFAULT_PREFLIGHT_TIMEOUT]
+    assert data["preflight"]["pairs"]["baseline__openai-gpt-5"]["outcome"] == "excluded-stalled"
+    assert "provider-not-responding" in ee.render_report(data)
+
+
+def test_a_stalled_full_run_command_is_still_retried():
+    # Outside preflight a long eval may just be long: the old retries stand
+    calls = []
+
+    def stalled(command, timeout, cwd=None, capture_dir=None, capture_name=None):
+        calls.append(command)
+        return -1, float(timeout), "", f"{ee.TIMED_OUT} {timeout}s"
+
+    config = ee.ExecutionConfig(max_parallel=1, max_retries=1, retry_backoff_seconds=[0], command_timeout=1)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(ee, "run_single", stalled)
+        mp.setattr(ee, "EXECUTE_POLL", 0.01)
+        report = ee.execute([ee.CommandSpec(id="c", command="true", log_dir="/nonexistent")], config)
+    assert len(calls) == 2
+    assert report.results[0].error_class == "stalled"
+
+
+def test_a_worker_without_inspect_fails_the_run_before_running_any_eval(tmp_path, fake_eval_script, monkeypatch):
+    # The launcher had Inspect but the worker's environment has since vanished
+    # (`uv run --with`): the run must fail saying so, not exclude every pair.
+    path, _ = make_request(tmp_path)
+    run_dir, problems = ee.prepare_run(path)
+    assert not problems, problems
+    substitute_fake_eval(run_dir, fake_eval_script)
+    monkeypatch.setattr(ee.importlib.util, "find_spec", lambda name: None)
+    assert ee.run_worker(run_dir) == 1
+    data = ee.Status.load(run_dir).data
+    assert data["state"] == "failed"
+    assert any("not importable in the worker" in e for e in data["errors"])
+    assert all(p["state"] == "pending" for p in data["pairs"].values())
 
 
 def test_sample_errors_map_to_sample_level(tmp_path, fake_eval_script, monkeypatch):
@@ -554,3 +781,57 @@ def test_rendered_report_passes_check_report(tmp_path, fake_eval_script, monkeyp
         run_dir, _, _ = run_foreground(sub, fake_eval_script, monkeypatch, mode=mode, conditions=conditions)
         defects, _ = cr.check_report("executor", ee.render_report(ee.Status.load(run_dir).data))
         assert defects == [], (mode, defects)
+
+
+# ---------------------------------------------------------------------------
+# Live sample counts while an eval runs
+# ---------------------------------------------------------------------------
+
+
+def test_live_count_reads_the_attempts_own_log(tmp_path):
+    log_dir = tmp_path / "logs"
+    assert ee.live_samples_completed(str(log_dir), since=0) is None  # no log yet
+    write_fixture_log(str(log_dir / "run.eval"), epochs=3)
+    assert ee.live_samples_completed(str(log_dir), since=0) == 3
+    # A log older than the attempt belongs to an earlier run
+    assert ee.live_samples_completed(str(log_dir), since=os.path.getmtime(log_dir / "run.eval") + 60) is None
+    # The planned size, from the header: one sample id at three epochs
+    assert ee.live_samples_planned(str(log_dir), since=0) == 3
+    assert ee.live_samples_planned(str(log_dir), since=os.path.getmtime(log_dir / "run.eval") + 60) is None
+    assert ee.live_samples_planned(str(tmp_path / "none"), since=0) is None
+
+
+def test_live_counter_updates_running_pairs_only(tmp_path):
+    import threading
+    import time
+
+    running, done = tmp_path / "logs_a", tmp_path / "logs_b"
+    write_fixture_log(str(running / "a.eval"), epochs=3)
+    write_fixture_log(str(done / "b.eval"), epochs=2)
+    # Dated after the counter starts, as an attempt's own log would be
+    for p in (running / "a.eval", done / "b.eval"):
+        os.utime(p, (time.time() + 5, time.time() + 5))
+    status = ee.Status(str(tmp_path / "status.json"), {"pairs": {
+        "a": {"state": "running", "attempts": 1, "log_dir": str(running), "samples_completed": None},
+        "b": {"state": "success", "attempts": 1, "log_dir": str(done), "samples_completed": 7},
+    }})
+
+    stop = threading.Event()
+    counter = threading.Thread(target=ee.watch_live_counts, args=(status, stop, 0.05), daemon=True)
+    counter.start()
+    try:
+        deadline = time.time() + 10
+        while status.pair("a")["samples_completed"] is None and time.time() < deadline:
+            time.sleep(0.05)
+    finally:
+        stop.set()
+        counter.join()
+
+    saved = json.loads((tmp_path / "status.json").read_text())
+    assert saved["pairs"]["a"]["samples_completed"] == 3
+    # The header's plan, one sample id at three epochs, gives the size early
+    assert saved["pairs"]["a"]["samples_planned"] == 3
+    # A finished pair keeps its final count from the finished log
+    assert saved["pairs"]["b"]["samples_completed"] == 7
+    assert "samples_planned" not in saved["pairs"]["b"]
+    assert_no_leak(json.dumps(saved), "status.json")

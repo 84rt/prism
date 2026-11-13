@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 from pathlib import Path
 
 import pytest
@@ -186,8 +188,87 @@ def test_bash_timeouts_reach_the_options_on_every_route(monkeypatch, route):
     assert env["BASH_DEFAULT_TIMEOUT_MS"] == "600000"
     assert env["BASH_MAX_TIMEOUT_MS"] == "3600000"
     assert env["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
-    # The Executor's `wait` poll (540 s) fits under the default.
-    assert int(env["BASH_DEFAULT_TIMEOUT_MS"]) > 540_000
+    # The Executor's long `wait` (3300 s) fits under the ceiling.
+    assert int(env["BASH_MAX_TIMEOUT_MS"]) > 3300_000
+
+
+def test_claude_sub_agents_default_to_newest_opus_at_pinned_effort(monkeypatch):
+    """The default model's own effort default must not decide how hard sub-agents think."""
+    built = _stub_sdk(monkeypatch, _result())
+    asyncio.run(runner.run_agent("p", "s", ["Read"], [], "X"))
+    kwargs = built[0].kwargs
+    assert kwargs["model"] == runner.DEFAULT_MODEL == "claude-opus-5-5"
+    assert kwargs["effort"] == runner.DEFAULT_EFFORT == "high"
+
+
+def test_non_claude_sub_agents_get_no_effort(monkeypatch):
+    """Like adaptive thinking, effort is not sent to a non-Claude model on OpenRouter."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    built = _stub_sdk(monkeypatch, _result())
+    asyncio.run(runner.run_agent("p", "s", ["Read"], [], "X", model="openai/gpt-6.1-terra", route="openrouter"))
+    assert built[0].kwargs["effort"] is None
+
+
+def test_executor_waits_long_enough_to_spare_its_cache():
+    """The Executor's wait must be one long call, not a short poll.
+
+    A turn after more than five idle minutes re-reads the whole context at full
+    price, so a short poll made waiting most of an Executor's cost. The wait
+    must also fit inside the Bash timeout the prompt asks for, and that inside
+    the runner's ceiling.
+    """
+    from subagents.experiment_executor.system_prompt import SYSTEM_PROMPT
+
+    waits = [int(t) for t in re.findall(r"execute_evals\.py wait <run_dir> --timeout (\d+)", SYSTEM_PROMPT)]
+    assert waits and all(t >= 3000 for t in waits)
+    bash_ms = int(re.search(r"`timeout` parameter set to (\d+) ms", SYSTEM_PROMPT).group(1))
+    assert max(waits) * 1000 < bash_ms <= runner.BASH_MAX_TIMEOUT_MS
+
+
+@pytest.mark.parametrize("role", ROLES)
+def test_only_roles_that_wait_long_get_a_one_hour_cache(monkeypatch, tmp_path, role):
+    """The Analyst and Executor wait 5-55 minutes on their own commands; nobody else does.
+
+    A 1-hour cache write costs 2x the input price against the 5-minute
+    cache's 1.25x, so it pays only where waits would otherwise expire the
+    cache; the other roles keep the CLI's default.
+    """
+    monkeypatch.delenv(runner.CACHE_TTL_ENV, raising=False)
+    module, entry, data = _requests(tmp_path)[role]
+    built = _stub_sdk(monkeypatch, _result())
+    asyncio.run(entry(cwd="/w/target", **data))
+    env = built[0].kwargs["env"]
+    if role in ("analyst", "executor"):
+        assert env[runner.CACHE_TTL_ENV] == "1h"
+    else:
+        assert runner.CACHE_TTL_ENV not in env
+
+
+def test_cache_ttl_is_checked_and_a_user_export_wins(monkeypatch):
+    monkeypatch.delenv(runner.CACHE_TTL_ENV, raising=False)
+    assert runner._cache_ttl_env(None) == {}
+    assert runner._cache_ttl_env("1h") == {runner.CACHE_TTL_ENV: "1h"}
+    with pytest.raises(ValueError):
+        runner._cache_ttl_env("2h")
+    monkeypatch.setenv(runner.CACHE_TTL_ENV, "5m")
+    assert runner._cache_ttl_env("1h") == {runner.CACHE_TTL_ENV: "5m"}
+
+
+def test_bundled_cli_reads_the_cache_ttl_variable():
+    """The pinned SDK's bundled CLI still knows the variable the runner sets.
+
+    A renamed variable would be ignored silently and the cache would fall back
+    to 5 minutes, so the name is checked against the binary itself.
+    """
+    import claude_agent_sdk
+
+    cli = os.path.join(os.path.dirname(claude_agent_sdk.__file__), "_bundled", "claude")
+    if not os.path.exists(cli):
+        pytest.skip("no bundled CLI in this install")
+    with open(cli, "rb") as f:
+        data = f.read()
+    assert runner.CACHE_TTL_ENV.encode() in data
+    assert b'"5m" or "1h"' in data
 
 
 def test_user_exported_bash_timeout_wins(monkeypatch):

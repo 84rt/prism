@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     ClaudeSDKError,
     CLIConnectionError,
     CLINotFoundError,
+    EffortLevel,
     HookMatcher,
     ProcessError,
     ResultMessage,
@@ -174,12 +175,21 @@ def reask_section(
 # `subagent_model` input field. Kept as a single default so the override is the
 # only thing that ever varies (e.g. a less refusal-prone model on a
 # dangerous-capability eval, or a cheaper/weaker model on the user's request).
-# Defaults to the most capable Opus tier: per-token cost is equal across Opus
-# models, so there is no reason to run the sub-agents on a weaker one — the extra
-# capability sharpens the Explorer's site reasoning and the Analyst's scanner /
-# stats work, which is where investigation quality is won. (A Sonnet-class model
-# is the natural cost/speed downgrade via `subagent_model` if ever wanted.)
-DEFAULT_MODEL = "claude-opus-4-8"
+# Defaults to the newest Opus: the capability sharpens the Explorer's site
+# reasoning and the Analyst's scanner / stats work, which is where investigation
+# quality is won. Newer Opus models are no dearer than older ones — Opus 5.5 is
+# cheaper than Opus 4.8 per token, and much cheaper on cache reads, which
+# dominate a long sub-agent session — so move this forward with each Opus
+# release rather than leaving it pinned. (A Sonnet-class model is the natural
+# cost/speed downgrade via `subagent_model` if ever wanted.)
+DEFAULT_MODEL = "claude-opus-5-5"
+
+# Reasoning effort every Claude sub-agent runs with. Pinned rather than left to
+# the CLI because the default differs by model (Opus 5.5's API default is
+# `medium`, a step below what Opus 4.8 ran at), and moving the default model
+# must not quietly make the sub-agents think less. Not sent to non-Claude
+# models, for the same reason as adaptive thinking (see `_resolve_thinking`).
+DEFAULT_EFFORT: EffortLevel = "high"
 
 # Extended-thinking config every sub-agent runs with unless the invocation
 # overrides it via the `subagent_thinking` input field. Adaptive thinking lets
@@ -205,6 +215,10 @@ DEFAULT_MAX_TURNS = 100
 # `scripts/launch_subagent.py` for every launch; when unset the runner only
 # logs the usage line to stderr.
 COST_FILE_ENV = "PRISM_COST_FILE"
+
+# Where a sub-agent's own Python logs the usage of each model call it makes
+# (read by `transcript_analyst/call_log/sitecustomize.py`; see `_model_calls_env`)
+MODEL_CALLS_FILE_ENV = "PRISM_MODEL_CALLS_FILE"
 
 # OpenRouter exposes an Anthropic-Messages-compatible endpoint, so the Claude
 # Code CLI the Agent SDK spawns can be pointed at it without a local proxy. This
@@ -240,14 +254,14 @@ ISOLATION_ENV: dict[str, str] = {
 # moved to the background rather than killed. In one smoke run an Analyst scan
 # did exactly that: the command left the agent's view and slipped past the
 # no-background guard in `_build_hooks`, which only sees the call as issued.
-# So every sub-agent runs with a 10-minute default (long enough for the
-# Executor's 540 s `launch_subagent.py wait` poll and a typical scan) and a
-# 60-minute ceiling an agent may request explicitly for a long scan, and with
+# So every sub-agent runs with a 10-minute default (long enough for a typical
+# scan) and a 60-minute ceiling an agent may request explicitly — the
+# Executor's 3300 s `execute_evals.py wait` and a long scan — and with
 # background tasks disabled so a timeout ends the command instead of
 # detaching it. All three names were checked against the bundled CLI of the
 # pinned `claude-agent-sdk` (0.2.165, CLI 2.1.294); a user's own exported
 # value wins, as with the context-window override — so a user who exports a
-# default below the Executor's 540 s poll reintroduces the problem.
+# ceiling below the Executor's 3300 s wait reintroduces the problem.
 BASH_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000  # 600000
 BASH_MAX_TIMEOUT_MS = 60 * 60 * 1000  # 3600000
 
@@ -266,6 +280,76 @@ def _bash_timeout_env() -> dict[str, str]:
         "BASH_DEFAULT_TIMEOUT_MS": os.environ.get("BASH_DEFAULT_TIMEOUT_MS") or str(BASH_DEFAULT_TIMEOUT_MS),
         "BASH_MAX_TIMEOUT_MS": os.environ.get("BASH_MAX_TIMEOUT_MS") or str(BASH_MAX_TIMEOUT_MS),
         "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    }
+
+
+# --- Prompt cache lifetime ----------------------------------------------------
+#
+# On an API key the CLI caches a sub-agent's context for 5 minutes. An agent
+# that waits longer on its own command — an Analyst on a 5-20 minute scan, an
+# Executor on its 55-minute `execute_evals.py wait` — returns to an expired
+# cache and pays to write its whole context again (150-200k tokens, about $1
+# on Opus 5.5 each time). A 1-hour cache costs 2x the input price per write
+# instead of 1.25x, so it pays only for roles that wait: in the sandbagging
+# rerun it saved an estimated $0.75 per Analyst and $0.90 per Executor, and
+# would have cost the Critic, Designer and Mapper $0.10-0.20 each. Roles opt in
+# through `run_agent`'s `cache_ttl`. The variable name and values were checked
+# against the bundled CLI of the pinned `claude-agent-sdk` (0.2.165); a user's
+# own exported value wins.
+CACHE_TTL_ENV = "CLAUDE_CODE_PROMPT_CACHE_TTL"
+CACHE_TTLS = ("5m", "1h")
+
+
+def _cache_ttl_env(cache_ttl: str | None) -> dict[str, str]:
+    """The prompt-cache lifetime setting for one sub-agent.
+
+    Parameters
+    ----------
+    cache_ttl : str | None
+        ``"5m"`` or ``"1h"``; None leaves the CLI's default (5 minutes on an
+        API key).
+
+    Returns
+    -------
+    dict[str, str]
+        ``{"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h"}`` for ``"1h"``, or ``{}``
+        when unset. A value the user exported takes precedence.
+
+    Raises
+    ------
+    ValueError
+        For a lifetime the CLI does not accept.
+    """
+    if cache_ttl is None:
+        return {}
+    if cache_ttl not in CACHE_TTLS:
+        raise ValueError(f"cache_ttl must be one of {CACHE_TTLS}, not {cache_ttl!r}")
+    return {CACHE_TTL_ENV: os.environ.get(CACHE_TTL_ENV) or cache_ttl}
+
+def _model_calls_env() -> dict[str, str]:
+    """Turn on the per-call usage log for the Python a sub-agent runs.
+
+    Puts ``transcript_analyst/call_log/`` (whose ``sitecustomize.py`` Python
+    loads at startup) first on ``PYTHONPATH``, and names the log file beside
+    the invocation's cost sidecar: ``cost_iter_01_analyst_4.json`` gives
+    ``model_calls_iter_01_analyst_4.jsonl``. ``scripts/spend.py`` prices it.
+
+    Returns
+    -------
+    dict[str, str]
+        ``PYTHONPATH`` and ``PRISM_MODEL_CALLS_FILE``, or ``{}`` when the launch
+        has no cost sidecar to sit beside (a run outside the launcher).
+    """
+    cost_file = os.environ.get(COST_FILE_ENV)
+    if not cost_file:
+        return {}
+    folder, name = os.path.split(cost_file)
+    stem = os.path.splitext(name)[0].removeprefix("cost_")
+    hook_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "transcript_analyst", "call_log")
+    path = [hook_dir] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])
+    return {
+        "PYTHONPATH": os.pathsep.join(path),
+        MODEL_CALLS_FILE_ENV: os.path.join(folder, f"model_calls_{stem}.jsonl"),
     }
 
 # The one project setting sub-agents relied on, passed explicitly now that
@@ -516,6 +600,27 @@ def _resolve_thinking(
     if route == "openrouter" and "claude" not in model.lower():
         return {"type": "disabled"}
     return DEFAULT_THINKING
+
+
+def _resolve_effort(model: str, route: str | None) -> EffortLevel | None:
+    """Choose the reasoning effort, sending none to non-Claude models.
+
+    Parameters
+    ----------
+    model : str
+        The resolved model string for this sub-agent.
+    route : str | None
+        The resolved route.
+
+    Returns
+    -------
+    EffortLevel | None
+        `DEFAULT_EFFORT` for a Claude model on any route; None (the provider's
+        own default) for a non-Claude model routed through OpenRouter.
+    """
+    if route == "openrouter" and "claude" not in model.lower():
+        return None
+    return DEFAULT_EFFORT
 
 _MEMORY_INSTRUCTIONS = """\
 ## Agent Memory
@@ -1236,6 +1341,8 @@ async def run_agent(
     thinking: ThinkingConfig | None = None,
     route: str | None = None,
     max_turns: int | None = None,
+    cache_ttl: str | None = None,
+    log_model_calls: bool = False,
 ) -> str:
     """Run an Agent SDK agent and return its output.
 
@@ -1280,6 +1387,14 @@ async def run_agent(
             DEFAULT_MAX_TURNS. Set per-invocation via the `subagent_max_turns`
             input field when a work order is known to need more (or fewer)
             turns than the default.
+        cache_ttl: Prompt-cache lifetime, "5m" or "1h"; None keeps the CLI's
+            default (5 minutes on an API key). Set by roles that wait on long
+            commands, so the wait doesn't expire their cache (see
+            `_cache_ttl_env`).
+        log_model_calls: If True, log the usage of every model call the
+            agent's own Python scripts make, for roles that call models
+            directly (the analyst's scanners and validators); see
+            `_model_calls_env`.
 
     Returns:
         The agent's output as a string.
@@ -1332,6 +1447,7 @@ async def run_agent(
     options = ClaudeAgentOptions(
         model=resolved_model,
         thinking=_resolve_thinking(thinking, resolved_model, route),
+        effort=_resolve_effort(resolved_model, route),
         system_prompt=system_prompt,
         # --- Isolation: the sub-agent sees only what the scaffold gives it ---
         # `tools` is the set the model is offered at all; under
@@ -1352,7 +1468,13 @@ async def run_agent(
         permission_mode="bypassPermissions",
         max_turns=max_turns or DEFAULT_MAX_TURNS,
         cwd=working_dir,
-        env={**ISOLATION_ENV, **_bash_timeout_env(), **route_env},
+        env={
+            **ISOLATION_ENV,
+            **_bash_timeout_env(),
+            **_cache_ttl_env(cache_ttl),
+            **(_model_calls_env() if log_model_calls else {}),
+            **route_env,
+        },
         **({"hooks": hooks} if hooks else {}),
     )
 

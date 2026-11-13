@@ -4,7 +4,12 @@ The tests are self-contained: they run with the pinned versions the six
 forensics runs used and never touch the case directories' venvs. Run with::
 
     uv run --with "inspect_ai==0.3.263" --with "inspect-scout==0.5.2" \
-        --with claude-agent-sdk==0.2.165 --with python-dotenv --with pytest pytest tests/
+        --with claude-agent-sdk==0.2.165 --with agent-client-protocol==0.12.1 \
+        --with python-dotenv --with pytest pytest tests/
+
+`agent-client-protocol` is pinned because Inspect imports it without an upper
+bound and its 1.0 release removed `acp.helpers`, so a fresh resolve fails at
+collection; 0.12.1 is what the demo folders' lockfiles hold.
 
 The scaffold has no package install, so the repo root (for `subagents.*`) and
 `scripts/` are put on `sys.path` here. Regression tests over the persisted
@@ -13,7 +18,8 @@ container-local and never committed.
 
 Every test runs under an autouse spend guard (see `_spend_guard`): the Agent
 SDK's `query` raises and the provider keys are unset, so no test can reach a
-paid provider by accident.
+paid provider by accident. A second autouse fixture (`_no_docker`) keeps the
+eval runner from asking the host's real Docker.
 """
 
 from __future__ import annotations
@@ -78,6 +84,20 @@ def _refuse_query(*args, **kwargs):
 
 
 @pytest.fixture(autouse=True)
+def _private_run_registry(tmp_path, monkeypatch):
+    """Give each test its own live-run registry, so test runs never count as real ones.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        The test's temporary directory.
+    monkeypatch : pytest.MonkeyPatch
+        Sets ``PRISM_RUN_REGISTRY`` for the test.
+    """
+    monkeypatch.setenv("PRISM_RUN_REGISTRY", str(tmp_path / "live_runs"))
+
+
+@pytest.fixture(autouse=True)
 def _spend_guard(request, monkeypatch):
     """Make the Agent SDK's `query` raise and clear provider keys, per test.
 
@@ -102,6 +122,43 @@ def _spend_guard(request, monkeypatch):
         monkeypatch.setattr(runner, "query", _refuse_query)
     except ImportError:  # SDK not installed: nothing can spend through it
         pass
+
+
+@pytest.fixture(autouse=True)
+def _no_docker(monkeypatch):
+    """Answer the eval runner's docker calls with "no containers", per test.
+
+    Every run ends with a leftover-container check and preflight measures its
+    sandboxes, so without this a test would ask the host's real Docker, wait
+    on a slow daemon and see other runs' containers. Tests that need Docker
+    to say something patch ``execute_evals._docker`` (or pass a stand-in) themselves.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Undoes the change after the test.
+    """
+    import execute_evals
+
+    monkeypatch.setattr(execute_evals, "_docker", lambda args, timeout=0: "")
+
+
+@pytest.fixture(autouse=True)
+def _private_price_cache(tmp_path_factory, monkeypatch):
+    """Give each test an empty price-list cache of its own.
+
+    `spend.py` keeps fetched price lists on disk; without this a test's stub
+    list would land in the user's real cache, and a real cached list would
+    price a test's models.
+
+    Parameters
+    ----------
+    tmp_path_factory : pytest.TempPathFactory
+        Makes the empty folder.
+    monkeypatch : pytest.MonkeyPatch
+        Undoes the change after the test.
+    """
+    monkeypatch.setenv("PRISM_PRICE_CACHE_DIR", str(tmp_path_factory.mktemp("price_cache")))
 
 
 # --- Forensics corpus (container-local; see the module docstring) ---
@@ -181,6 +238,7 @@ def write_fixture_log(
     task_args: dict | None = None,
     dataset_name: str | None = None,
     created: str | None = None,
+    served_model: str | None = None,
 ) -> str:
     """Write a small **scored** .eval log so the blackout tests have something to leak.
 
@@ -216,6 +274,9 @@ def write_fixture_log(
     created : str | None
         The header's ``created`` timestamp (defaults to now); the blinding
         tests use an older one to stand in for a log from another run.
+    served_model : str | None
+        The model name each sample's output reports, as a provider's reply
+        would; none by default.
 
     Returns
     -------
@@ -235,7 +296,7 @@ def write_fixture_log(
         write_eval_log,
     )
     from inspect_ai.log._log import EvalError
-    from inspect_ai.model import ChatMessageAssistant, ChatMessageUser, ModelUsage
+    from inspect_ai.model import ChatMessageAssistant, ChatMessageUser, ModelOutput, ModelUsage
     from inspect_ai.scorer import Score
 
     metrics = metrics or {"accuracy": 0.7317, "stderr": 0.0912}
@@ -272,6 +333,7 @@ def write_fixture_log(
                 scores={"grader": Score(value=0.9871)},
                 error=err,
                 model_usage={"mockllm/model": ModelUsage(input_tokens=10, output_tokens=5, total_tokens=15)},
+                **({"output": ModelOutput(model=served_model)} if served_model else {}),
             )
         )
     results = EvalResults(

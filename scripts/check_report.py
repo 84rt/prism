@@ -181,6 +181,7 @@ ROLE_HEADINGS: dict[str, dict[str | None, tuple[str, ...]]] = {
             "Condition-Model Execution Matrix",
             "Error Summary",
             "Transcript Termination Metadata",
+            "Models as Served",
             "Concurrency Decision",
             "Execution Summary",
             "Additional Notes",

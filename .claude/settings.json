@@ -138,9 +138,13 @@
       "Bash(uv run --no-project python scripts/spend.py *)",
       "Bash(uv run --with claude-agent-sdk==0.2.165 --with python-dotenv python subagents/*)",
       "Bash(uv run --no-project python scripts/ledger_to_json.py *)",
+      "Bash(uv run --no-project python scripts/run_status.py *)",
+      "Bash(uv run --no-project python scripts/prism_version.py)",
+      "Bash(uv run --no-project python scripts/prism_version.py *)",
       "Bash(uv run --no-project python scripts/check_report.py *)",
       "Bash(uv run python scripts/check_blinding.py *)",
       "Bash(uv run python scripts/dump_transcripts.py *)",
+      "Bash(uv run python scripts/headroom.py *)",
       "Bash(uv run --no-project python scripts/lint_log.py *)",
       "Bash(uv run --no-project python scripts/check_keys.py)",
       "Bash(uv run --no-project python scripts/check_keys.py *)",
@@ -148,7 +152,6 @@
       "Bash(uv run --no-project python scripts/new_ids.py *)",
       "Bash(uv run --no-project python scripts/freeze_split.py *)",
       "Bash(uv run --no-project python scripts/control_outcomes.py *)",
-      "Bash(uv pip *)",
       "Bash(uv --version)"
     ],
     "deny": [

@@ -5,11 +5,39 @@
 # running outside a container) wires up the devcontainer that will host
 # Claude Code so the symlinks resolve at runtime.
 #
-# Usage: ./install.sh /path/to/target_repo
+# With --pin, the target instead gets a frozen copy of this checkout's latest
+# commit in a hidden folder inside it (.prism/ for a scaffold named "prism"),
+# and the symlinks point there. Merges into the scaffold then reach the target
+# only when install is re-run with --pin, which moves the copy forward and
+# refuses while one of the target's investigations is still running (--force
+# skips that check). A plain re-install puts a pinned target back on live
+# links and removes the copy, under the same check. A target's own edits to
+# the scaffold can live in .prism-local.patch beside the copy: --pin applies
+# it to each new copy and stops if it no longer fits.
+#
+# Usage: ./install.sh /path/to/target_repo [--pin] [--force]
 set -euo pipefail
 
 SCAFFOLD_DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET_DIR="${1:?Usage: ./install.sh /path/to/target_repo}"
+USAGE="Usage: ./install.sh /path/to/target_repo [--pin] [--force]"
+TARGET_DIR=""
+PIN=0
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --pin)   PIN=1 ;;
+        --force) FORCE=1 ;;
+        -*)      echo "Error: unknown option $arg"; echo "$USAGE"; exit 1 ;;
+        *)
+            if [ -n "$TARGET_DIR" ]; then echo "$USAGE"; exit 1; fi
+            TARGET_DIR="$arg"
+            ;;
+    esac
+done
+if [ -z "$TARGET_DIR" ]; then
+    echo "$USAGE"
+    exit 1
+fi
 
 # Derive scaffold-specific names from the scaffold directory so the install
 # script stays neutral if the repo is renamed or forked. The in-container
@@ -76,12 +104,92 @@ case "$MODE" in
         ;;
 esac
 
+# --- Pinned copy: where it lives, and whether it may be replaced now ---
+# The copy sits inside the target, so the symlinks into it can be relative
+# and resolve the same wherever the target is mounted: a pinned install needs
+# no devcontainer mount, in either mode.
+PIN_DIR="$TARGET_DIR/.$SCAFFOLD_NAME"
+PIN_MARKER="PINNED_COMMIT"
+LOCAL_PATCH="$TARGET_DIR/.$SCAFFOLD_NAME-local.patch"
+if [ "$PIN" = "0" ] && [ -f "$LOCAL_PATCH" ]; then
+    echo "Warning: ${LOCAL_PATCH#$TARGET_DIR/} is applied only to a pinned copy; without --pin it is ignored."
+fi
+if [ "$PIN" = "1" ]; then
+    MODE="pinned"
+    if ! git -C "$SCAFFOLD_DIR" rev-parse --verify -q HEAD >/dev/null; then
+        echo "Error: --pin copies the scaffold's latest commit, but $SCAFFOLD_DIR is not a git checkout with one"
+        exit 1
+    fi
+    PIN_COMMIT="$(git -C "$SCAFFOLD_DIR" rev-parse HEAD)"
+    SCAFFOLD_SRC="$PIN_DIR (commit ${PIN_COMMIT:0:7})"
+fi
+
+# A folder of the copy's name without install's marker is the target's own:
+# never replace it (uninstall and a plain re-install already leave it alone)
+if [ "$PIN" = "1" ] && [ -e "$PIN_DIR" ] && [ ! -f "$PIN_DIR/$PIN_MARKER" ]; then
+    echo "Error: ${PIN_DIR#$TARGET_DIR/} already exists and is not a pinned copy made by this installer."
+    echo "  Move or rename it, then re-run with --pin."
+    exit 1
+fi
+
+# Replacing or removing an existing copy changes the files a running lead and
+# its helpers read next, which is exactly what pinning exists to prevent.
+if [ -f "$PIN_DIR/$PIN_MARKER" ] && [ "$FORCE" = "0" ]; then
+    if ! python3 "$SCAFFOLD_DIR/scripts/_live_runs.py" "$TARGET_DIR"; then
+        echo ""
+        echo "Error: not changing $SCAFFOLD_NAME's pinned copy while a run is going."
+        echo "  Re-run once it has finished, or add --force if it is not really running."
+        echo "  To start another run on a newer $SCAFFOLD_NAME now, install it with --pin into a"
+        echo "  second copy of this repo (e.g. git worktree add ../$(basename "$TARGET_DIR")-2) and run there."
+        exit 1
+    fi
+fi
+
 echo "Installing $SCAFFOLD_NAME scaffold"
 echo "  Scaffold:     $SCAFFOLD_DIR"
 echo "  Target:       $TARGET_DIR"
 echo "  Mode:         $MODE"
 echo "  Symlinks to:  $SCAFFOLD_SRC"
 echo ""
+
+# --- Write the pinned copy (or remove a stale one) ---
+# The commit is exported, not the working tree, so uncommitted edits never
+# reach a run. It is written beside the old copy and swapped in, so a reader
+# never sees a half-written tree.
+if [ "$PIN" = "1" ]; then
+    if [ -n "$(git -C "$SCAFFOLD_DIR" status --porcelain --untracked-files=no)" ]; then
+        echo "  Note: $SCAFFOLD_DIR has uncommitted changes; the copy leaves them out"
+    fi
+    PIN_NEW="$PIN_DIR.new.$$"
+    rm -rf "$PIN_NEW"
+    mkdir "$PIN_NEW"
+    git -C "$SCAFFOLD_DIR" archive --format=tar HEAD | tar -x -C "$PIN_NEW"
+    git -C "$SCAFFOLD_DIR" log -1 --format='%H%n%cI%n%s' HEAD > "$PIN_NEW/$PIN_MARKER"
+
+    # A target may carry its own edits to the scaffold as a patch file beside
+    # the copy (paths relative to the scaffold root), re-applied to every new
+    # copy. No fuzz: a patch that no longer fits exactly stops the install,
+    # leaving the old copy in place, rather than landing in the wrong spot.
+    if [ -f "$LOCAL_PATCH" ]; then
+        if ! patch -p1 -s -N -F 0 -d "$PIN_NEW" -i "$LOCAL_PATCH" >/dev/null; then
+            rm -rf "$PIN_NEW"
+            echo "Error: ${LOCAL_PATCH#$TARGET_DIR/} no longer applies to $SCAFFOLD_NAME at ${PIN_COMMIT:0:7}."
+            echo "  The pinned copy is unchanged. Refresh the patch against the new commit and re-run."
+            exit 1
+        fi
+        # Recorded in the marker so scripts/prism_version.py can name it in reports
+        echo "local-edits ${LOCAL_PATCH#$TARGET_DIR/}" >> "$PIN_NEW/$PIN_MARKER"
+        echo "Applied this folder's own edits: ${LOCAL_PATCH#$TARGET_DIR/}"
+    fi
+
+    if [ -e "$PIN_DIR" ]; then
+        mv "$PIN_DIR" "$PIN_DIR.old.$$"
+    fi
+    mv "$PIN_NEW" "$PIN_DIR"
+    rm -rf "$PIN_DIR.old.$$"
+    echo "Pinned copy: .$SCAFFOLD_NAME/ at ${PIN_COMMIT:0:7} ($(sed -n 3p "$PIN_DIR/$PIN_MARKER"))"
+    echo ""
+fi
 
 # In-target marker tracking symlinked directories that install.sh promoted
 # to real directories. Used by uninstall.sh to reverse them. Each line:
@@ -138,12 +246,20 @@ ensure_local_dir() {
 }
 
 # --- Helper: create a symlink pointing at the mode-appropriate scaffold src ---
+# Pinned links are relative, one "../" per directory level of the file, e.g.
+# scripts/spend.py -> ../.prism/scripts/spend.py.
 link_file() {
     local rel_path="$1"
     local src="$SCAFFOLD_SRC/$rel_path"
     local dst="$TARGET_DIR/$rel_path"
     local dst_dir
     dst_dir="$(dirname "$dst")"
+
+    if [ "$PIN" = "1" ]; then
+        local up="" slashes="${rel_path//[^\/]/}" i
+        for ((i = 0; i < ${#slashes}; i++)); do up="../$up"; done
+        src="$up.$SCAFFOLD_NAME/$rel_path"
+    fi
 
     ensure_local_dir "$dst_dir"
 
@@ -175,6 +291,9 @@ link_file "scripts/check_keys.py"
 link_file "scripts/new_ids.py"
 link_file "scripts/freeze_split.py"
 link_file "scripts/control_outcomes.py"
+link_file "scripts/headroom.py"
+link_file "scripts/run_status.py"
+link_file "scripts/prism_version.py"
 
 # subagents
 link_file "subagents/__init__.py"
@@ -193,6 +312,7 @@ link_file "subagents/experiment_executor/system_prompt.py"
 
 link_file "subagents/transcript_analyst/__init__.py"
 link_file "subagents/transcript_analyst/agent.py"
+link_file "subagents/transcript_analyst/call_log/sitecustomize.py"
 link_file "subagents/transcript_analyst/forensic_checks.py"
 link_file "subagents/transcript_analyst/main.py"
 link_file "subagents/transcript_analyst/system_prompt.py"
@@ -234,6 +354,7 @@ link_file ".claude/docs/investigator/model_forensics_principles.md"
 link_file ".claude/docs/investigator/orchestrator_responsibilities.md"
 link_file ".claude/docs/references/scout_reference.md"
 link_file ".claude/docs/investigator/subagent_invocation.md"
+link_file ".claude/docs/pipelines.json"
 
 # .claude/skills/orchestrate
 link_file ".claude/skills/orchestrate/SKILL.md"
@@ -250,6 +371,14 @@ link_file ".claude/skills/diagnose/perturbation-design-patterns.md"
 
 # .claude/settings.json
 link_file ".claude/settings.json"
+
+# --- A plain install over a pinned target: the copy is now unused ---
+# Removed only after every link points back at the live scaffold, so no link
+# is left dangling in between.
+if [ "$PIN" = "0" ] && [ -f "$PIN_DIR/$PIN_MARKER" ]; then
+    rm -rf "$PIN_DIR"
+    echo "  Removed the pinned copy .$SCAFFOLD_NAME/: links now follow $SCAFFOLD_SRC"
+fi
 
 # --- Handle .gitignore (backup and append scaffold entries) ---
 echo ""
@@ -275,6 +404,9 @@ GITIGNORE_ENTRIES=(
     "scripts/new_ids.py"
     "scripts/freeze_split.py"
     "scripts/control_outcomes.py"
+    "scripts/headroom.py"
+    "scripts/run_status.py"
+    "scripts/prism_version.py"
     ".claude/docs/investigator/orchestrator_analyst_guide.md"
     ".claude/docs/contracts/analyst_forensic_addendum.md"
     ".claude/docs/contracts/analyst_interface_contract.md"
@@ -293,6 +425,7 @@ GITIGNORE_ENTRIES=(
     ".claude/docs/references/scout_reference.md"
     ".claude/docs/investigator/subagent_invocation.md"
     ".claude/skills/control/"
+    ".claude/docs/pipelines.json"
     ".claude/skills/diagnose/"
     ".claude/skills/orchestrate/"
     ".claude/settings.json"
@@ -301,6 +434,7 @@ GITIGNORE_ENTRIES=(
     ".devcontainer/devcontainer.json.pre-scaffold"
     ".gitignore.pre-scaffold"
     ".scaffold-localizations"
+    "/.$SCAFFOLD_NAME/"
 )
 for entry in "${GITIGNORE_ENTRIES[@]}"; do
     if [ -f "$TARGET_DIR/.gitignore" ] && grep -qF "$entry" "$TARGET_DIR/.gitignore"; then
@@ -396,7 +530,7 @@ echo "Next steps:"
 step=1
 echo "  $step. Ensure Claude Code is installed (https://claude.com/product/claude-code)"
 step=$((step + 1))
-if [ "$MODE" = "in_container" ]; then
+if [ "$MODE" = "in_container" ] || [ "$MODE" = "pinned" ]; then
     echo "  $step. Launch Claude Code from inside the target repo (cd \"$TARGET_DIR\"),"
     echo "      since skill discovery is rooted at the current working directory"
     step=$((step + 1))
@@ -424,5 +558,11 @@ step=$((step + 1))
 echo "  $step. Launch the orchestrator in Claude Code: /orchestrate [research question]"
 echo "      or the model-forensics diagnostician: /diagnose [transcript + behaviour]"
 echo ""
+if [ "$MODE" = "pinned" ]; then
+    echo "Pinned: scaffold changes reach this target only when you re-run"
+    echo "  $SCAFFOLD_DIR/install.sh \"$TARGET_DIR\" --pin"
+    echo "between runs."
+    echo ""
+fi
 echo "Tip: run the lead agent (Orchestrator or Diagnostician) on the most recent Claude model available —"
 echo "we observed weaker scaffold compliance on older models (e.g. Opus 4.5)."

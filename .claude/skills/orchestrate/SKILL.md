@@ -40,8 +40,8 @@ The pipeline is not optional and is not a default you may opt out of when the ev
 | Agent | Receives | Returns |
 |-------|----------|---------|
 | Environment Explorer | Hypothesis, experiment description, environment path, optional constraints | Structured briefing: environment summary, pipeline model, modification sites with diffs, variant dependencies, risk assessment, open questions. See `explorer_interface_contract.md` |
-| Experiment Executor | Experiment name, experiment dir, conditions, models, model routing, overrides | Execution report: matrix, error taxonomy, termination metadata, concurrency decision, zero-sample pairs — never scores |
-| Transcript Analyst | **Neutral topic** (never the hypothesis), transcript source (condition→path mapping), construal checks?, scanning model?, constraints? | Scanner definitions, validation metrics (incl. per-condition precision audit), quantified results, construal-check ratings (you derive the verdicts), scan results path, transcript exclusions, excerpts |
+| Experiment Executor | Experiment name, experiment dir, conditions, models, model routing, overrides | Execution report: preflight exclusions, matrix, error taxonomy, termination metadata, concurrency decision, zero-sample pairs — never scores. See `executor_interface_contract.md` |
+| Transcript Analyst | **Neutral topic** (never the hypothesis), transcript source (condition→path mapping), construal checks? (de-identified), scanning model?, constraints?, artefacts dir?, execution notes? (non-directional execution facts only) | Scanner definitions, validation metrics (incl. per-condition precision audit), quantified results, construal-check ratings (you derive the verdicts), scan results path, transcript exclusions, excerpts |
 
 **Critical rule:** The Transcript Analyst must NEVER receive the hypothesis. It receives only a neutral topic that you construct. This is the primary safeguard against confirmation bias. See `hypothesis-methodology.md` for detailed guidance on neutral topic translation. Nor may it learn which condition is which: conditions run under opaque ids, and `scripts/check_blinding.py` gates every Analyst invocation — no real condition name or role word may reach the Analyst through a label, a path, or a log header (`orchestrator_responsibilities.md §Step 2g`).
 
@@ -49,11 +49,11 @@ The pipeline is not optional and is not a default you may opt out of when the ev
 
 **Scope boundaries:** Do NOT load `.claude/docs/references/inspect_reference.md` (that's for the Executor). The Analyst's system prompt and tooling (Inspect Scout) are not your concern. Loading sub-agent reference material into your context wastes tokens and creates confusion about role boundaries.
 
-**Run sub-agents through the detached launcher.** Write the input JSON to a file and launch it with `scripts/launch_subagent.py launch <role> …`, then poll with `wait` (see the invocation reference's §General Pattern). Never run a sub-agent's CLI in the foreground: the Executor now runs for as long as the evals do, which outlasts the Bash tool's 10-minute cap, and a foreground or `nohup … &` launch dies with the session.
+**Run sub-agents through the detached launcher.** Write the input JSON to a file and launch it with `scripts/launch_subagent.py launch <role> …`, then wait for it with a background `wait` (see the invocation reference's §General Pattern). Never run a sub-agent's CLI in the foreground: the Executor runs for as long as the evals do, which outlasts the Bash tool's 10-minute cap, and a foreground or `nohup … &` launch dies with the session.
 
 **Artefacts management.** Create an `artefacts/` directory within each iteration directory at `investigations/<investigation_name>/<iteration_name>/artefacts/` and pass it to the launcher as `--artefacts-dir`, with the iteration name as `--tag`. The launcher writes each report to `artefacts/<role>/report_<tag>_<role>_<n>.md` — there is no separate save step; cite that path in the log. Pass the same `artefacts/` path to the Transcript Analyst via its `artefacts_dir` input field — it writes its own outputs to `artefacts/analyst/`. This keeps all iteration outputs co-located.
 
-**Working rules for an unattended run** — each one cost a smoke run turns or stalled it on a permission prompt (details: `orchestrator_responsibilities.md §State Management`):
+**Working rules for an unattended run** — breaking one wastes turns or stalls the run on a permission prompt (details: `orchestrator_responsibilities.md §State Management`):
 
 - **Never read or source `.env`** — no `cat`, `grep`, `source`, or `dotenv` one-liner, through any interpreter. Check keys with `uv run --no-project python scripts/check_keys.py` (presence only, never values); the launcher and Inspect load `.env` themselves.
 - **Write and append files with the Write/Edit tools**, never shell redirection (`cat > file <<EOF`, `>> INVESTIGATION-LOG.md`).
@@ -68,14 +68,14 @@ The full pipeline has three phases:
 ```
 Phase 1: Scoping Discussion (with user)
     → Refine hypothesis, identify eval environment, agree on models and parameters
-Phase 2: Investigation Loop (autonomous, may repeat up to ~3 iterations)
+    → Headroom survey: can the target behaviour move on each eval × model cell at all?
+Phase 2: Investigation Loop (autonomous, may repeat up to 3 iterations)
     → Explorer → review → apply modifications → Executor → review → translate topic → Analyst → interpret → decide
 Phase 3: Report to User
     → Synthesize findings across iterations, present evidence, suggest next steps
 ```
 
-For detailed step-by-step responsibilities at each phase, consult:
-**@.claude/docs/investigator/orchestrator_responsibilities.md**
+Step-by-step responsibilities at each phase, edge cases and anti-patterns: **@.claude/docs/investigator/orchestrator_responsibilities.md** — read it in full before Phase 1.
 
 ## State Management
 
@@ -90,7 +90,7 @@ Maintain `INVESTIGATION-LOG.md` at the investigation root (`investigations/<inve
 ## How to Begin
 
 **If `$ARGUMENTS` names an investigation directory containing `RESUME.md`:**
-Resume it — do not start fresh or re-run Phase 1. It was suspended because credentials ran out (`orchestrator_responsibilities.md §Sub-Agent Failure Handling`). First verify the frozen artefacts `RESUME.md` lists — every pre-registration table re-hashes to its recorded value from its `INVESTIGATION-LOG.md` line range, iteration directories untouched; a mismatch means it is not resumable as the same investigation, so stop and tell the user. Confirm each named credential with one minimal call (still capped → stay suspended and say so). Write a `### Resumed` block (`### Resumed (2)` for a repeat) into the log under the iteration holding the `### Suspension` block, relaunch from the persisted requests with the commands in `RESUME.md` (or re-derive them with `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished`), and continue at the step it names; unanalysed iterations are scored against their tables as written. Then rename `RESUME.md` to `RESUMED-<n>.md` so the directory is not resumed twice. Precedent: two archived forensic runs improvised a `RESUME.md` and later scored already-executed rounds against their untouched tables.
+Resume it — do not start fresh or re-run Phase 1. It was suspended because credentials ran out (`orchestrator_responsibilities.md §Sub-Agent Failure Handling`). First verify the frozen artefacts `RESUME.md` lists — every pre-registration table re-hashes to its recorded value from its `INVESTIGATION-LOG.md` line range, iteration directories untouched; a mismatch means it is not resumable as the same investigation, so stop and tell the user. Confirm each named credential with one minimal call (still capped → stay suspended and say so). Write a `### Resumed` block (`### Resumed (2)` for a repeat) into the log under the iteration holding the `### Suspension` block, relaunch from the persisted requests with the commands in `RESUME.md` (or re-derive them with `uv run python scripts/launch_subagent.py list investigations/<name> --unfinished`), and continue at the step it names; unanalysed iterations are scored against their tables as written. Then rename `RESUME.md` to `RESUMED-<n>.md` so the directory is not resumed twice.
 
 **Otherwise, if `$ARGUMENTS` is provided:**
 Treat it as the research question. Begin Phase 1 by working with the user to refine it into a testable hypothesis. Read `hypothesis-methodology.md` for the refinement framework.
@@ -105,6 +105,7 @@ Ask the user: "What behaviour would you like to investigate?" Then proceed with 
 4. Execution parameters — sample limit, epochs, any overrides
 5. Autonomy agreement — see below
 6. Investigation log initialized — Agreed Scope filled out (Research question, Models, Eval environment, Execution parameters) and iteration 1's *Hypothesis this iteration → Statement* written before the Explorer is launched
+7. Headroom survey — each candidate eval, unmodified, run on each candidate model at about 20 samples per cell, read with `scripts/headroom.py`, and its table and gate written to the log's `## Headroom Survey` block. No iteration is designed on a cell tagged `[floor]` or `[ceiling]` (`orchestrator_responsibilities.md §Phase 1, step 9`)
 
 ## Autonomy Agreement
 
@@ -114,19 +115,20 @@ Before entering Phase 2, explicitly discuss with the user how much autonomy the 
 - **Early stopping**: Under what circumstances should the orchestrator pause and present findings rather than continuing? (e.g., "stop if any condition shows a large effect", "stop if the result is null", "always stop after each iteration")
 - **Follow-up autonomy**: Should the orchestrator choose its own follow-up hypotheses, or present options for the user to select? (e.g., "propose 2-3 next steps and let me choose" vs. "use your judgement")
 - **Scope of modifications**: Is the orchestrator free to modify task files, create new conditions, and restructure experiments? Or should it propose changes and wait for approval?
-- **Parallelism**: Does the user have resource constraints or preferences on concurrent eval execution? If so, pass `max_parallel` in the Executor's `overrides`. If not, the batch runner's conservative ceiling applies.
+- **Parallelism**: Does the user have resource constraints or preferences on concurrent eval execution? If so, agree the number of samples in flight (`max_parallel` × `max_connections`, also the number of live sandboxes) and pass both in the Executor's `overrides`, spreading it across pairs rather than piling it on one (`inspect_reference.md §Concurrency heuristics`). If not, the batch runner sizes it automatically from the machine and any other runs on it.
 - **Spend ceiling**: The budget the investigation must stay within, observed before each decision with `scripts/spend.py`; agree whether crossing a projected overrun may trigger a budget exit autonomously or must be surfaced first.
 - **Research-scope boundary**: The strategic/tactical line for autonomous decisions is defined by the Phase 1 Agreed Scope (recorded in the investigation log). Actions that stay inside the agreed scope — same research question, agreed models, agreed eval, within the iteration cap and budget — are tactical; actions that move outside it are strategic and trigger consultation. The scope's width is set by the user at Phase 1 and **can be renegotiated at any time during the investigation**, not only at scoping. The autonomy agreement above governs *what to do* when an out-of-scope decision arises; the scope itself sets *which* decisions are out-of-scope.
 
 Record the agreement in the investigation log. When in doubt about whether to continue or pause, **default to pausing** — the cost of an unnecessary check-in is low, but the cost of running an uninformative experiment is real (time, compute, and analytical complexity).
 
-## Key References
+## Reading Plan
 
-- **Hypothesis refinement:** Read `hypothesis-methodology.md` for the full formulation framework, worked examples, neutral topic translation, and iteration logic.
-- **Experimental design patterns:** Read `experimental-design-patterns.md` for condition design, sample sizing, confound management, and failure handling.
-- **Methodological principles:** Read `@.claude/docs/investigator/eval_science_principles.md` for the science-of-evaluations framework, construct validity, and common methodological pitfalls.
-- **Analyst delegation:** Read `@.claude/docs/investigator/orchestrator_analyst_guide.md` for how to construct neutral topics, pre-check execution data, and interpret the analyst's report.
-- **Analyst interface contract:** Read `@.claude/docs/contracts/analyst_interface_contract.md` for the exact request and report formats shared between orchestrator and analyst.
-- **Explorer interface contract:** Read `@.claude/docs/contracts/explorer_interface_contract.md` for the exact request and report formats shared between orchestrator and explorer.
-- **Sub-agent invocation:** Read `@.claude/docs/investigator/subagent_invocation.md` for exact CLI commands, JSON input schemas, and expected outputs.
-- **Pipeline mechanics:** Read `@.claude/docs/investigator/orchestrator_responsibilities.md` for detailed step-by-step responsibilities, edge cases, and anti-patterns.
+Loaded now: this skill, `subagent_invocation.md` and `orchestrator_responsibilities.md` (read it in full before Phase 1). Everything else is read when a step needs it, so it does not ride along in every turn:
+
+| Read | When |
+|---|---|
+| `.claude/skills/orchestrate/hypothesis-methodology.md` | Before Phase 1 (formulation framework, worked examples, neutral topic translation, iteration logic) |
+| `.claude/docs/investigator/eval_science_principles.md` | Before Phase 1 (construct validity, the five validity questions, common pitfalls); by section afterwards |
+| `.claude/skills/orchestrate/experimental-design-patterns.md` | Before the first Step 2b (condition design, sample sizing, confound management, failure handling) |
+| `.claude/docs/investigator/orchestrator_analyst_guide.md` | Before the first Step 2f (neutral topics, pre-checking execution data, interpreting the Analyst's report, deriving construal-check verdicts) |
+| `.claude/docs/contracts/explorer_interface_contract.md`, `analyst_interface_contract.md` | Only to settle a question about one of their fields or report sections — `subagent_invocation.md` gives every request field |

@@ -3,13 +3,32 @@
 #
 # Only removes symlinks that point into this scaffold repo (either via the
 # in-container mount path or via $SCAFFOLD_DIR directly, matching install.sh's
-# two modes). Non-symlink files are never touched.
+# two modes). Non-symlink files are never touched. Refuses while one of the
+# target's investigations is still running, since removing the links (and a
+# pinned copy) pulls the scaffold out from under its lead and helpers;
+# --force skips that check, as for install.sh.
 #
-# Usage: ./uninstall.sh /path/to/target_repo
+# Usage: ./uninstall.sh /path/to/target_repo [--force]
 set -euo pipefail
 
 SCAFFOLD_DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET_DIR="${1:?Usage: ./uninstall.sh /path/to/target_repo}"
+USAGE="Usage: ./uninstall.sh /path/to/target_repo [--force]"
+TARGET_DIR=""
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --force) FORCE=1 ;;
+        -*)      echo "Error: unknown option $arg"; echo "$USAGE"; exit 1 ;;
+        *)
+            if [ -n "$TARGET_DIR" ]; then echo "$USAGE"; exit 1; fi
+            TARGET_DIR="$arg"
+            ;;
+    esac
+done
+if [ -z "$TARGET_DIR" ]; then
+    echo "$USAGE"
+    exit 1
+fi
 
 # Derive scaffold name and in-container mount path the same way install.sh
 # does, so uninstall recognises symlinks created by either mode without
@@ -24,25 +43,38 @@ fi
 
 TARGET_DIR="$(cd "$TARGET_DIR" && pwd)"
 
+if [ "$FORCE" = "0" ] && ! python3 "$SCAFFOLD_DIR/scripts/_live_runs.py" "$TARGET_DIR"; then
+    echo ""
+    echo "Error: not uninstalling $SCAFFOLD_NAME while a run is going."
+    echo "  Re-run once it has finished, or add --force if it is not really running."
+    exit 1
+fi
+
 echo "Uninstalling $SCAFFOLD_NAME scaffold"
 echo "  Scaffold: $SCAFFOLD_DIR"
 echo "  Target:   $TARGET_DIR"
 echo ""
 
 # --- Helper: remove a symlink only if it points into the scaffold ---
-# Accepts symlinks created in either install mode: host-mode symlinks point
-# at $CONTAINER_SCAFFOLD/<rel_path>, in_container-mode symlinks point at
-# $SCAFFOLD_DIR/<rel_path>. Any other target is left alone to avoid removing
-# user-managed symlinks that happen to share a relative path.
+# Accepts symlinks created in any install mode: host-mode symlinks point at
+# $CONTAINER_SCAFFOLD/<rel_path>, in_container-mode symlinks at
+# $SCAFFOLD_DIR/<rel_path>, and --pin symlinks at the target's own pinned
+# copy by a relative path (scripts/spend.py -> ../.prism/scripts/spend.py).
+# Any other target is left alone to avoid removing user-managed symlinks
+# that happen to share a relative path.
+PIN_DIR="$TARGET_DIR/.$SCAFFOLD_NAME"
 unlink_file() {
     local rel_path="$1"
     local dst="$TARGET_DIR/$rel_path"
+    local up="" slashes="${rel_path//[^\/]/}" i
+    for ((i = 0; i < ${#slashes}; i++)); do up="../$up"; done
 
     if [ -L "$dst" ]; then
         local link_target
         link_target="$(readlink "$dst")"
         if [ "$link_target" = "$CONTAINER_SCAFFOLD/$rel_path" ] \
-           || [ "$link_target" = "$SCAFFOLD_DIR/$rel_path" ]; then
+           || [ "$link_target" = "$SCAFFOLD_DIR/$rel_path" ] \
+           || [ "$link_target" = "$up.$SCAFFOLD_NAME/$rel_path" ]; then
             rm "$dst"
             echo "  Removed: $rel_path"
         else
@@ -120,6 +152,9 @@ unlink_file "scripts/check_keys.py"
 unlink_file "scripts/new_ids.py"
 unlink_file "scripts/freeze_split.py"
 unlink_file "scripts/control_outcomes.py"
+unlink_file "scripts/headroom.py"
+unlink_file "scripts/run_status.py"
+unlink_file "scripts/prism_version.py"
 
 # subagents
 unlink_file "subagents/__init__.py"
@@ -138,6 +173,7 @@ unlink_file "subagents/experiment_executor/system_prompt.py"
 
 unlink_file "subagents/transcript_analyst/__init__.py"
 unlink_file "subagents/transcript_analyst/agent.py"
+unlink_file "subagents/transcript_analyst/call_log/sitecustomize.py"
 unlink_file "subagents/transcript_analyst/forensic_checks.py"
 unlink_file "subagents/transcript_analyst/main.py"
 unlink_file "subagents/transcript_analyst/system_prompt.py"
@@ -179,6 +215,7 @@ unlink_file ".claude/docs/investigator/model_forensics_principles.md"
 unlink_file ".claude/docs/investigator/orchestrator_responsibilities.md"
 unlink_file ".claude/docs/references/scout_reference.md"
 unlink_file ".claude/docs/investigator/subagent_invocation.md"
+unlink_file ".claude/docs/pipelines.json"
 
 # .claude/skills/orchestrate
 unlink_file ".claude/skills/orchestrate/SKILL.md"
@@ -195,6 +232,14 @@ unlink_file ".claude/skills/diagnose/perturbation-design-patterns.md"
 
 # .claude/settings.json
 unlink_file ".claude/settings.json"
+
+# --- Remove the pinned copy (install.sh --pin) ---
+# Only a folder carrying install's marker file, so a user's own folder of the
+# same name is never deleted.
+if [ -f "$PIN_DIR/PINNED_COMMIT" ]; then
+    rm -rf "$PIN_DIR"
+    echo "  Removed pinned copy: .$SCAFFOLD_NAME/"
+fi
 
 # --- Restore devcontainer.json from backup ---
 DEVCONTAINER="$TARGET_DIR/.devcontainer/devcontainer.json"
@@ -220,6 +265,7 @@ echo "Cleaning up empty directories..."
 for dir in \
     "$TARGET_DIR/subagents/environment_explorer" \
     "$TARGET_DIR/subagents/experiment_executor" \
+    "$TARGET_DIR/subagents/transcript_analyst/call_log" \
     "$TARGET_DIR/subagents/transcript_analyst" \
     "$TARGET_DIR/subagents/environment_mapper" \
     "$TARGET_DIR/subagents/variant_designer" \

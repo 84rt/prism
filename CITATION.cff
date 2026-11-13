@@ -6,5 +6,7 @@ authors:
   - family-names: Cooper-Thomson
     given-names: Louis
     email: louis@cbthomson.com
+version: "0.2.0"
+date-released: "2026-11-13"
 repository-code: "https://github.com/LAThomson/prism"
 license: Apache-2.0

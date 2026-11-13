@@ -327,7 +327,7 @@ def test_runner_process_error_becomes_credentials_exhausted(tmp_path, monkeypatc
     monkeypatch.setenv(runner.COST_FILE_ENV, str(cost))
     monkeypatch.setattr(runner, "ClaudeAgentOptions", _FakeOptions)
     monkeypatch.setattr(runner, "query", fake_query)
-    with pytest.raises(RuntimeError, match=r"credentials_exhausted \(route=direct, model=claude-opus-4-8\)"):
+    with pytest.raises(RuntimeError, match=rf"credentials_exhausted \(route=direct, model={runner.DEFAULT_MODEL}\)"):
         asyncio.run(runner.run_agent("p", "s", ["Bash"], [], "Experiment executor"))
     record = json.loads(Path(cost).read_text())
     assert record["failure_class"] == "credentials_exhausted" and record["route"] == "direct"

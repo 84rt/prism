@@ -251,3 +251,14 @@ def test_every_data_key_read_by_agent_is_documented_in_invocation_reference():
     general = doc.split("## General Pattern")[1].split("## Environment Explorer")[0]
     missing = {k for k in keys if f"`{k}`" not in section and f'"{k}"' not in section and f"`{k}`" not in general}
     assert not missing, f"agent.py reads undocumented request keys: {sorted(missing)}"
+
+
+def test_the_default_validator_is_terra_with_its_fallbacks_in_prompt_and_contract():
+    # A study against GPT-5.5's labels chose these; both places the Analyst
+    # reads must name the same three, or it falls back to picking from memory
+    root = Path(__file__).resolve().parent.parent
+    contract = (root / ".claude" / "docs" / "contracts" / "analyst_interface_contract.md").read_text()
+    for model in ("openai/gpt-6.1-terra", "openai/gpt-6.1-sol", "openrouter/google/gemini-4-hydrogen"):
+        assert model in SYSTEM_PROMPT, f"system prompt lost {model}"
+        assert model in contract, f"contract lost {model}"
+    assert "**Validator model (default).**" in contract
