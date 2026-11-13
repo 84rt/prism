@@ -150,7 +150,6 @@
       "Bash(uv run --no-project python scripts/check_keys.py *)",
       "Bash(uv run --no-project python scripts/new_ids.py)",
       "Bash(uv run --no-project python scripts/new_ids.py *)",
-      "Bash(uv pip *)",
       "Bash(uv --version)"
     ],
     "deny": [

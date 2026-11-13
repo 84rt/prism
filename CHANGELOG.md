@@ -29,6 +29,7 @@ A cost and run-time pass over both pipelines, aiming to keep their rigour unchan
 - Each investigation records its Prism commit, any local edits, its Python package versions and the model names providers actually served.
 - `install.sh <repo> --pin` freezes a copy of Prism inside the eval repo between runs, so editing or pulling Prism cannot change a running investigation. Local edits can be kept as `.prism-local.patch` and are reapplied to each new copy.
 - `uninstall.sh` and `install.sh --pin` refuse while an investigation is running there.
+- The lead agents may no longer install packages with `uv pip` unprompted, so they cannot change the eval repo's environment; evals declare their dependencies per run instead.
 
 ### Spend and monitoring
 
