@@ -617,7 +617,7 @@ Research scope unchanged since iteration 1.
 |---|---|---|---|---|
 | <condition> | ↑ / ↓ / ↔ | <≈ r (lo–hi) → ≈ r (lo–hi)> | <±pp> | <one line> |
 
-Batch size: <conditions × models × n × epochs> = <episodes> episodes; projected <hours> h at `max_parallel` <k>, <$> — within <what the agreed spend and deadline leave>.
+Batch size: <conditions × models × n × epochs> = <episodes> episodes; projected <hours> h at automatic sizing (or the agreed level), <$> — within <what the agreed spend and deadline leave>.
 
 - What a well-read safety researcher would expect: <one line>
 - Redesign gate: <passed — rows with headroom and resolvable n | redesigned because …>

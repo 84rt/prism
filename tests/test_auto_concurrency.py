@@ -52,6 +52,15 @@ def test_a_newcomer_takes_its_even_share_at_once():
     assert ee.target_in_flight(30, 20) == ee.AUTO_MIN_SHARED
 
 
+def test_automatic_runs_split_only_what_hand_set_runs_leave():
+    # Beside a hand-set run holding 15 of a capacity of 20, an automatic run
+    # takes the other 5; two automatic runs would split them
+    assert ee.target_in_flight(20, 1, hand_set_in_flight=15) == 5
+    assert ee.target_in_flight(20, 2, hand_set_in_flight=10) == 5
+    # A hand-set run holding everything still leaves a few, as when shared
+    assert ee.target_in_flight(20, 1, hand_set_in_flight=30) == ee.AUTO_MIN_SHARED
+
+
 def test_samples_in_flight_are_spread_over_conditions():
     assert ee.split_in_flight(30, 11) == (3, 10)
     assert ee.split_in_flight(10, 11) == (2, 5)
@@ -109,6 +118,16 @@ def test_live_runs_are_counted_and_dead_ones_pruned(tmp_path):
     assert not os.path.exists(os.path.join(registry, f"{dead.pid}.json"))
     ee.unregister_live_run(entry)
     assert ee.count_live_runs() == 1
+
+
+def test_a_hand_set_run_is_counted_with_the_samples_it_holds(tmp_path):
+    entry = ee.register_live_run(str(tmp_path), hand_set_in_flight=30)
+    assert ee.machine_load() == (0, 1, 30)
+    # An automatic run arrives (this test's parent process stands in for it)
+    _register_other(os.environ["PRISM_RUN_REGISTRY"], os.getppid())
+    assert ee.machine_load() == (1, 1, 30)
+    assert ee.count_live_runs() == 2
+    ee.unregister_live_run(entry)
 
 
 # --- The rolling launcher ---------------------------------------------------------
@@ -267,3 +286,6 @@ def test_a_requested_number_turns_automatic_sizing_off(tmp_path, fake_eval_scrip
     data = _run(tmp_path, fake_eval_script, monkeypatch, overrides={"epochs": 2, "max_parallel": 1, "max_connections": 3})
     assert "auto" not in data["concurrency"]
     assert "Automatic sizing" not in ee.render_report(data)
+    # It still registered while it ran, so other runs could leave its share
+    # alone, and left the registry when it ended
+    assert not os.listdir(os.environ["PRISM_RUN_REGISTRY"])

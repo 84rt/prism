@@ -79,3 +79,25 @@ def test_a_round_splits_across_analysts_only_above_twelve_conditions(doc):
     assert "120 scanner×condition passes" in text, f"{doc} lost the raised pass threshold"
     assert "twelve conditions" in text or "> 12 conditions" in text, f"{doc} lost the raised condition threshold"
     assert "24 scanner" not in text and "eight conditions" not in text, f"{doc} still states the old threshold"
+
+
+@pytest.mark.parametrize("skill", ["diagnose", "orchestrate"])
+def test_each_lead_leaves_concurrency_to_automatic_sizing(skill):
+    """Neither lead sets samples in flight by hand without an agreed reason.
+
+    A forensics run set ``max_parallel`` × ``max_connections`` itself for every
+    batch, which switched automatic sizing off and ran thirty at once beside
+    another run on a ten-core machine.
+
+    Parameters
+    ----------
+    skill : str
+        The lead skill's folder under ``.claude/skills``.
+
+    Returns
+    -------
+    None
+    """
+    text = (REPO_ROOT / ".claude" / "skills" / skill / "SKILL.md").read_text()
+    line = next(l for l in text.splitlines() if l.startswith("- **Parallelism"))
+    assert "automatically" in line, f"{skill} no longer defers to automatic sizing"

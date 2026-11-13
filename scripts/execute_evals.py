@@ -1290,28 +1290,34 @@ def machine_capacity(measured: dict[str, Any] | None, nproc: int | None, sandbox
     return max(1, limits[binding]), f"{binding} ({detail})"
 
 
-def target_in_flight(capacity: int, live_runs: int) -> int:
-    """This run's share of the machine: an even split with the other live runs.
+def target_in_flight(capacity: int, live_runs: int, hand_set_in_flight: int = 0) -> int:
+    """This run's share of the machine: an even split of what hand-set runs leave.
 
     A run never waits for room: arriving beside a run that holds everything,
     it takes its share at once (the memory headroom covers the overlap) and
-    the older run drops to its share at its next condition start.
+    the older run drops to its share at its next condition start. Runs whose
+    concurrency was set by hand keep their fixed level, so the automatic runs
+    split only what those leave.
 
     Parameters
     ----------
     capacity : int
         From `machine_capacity`.
     live_runs : int
-        Live runs on the machine, this one included.
+        Live automatically sized runs on the machine, this one included.
+    hand_set_in_flight : int
+        Samples in flight held by live hand-set runs.
 
     Returns
     -------
     int
-        E.g. 30 alone, 15 beside one other run, never below the floors.
+        E.g. 20 alone, 10 beside one other automatic run, 5 beside a
+        hand-set run holding 15; never below the floors.
     """
-    if live_runs <= 1:
+    free = capacity - hand_set_in_flight
+    if live_runs <= 1 and hand_set_in_flight <= 0:
         return max(capacity, AUTO_MIN_ALONE)
-    return max(capacity // live_runs, AUTO_MIN_SHARED)
+    return max(free // max(live_runs, 1), AUTO_MIN_SHARED)
 
 
 def split_in_flight(in_flight: int, unfinished: int) -> tuple[int, int]:
@@ -1363,13 +1369,16 @@ def _run_registry() -> str:
     return os.environ.get(RUN_REGISTRY_ENV) or os.path.expanduser("~/.cache/prism/live_runs")
 
 
-def register_live_run(run_dir: str) -> str:
+def register_live_run(run_dir: str, hand_set_in_flight: int | None = None) -> str:
     """Record this worker as a live run on the machine, for other runs' even split.
 
     Parameters
     ----------
     run_dir : str
         This run's directory.
+    hand_set_in_flight : int | None
+        Samples in flight for a run whose concurrency was set by hand, which
+        other runs leave alone; None for an automatically sized run.
 
     Returns
     -------
@@ -1379,7 +1388,8 @@ def register_live_run(run_dir: str) -> str:
     os.makedirs(_run_registry(), exist_ok=True)
     path = os.path.join(_run_registry(), f"{os.getpid()}.json")
     with open(path, "w") as f:
-        json.dump({"pid": os.getpid(), "pid_start": _pid_start_time(os.getpid()), "run_dir": run_dir}, f)
+        json.dump({"pid": os.getpid(), "pid_start": _pid_start_time(os.getpid()), "run_dir": run_dir,
+                   "hand_set_in_flight": hand_set_in_flight}, f)
     return path
 
 
@@ -1397,26 +1407,43 @@ def unregister_live_run(path: str) -> None:
         pass
 
 
-def count_live_runs() -> int:
-    """Live runs on this machine, this one included; dead entries are pruned.
+def machine_load() -> tuple[int, int, int]:
+    """The live runs on this machine, split by how they were sized; dead entries are pruned.
 
     Returns
     -------
-    int
-        E.g. 2 while another Prism run is executing evals; at least 1.
+    tuple[int, int, int]
+        ``(automatic runs, hand-set runs, samples in flight held by hand-set
+        runs)``: e.g. ``(1, 1, 30)`` for an automatic run beside a hand-set
+        run of 3 × 10.
     """
-    live = 0
+    automatic = hand_set_runs = hand_set_in_flight = 0
     for entry in glob.glob(os.path.join(_run_registry(), "*.json")):
         try:
             with open(entry) as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue
-        if _pid_alive(data.get("pid"), data.get("pid_start")):
-            live += 1
-        else:
+        if not _pid_alive(data.get("pid"), data.get("pid_start")):
             unregister_live_run(entry)  # a killed run never cleaned up
-    return max(live, 1)
+        elif data.get("hand_set_in_flight"):
+            hand_set_runs += 1
+            hand_set_in_flight += int(data["hand_set_in_flight"])
+        else:
+            automatic += 1
+    return automatic, hand_set_runs, hand_set_in_flight
+
+
+def count_live_runs() -> int:
+    """Live runs on this machine, this one included, however they were sized.
+
+    Returns
+    -------
+    int
+        E.g. 2 while another Prism run is executing evals; at least 1.
+    """
+    automatic, hand_set_runs, _ = machine_load()
+    return max(automatic + hand_set_runs, 1)
 
 
 def run_single(
@@ -2604,7 +2631,9 @@ def run_worker(run_dir: str) -> int:
         # --- Automatic sizing ----------------------------------------------
         # Only when neither knob was set by the request or the Executor: then
         # every condition start re-asks the machine's capacity and how many
-        # runs share it, so an older run shrinks when a newer one arrives
+        # runs share it, so an older run shrinks when a newer one arrives.
+        # A hand-set run registers too, with its fixed level, so automatic
+        # runs split only what it leaves
         conc = status.data["concurrency"]
         size_launch = None
         sizing: dict[str, int] = {}
@@ -2614,10 +2643,16 @@ def run_worker(run_dir: str) -> int:
             registry_entry = register_live_run(run_dir)
 
             def size_launch(unfinished: int) -> tuple[int, int]:
-                live = count_live_runs()
-                n = target_in_flight(capacity, live)
-                sizing.update(live_runs=live, in_flight=n)
+                automatic, hand_set_runs, hand_set = machine_load()
+                n = target_in_flight(capacity, max(automatic, 1), hand_set)
+                sizing.update(live_runs=max(automatic, 1) + hand_set_runs, in_flight=n)
+                if hand_set:
+                    sizing["hand_set_in_flight"] = hand_set
                 return split_in_flight(n, unfinished)
+        else:
+            # No more conditions run at once than there are to run
+            held = max(1, min(config.max_parallel, len(commands))) * conc["max_connections"]
+            registry_entry = register_live_run(run_dir, hand_set_in_flight=held)
 
         # Samples finished so far, for the lead's status view and the panel's
         # run tab, which would otherwise see a condition's count only at its end
@@ -2629,8 +2664,7 @@ def run_worker(run_dir: str) -> int:
         finally:
             stop_counting.set()
             counter.join()
-            if size_launch is not None:
-                unregister_live_run(registry_entry)
+            unregister_live_run(registry_entry)
         status.data["errors"].extend(report.errors)
         status.data["state"] = "interrupted" if report.status == "interrupted" else "completed"
         # Anything still pending (e.g. excluded before launch) keeps its state.
@@ -3411,7 +3445,11 @@ def render_report(data: dict[str, Any]) -> str:
         m = c.get("measured") or {}
         measured = (f"heaviest of {m.get('containers_seen')} preflight sandboxes {m.get('peak_container_mb')} MB, lowest free memory {m.get('min_free_mb')} MB"
                     if m.get("containers_seen") else "no preflight sandboxes measured")
-        starts = "; ".join(f"{l['pair']}: {l['in_flight']} in flight, {l['conditions_at_once']} at once × {l['connections']} (live runs {l['live_runs']})" for l in launches) or "none"
+        starts = "; ".join(
+            f"{l['pair']}: {l['in_flight']} in flight, {l['conditions_at_once']} at once × {l['connections']} (live runs {l['live_runs']}"
+            + (f", {l['hand_set_in_flight']} held by hand-set runs)" if l.get("hand_set_in_flight") else ")")
+            for l in launches
+        ) or "none"
         out.append(f"- **Automatic sizing**: capacity {auto['capacity']}, set by {auto['basis']}; {measured}. Condition starts: {starts}")
     if c.get("reductions"):
         out.append("- **Reductions applied during execution**: " + "; ".join(f"launch {r['batch']}: {r['previous_level']}→{r['new_level']} ({r['reason']})" for r in c["reductions"]))

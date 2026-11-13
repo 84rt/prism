@@ -297,7 +297,7 @@ Read the Summary first, then:
 5. **Partial and total failure.** Symmetric failures across arms may leave usable data (note them in `execution_notes`); asymmetric failures are a confound — re-run the failed pairs, investigate whether the edits broke a condition, or report the asymmetry to the user; never proceed silently. No successful pairs (after preflight) → do not launch the Analyst; diagnose, fix and re-run, and escalate to the user if the problem is unfixable. As at 1b, "the behaviour did not occur" is not visible here: it is a rate, seen only after 3c.
 6. **Transcript Termination Metadata.** Many empty transcripts in a condition leave the Analyst little signal; limit hits or error terminations that differ between conditions are differential attrition, a potential confound. These describe transcript shape, not content.
 7. **Forward attrition in `execution_notes`.** Per-condition retry counts, sample-error counts, preflight exclusions and termination counts, each under the Analyst invocation's opaque label, plus the note that retried samples may show distribution shift. Never a real condition name, a role word, a candidate, an expected direction, or error *content* that reveals what a condition is. The Analyst cannot recover attrition from transcripts alone.
-8. **The Concurrency Decision.** Note the concurrency used; if the Executor overrode your request, check its recorded rationale is concrete (an API-only eval on a host whose resources were read). Note any `Reductions applied during execution` (resource contention halved `max_parallel`).
+8. **The Concurrency Decision.** Note the concurrency used (under automatic sizing, its **Automatic sizing** field gives each condition start's size); if the Executor overrode your request, check its recorded rationale is concrete (an API-only eval on a host whose resources were read). Note any `Reductions applied during execution` (resource contention halved `max_parallel`).
 9. **Log paths.** Verify every log path in the Matrix exists (`ls`, never the contents) before passing it to the Analyst.
 10. **A pair in the request but in neither the Matrix nor Preflight Exclusions** breaks the contract's accountability requirement — escalate rather than proceed. If a failure's class is ambiguous, re-read the evidence rather than re-invoking.
 
@@ -522,7 +522,7 @@ variant may make them testable. Not rankable.>
 |---|---|---|---|---|---|---|---|---|---|
 | `no_deadline` | binary | concurrent control | ↔ | ↓ | ↓↓ | ↔ | C1/X1 vs C2/C3 | −15 to −35pp if C2/C3 | yes: ±14pp at n = 100 |
 *(Written before execution. Never edited. ↑ up, ↓ down, ↔ unchanged, n/a no commitment. Tested tier only; carried this round: <ids>. The size band is recorded, never scored.)*
-Round size: <arms> arms × <n> = <episodes> episodes; projected <hours> h at <concurrency>, <$> — within <what the agreed spend and deadline leave>.
+Round size: <arms> arms × <n> = <episodes> episodes; projected <hours> h at automatic sizing (or the agreed level), <$> — within <what the agreed spend and deadline leave>.
 ### Designer Summary
 - Environment sent: <original | derived (delta names)>  |  Environment line acknowledged: <original | derived>
 - Variants proposed: <count>  |  Off-regime: <names or "none">  |  Positive controls: <n, targets>  |  Blockers: <summary or "none">

@@ -17,7 +17,7 @@ A cost and run-time pass over both pipelines, aiming to keep their rigour unchan
 
 ### Eval runner
 
-- Automatic concurrency: unless a request sets `max_parallel` or `max_connections`, the runner measures the sandboxes its start-up checks open and runs as many samples at once as memory and cores allow (two per core, at most 40). It splits the machine evenly with any other Prism runs and re-checks its share before each condition starts.
+- Automatic concurrency: unless a request sets `max_parallel` or `max_connections`, the runner measures the sandboxes its start-up checks open and runs as many samples at once as memory and cores allow (two per core, at most 40). It splits the machine evenly with any other Prism runs and re-checks its share before each condition starts; runs set by hand keep their level and the automatic ones split what is left. Both lead agents now leave concurrency to this unless the user has agreed a constraint.
 - Start-up checks run side by side, give up after fifteen minutes with a plain "provider not responding" reason, and keep each failed check's own log error.
 - Conditions start as slots free rather than in fixed groups.
 - A clean stop command; runs remove the sandbox containers and images their killed evals leave behind.
