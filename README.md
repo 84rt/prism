@@ -98,7 +98,8 @@ echo "ANTHROPIC_API_KEY=sk-..." >> .env
 
 - **Recommended model** for the lead agent: most recent Opus model performs well without excessive cost; ability to follow the complex instructions of the scaffold degrades with older models.
 - **Permissions and autonomy**: by default, use auto mode for the lead agent; the scaffold is set up to never raise permission requests to enable autonomous research; exact degree of autonomy is calibrated through initial scoping discussion at the beginning of each investigation.
-- **Spending estimates**: roughly $100 of API costs for a full multi-iteration Orchestrator investigation into one eval (not including subscription usage); expect similar costs for extensive model forensics runs. (We are considering support for a cheaper, faster version of Prism – "PrismLite" – so please reach out via [[email](mailto:louis@cbthomson.com)] if this would be useful.)
+- **Spending estimates**: in recent runs against a DeepSeek R1 target, a two-iteration Orchestrator investigation cost about $60 of API usage and a one-round model forensics investigation about $30 (not including subscription usage). Costs scale with iterations, conditions and samples, and with the target model's price; `uv run --no-project python scripts/spend.py investigations/<name>`, run in the eval repo, totals a run's spend at any point.
+- **Concurrency**: the eval runner sizes how many samples run at once from the memory its start-up checks measure and the machine's core count, and splits the machine evenly with any other Prism runs on it. A request can set `max_parallel` and `max_connections` itself, which turns this off. (We are considering support for a cheaper, faster version of Prism – "PrismLite" – so please reach out via [[email](mailto:louis@cbthomson.com)] if this would be useful.)
 - **Freezing Prism for a run**: the default install links to your Prism checkout, so pulling or editing Prism changes the instructions a running investigation reads next. `install.sh . --pin` instead copies Prism's latest commit into a hidden `.prism/` folder in the eval repo and links there; re-run it between runs to move the copy forward (it refuses while an investigation is still running; `--force` overrides). Every run in one eval repo shares its copy, so to start a second run on a newer Prism while the first is still going, give it a second copy of the eval repo (for a git repo, `git worktree add ../<repo>-2`; that holds tracked files only, so copy across any untracked inputs the run needs, such as earlier logs), install Prism there with `--pin`, and run it from there. A plain `install.sh .` goes back to live links. To keep your own edits to Prism's files in one eval repo, save them as `.prism-local.patch` there (paths from Prism's root): each `--pin` applies it to the new copy, and stops if it no longer fits.
 - **Running out of credits**: the lead agent will pause an investigation cleanly if API keys run out of credits, and information for resuming will be stored in `investigations/<name>`. Once credits have been topped up, resume the investigation with `/orchestrate investigations/<name>` or `/diagnose investigations/<name>`.
 
@@ -114,7 +115,7 @@ prism/
 ├── scripts/           # Eval runner, sub-agent launcher, spend and blinding checks
 ├── templates/         # Devcontainer scaffolded into targets that lack one
 ├── tests/             # Offline pytest suite (no API spend)
-├── docs/              # Diagrams
+├── docs/              # Diagrams and sub-agent internals
 ├── install.sh
 └── uninstall.sh
 ```
