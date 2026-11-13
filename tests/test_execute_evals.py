@@ -234,6 +234,16 @@ def test_default_ceiling_and_override_sources(tmp_path):
     assert "Executor raised the runner ceiling via CLI override — API-only eval, 2 pairs" in report
 
 
+def test_overriding_only_connections_is_reported_as_an_override(tmp_path):
+    # Either key set by the request turns automatic sizing off, so the
+    # rationale must name the override rather than claim none was requested
+    path, _ = make_request(tmp_path, overrides={"max_connections": 8})
+    run_dir, _ = ee.prepare_run(path)
+    report = ee.render_report(ee.Status.load(run_dir).data)
+    assert "no override was requested" not in report
+    assert "automatic sizing was off" in report
+
+
 def test_unrecognised_override_is_noted(tmp_path):
     path, _ = make_request(tmp_path, overrides={"bogus": 1})
     run_dir, problems = ee.prepare_run(path)

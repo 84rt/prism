@@ -3421,10 +3421,10 @@ def render_report(data: dict[str, Any]) -> str:
         out.append("- **Rationale**: no override was requested, so the runner sized each condition start from preflight's sandbox measurements and the number of live runs on the machine, split evenly between them.")
     elif c.get("max_parallel_source") == "cli override":
         out.append(f"- **Rationale**: Executor raised the runner ceiling via CLI override — {c.get('rationale')}")
-    elif c.get("max_parallel_source") == "request overrides":
-        out.append(f"- **Rationale**: the request's `overrides.max_parallel` was applied as given; the runner's ceiling (max_parallel={DEFAULT_MAX_PARALLEL}, max_connections={DEFAULT_MAX_CONNECTIONS}) is the default only.")
+    elif "request overrides" in (c.get("max_parallel_source"), c.get("max_connections_source")):
+        out.append(f"- **Rationale**: the request's overrides were applied as given, so automatic sizing was off; any key it left unset kept the runner's starting value (max_parallel={DEFAULT_MAX_PARALLEL}, max_connections={DEFAULT_MAX_CONNECTIONS}).")
     else:
-        out.append(f"- **Rationale**: runner default ceiling for a shared host with one sandbox per sample (max_parallel={DEFAULT_MAX_PARALLEL}, max_connections={DEFAULT_MAX_CONNECTIONS}); no override was requested.")
+        out.append(f"- **Rationale**: the runner's starting values (max_parallel={DEFAULT_MAX_PARALLEL}, max_connections={DEFAULT_MAX_CONNECTIONS}); no override was requested.")
     out.append("")
 
     # --- Execution Summary -------------------------------------------------
