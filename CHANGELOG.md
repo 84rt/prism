@@ -9,7 +9,7 @@ A cost and run-time pass over both pipelines, aiming to keep their rigour unchan
 ### Changes that can affect findings
 
 - Sub-agents run on Claude Opus 5.5 with reasoning effort pinned at high.
-- The Transcript Analyst scans with Claude Haiku 5.5 by default, moving a scanner to Sonnet 5.5 only if Haiku fails that scanner's validation. Validation against a cross-family model is unchanged.
+- The Transcript Analyst scans with Claude Haiku 5.5 by default, moving a scanner to Sonnet 5.5 only if Haiku fails that scanner's validation. Cross-family validation is still required; its default validator is now GPT-6.1 Terra (GPT-6.1 Sol for a scanner Terra struggles with, Gemini 4 Hydrogen when the target is OpenAI's), which agreed closely with the previous GPT-5.5 labels at about a quarter of the cost.
 - In model forensics, one Analyst now covers rounds of up to about twelve conditions; larger rounds are split across Analysts as before.
 - The Orchestrator's instructions now consistently cap autonomous work at three iterations before it checks in with the user, unless the agreed scope says otherwise.
 - The Orchestrator surveys each candidate eval and model for headroom before designing experiments (`scripts/headroom.py`), and designs no iteration on a cell already at floor or ceiling.
