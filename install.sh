@@ -174,6 +174,7 @@ link_file "scripts/check_blinding.py"
 link_file "scripts/check_keys.py"
 link_file "scripts/new_ids.py"
 link_file "scripts/freeze_split.py"
+link_file "scripts/control_outcomes.py"
 
 # subagents
 link_file "subagents/__init__.py"
@@ -239,6 +240,9 @@ link_file ".claude/skills/orchestrate/SKILL.md"
 link_file ".claude/skills/orchestrate/experimental-design-patterns.md"
 link_file ".claude/skills/orchestrate/hypothesis-methodology.md"
 
+# .claude/skills/control
+link_file ".claude/skills/control/SKILL.md"
+
 # .claude/skills/diagnose
 link_file ".claude/skills/diagnose/SKILL.md"
 link_file ".claude/skills/diagnose/candidate-methodology.md"
@@ -270,6 +274,7 @@ GITIGNORE_ENTRIES=(
     "scripts/check_keys.py"
     "scripts/new_ids.py"
     "scripts/freeze_split.py"
+    "scripts/control_outcomes.py"
     ".claude/docs/investigator/orchestrator_analyst_guide.md"
     ".claude/docs/contracts/analyst_forensic_addendum.md"
     ".claude/docs/contracts/analyst_interface_contract.md"
@@ -287,6 +292,7 @@ GITIGNORE_ENTRIES=(
     ".claude/docs/investigator/orchestrator_responsibilities.md"
     ".claude/docs/references/scout_reference.md"
     ".claude/docs/investigator/subagent_invocation.md"
+    ".claude/skills/control/"
     ".claude/skills/diagnose/"
     ".claude/skills/orchestrate/"
     ".claude/settings.json"

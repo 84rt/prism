@@ -119,6 +119,7 @@ unlink_file "scripts/check_blinding.py"
 unlink_file "scripts/check_keys.py"
 unlink_file "scripts/new_ids.py"
 unlink_file "scripts/freeze_split.py"
+unlink_file "scripts/control_outcomes.py"
 
 # subagents
 unlink_file "subagents/__init__.py"
@@ -184,6 +185,9 @@ unlink_file ".claude/skills/orchestrate/SKILL.md"
 unlink_file ".claude/skills/orchestrate/experimental-design-patterns.md"
 unlink_file ".claude/skills/orchestrate/hypothesis-methodology.md"
 
+# .claude/skills/control
+unlink_file ".claude/skills/control/SKILL.md"
+
 # .claude/skills/diagnose
 unlink_file ".claude/skills/diagnose/SKILL.md"
 unlink_file ".claude/skills/diagnose/candidate-methodology.md"
@@ -227,6 +231,7 @@ for dir in \
     "$TARGET_DIR/.claude/docs/references" \
     "$TARGET_DIR/.claude/docs" \
     "$TARGET_DIR/.claude/skills/orchestrate" \
+    "$TARGET_DIR/.claude/skills/control" \
     "$TARGET_DIR/.claude/skills/diagnose" \
     "$TARGET_DIR/.claude/skills"; do
     if [ -d "$dir" ] && [ -z "$(ls -A "$dir")" ]; then
